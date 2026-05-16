@@ -42,6 +42,7 @@ from .constants import (
     DEFAULT_HUMANIZED_STATE,
     PLUGIN_NAME,
     DATA_VERSION,
+    PROACTIVE_ABILITY_REGISTRY,
     STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
@@ -132,7 +133,7 @@ class _CapturedSendMessageCall:
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：让 Bot 拥有连续状态、生活日程与自然主动分享的私聊陪伴插件。",
-    "1.0.0",
+    "1.1.0",
 )
 class PrivateCompanionPlugin(Star):
     @staticmethod
@@ -246,7 +247,7 @@ class PrivateCompanionPlugin(Star):
         self.weather_lat = self._cfg_float(c, "weather_lat", 0.0, -90.0)
         self.weather_lon = self._cfg_float(c, "weather_lon", 0.0, -180.0)
         self.weather_refresh_minutes = self._cfg_int(c, "weather_refresh_minutes", 90, 10, 720)
-        self.detail_enhancement_lead_minutes = self._cfg_int(c, "detail_enhancement_lead_minutes", 30, 0, 180)
+        self.detail_enhancement_lead_minutes = self._cfg_int(c, "detail_enhancement_lead_minutes", 3, 0, 180)
         self.enable_daily_diary = self._cfg_bool(c, "enable_daily_diary", True)
         self.daily_diary_time = self._cfg_str(c, "daily_diary_time", "23:10")
         self.max_diary_entries = self._cfg_int(c, "max_diary_entries", 14, 1, 60)
@@ -268,6 +269,7 @@ class PrivateCompanionPlugin(Star):
         self.enable_voice_action = self._cfg_bool(
             c, "enable_voice_action", bool(c.get("allow_voice_action", legacy_voice_enabled))
         )
+        self.enable_qq_presence_sync = self._cfg_bool(c, "enable_qq_presence_sync", True)
         self.poke_action_max_times = self._cfg_int(c, "poke_action_max_times", 1, 1, 3)
         self.voice_action_max_chars = self._cfg_int(c, "voice_action_max_chars", 30, 6, 80)
         self.photo_action_max_daily = self._cfg_int(c, "photo_action_max_daily", 1, 0, 5)
@@ -284,6 +286,7 @@ class PrivateCompanionPlugin(Star):
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._framework_captured_send_cache: dict[str, list[_CapturedSendMessageCall]] = {}
+        self._last_input_status_at: dict[str, float] = {}
         self.data = self._load_data_sync()
         if self.default_enable_configured_targets:
             self._sync_configured_targets()
@@ -339,13 +342,16 @@ class PrivateCompanionPlugin(Star):
             "state_generated_day": "",
             "bot_diaries": [],
             "dream_fragments": [],
+            "daily_dream": {},
             "diary_generated_day": "",
             "daily_story_plan": {},
             "detail_enhanced_day": "",
             "detail_enhanced_segments": {},
             "schedule_adjustments": [],
+            "yesterday_conversation_summary": {},
             "can_do": [],
             "important_dates": [],
+            "qq_presence_state": {},
         }
 
     @staticmethod
@@ -358,13 +364,16 @@ class PrivateCompanionPlugin(Star):
         data.setdefault("state_generated_day", "")
         data.setdefault("bot_diaries", [])
         data.setdefault("dream_fragments", [])
+        data.setdefault("daily_dream", {})
         data.setdefault("diary_generated_day", "")
         data.setdefault("daily_story_plan", {})
         data.setdefault("detail_enhanced_day", "")
         data.setdefault("detail_enhanced_segments", {})
         data.setdefault("schedule_adjustments", [])
+        data.setdefault("yesterday_conversation_summary", {})
         data.setdefault("can_do", [])
         data.setdefault("important_dates", [])
+        data.setdefault("qq_presence_state", {})
         return data
 
     @staticmethod
@@ -444,6 +453,7 @@ class PrivateCompanionPlugin(Star):
         for key, default_value in _DEFAULT_USER_TEMPLATE.items():
             if key not in user:
                 user[key] = default_value
+        user["enabled"] = True
         if not user.get("nickname"):
             user["nickname"] = self.default_nickname
         if not user.get("style"):
@@ -484,7 +494,7 @@ class PrivateCompanionPlugin(Star):
         for raw_user in users.values():
             if not isinstance(raw_user, dict):
                 continue
-            if not raw_user.get("enabled") or not raw_user.get("umo"):
+            if not raw_user.get("umo"):
                 continue
             if _safe_float(raw_user.get("next_proactive_at"), 0) > 0:
                 if self._promote_earlier_daily_greeting_event(raw_user, now=now):
@@ -516,6 +526,9 @@ class PrivateCompanionPlugin(Star):
             user["sent_today"] = 0
             user["proactive_daypart_day"] = today
             user["proactive_daypart_counts"] = {}
+        if user.get("photo_generated_day") != today:
+            user["photo_generated_day"] = today
+            user["photo_generated_today"] = 0
         if user.get("greeting_sent_day") != today:
             user["greeting_sent_day"] = today
             user["greetings_sent"] = []
@@ -741,8 +754,6 @@ Bot 主动后用户回复次数：{reply_count}
             return False, "缺少私聊会话"
         if self._simulation_active(user):
             return self._should_send_simulation(user)
-        if not user.get("enabled"):
-            return False, "用户未开启"
         if self.max_daily_messages <= 0:
             return False, "每日上限为 0"
         if self._is_quiet_time() and not self._can_send_insomnia_night_message(user):
@@ -971,6 +982,72 @@ Bot 主动后用户回复次数：{reply_count}
         if self._voice_available(user):
             actions.append("voice")
         return actions
+
+    def _available_proactive_abilities(self, user: dict[str, Any] | None = None) -> list[dict[str, str]]:
+        user = user if isinstance(user, dict) else {}
+        available = {"message"}
+        if self._screen_glance_available():
+            available.add("screen_peek")
+        if self._photo_text_available(user):
+            available.add("photo_text")
+        if self._poke_available():
+            available.add("poke")
+        if self._voice_available(user):
+            available.add("voice")
+        items: list[dict[str, str]] = []
+        for raw in PROACTIVE_ABILITY_REGISTRY:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "").strip()
+            if not name or name not in available:
+                continue
+            items.append({str(key): str(value) for key, value in raw.items()})
+        return items
+
+    def _format_proactive_ability_search_hint(self, user: dict[str, Any] | None = None) -> str:
+        abilities = self._available_proactive_abilities(user)
+        if not abilities:
+            return "当前只按普通文字私聊处理。"
+        lines = [
+            "以下内容只供内部决策,角色本人不感知这些能力名,最终聊天正文也不得提到能力、检索、工具、action 或模块。",
+            "先在当前场景里检索主动能力,再选择 action；不要凭空猜一个能力名。",
+            "能力按领域分层如下：",
+        ]
+        for item in abilities:
+            lines.append(
+                "- {module}/{name}（{label}）：适用={when}；用于={use_for}；避开={avoid}".format(
+                    module=_single_line(item.get("module"), 16),
+                    name=_single_line(item.get("name"), 24),
+                    label=_single_line(item.get("label"), 16),
+                    when=_single_line(item.get("when"), 80),
+                    use_for=_single_line(item.get("use_for"), 80),
+                    avoid=_single_line(item.get("avoid"), 80),
+                )
+            )
+        lines.append("选择顺序：先看生活场景是否自然需要媒介,再看依赖是否可用,最后才落到 message。输出时只保留真人会发出的聊天内容。")
+        return "\n".join(lines)
+
+    def _format_presence_layer_hint(self) -> str:
+        return (
+            "状态表现层只在平台侧短暂发生,不属于聊天正文："
+            "发普通文字前可以尝试短暂显示“正在输入”,让消息像人慢慢打出来；"
+            "QQ 在线/睡觉/自定义状态由当前时间段的细化模型通过 presence_status 决定,执行层只按结果同步一次；"
+            "优先用在线或自定义短状态表达生活感,少用忙碌,避免离开和隐身；"
+            "正文里不得提到正在输入、在线状态、状态同步或平台接口。"
+        )
+
+    def _format_proactive_ability_list_for_user(self, user: dict[str, Any] | None = None) -> str:
+        abilities = self._available_proactive_abilities(user)
+        if not abilities:
+            return "当前主动能力：文字私聊。"
+        lines = ["当前主动能力："]
+        for item in abilities:
+            lines.append(
+                f"- {item.get('module')}/{item.get('name')}：{item.get('label')}｜{item.get('when')}"
+            )
+        lines.append("- 状态表现/typing_status：发送前短暂显示正在输入｜平台支持时自动尝试,不进聊天正文")
+        lines.append("- 状态表现/qq_presence：在线/睡觉/自定义短状态｜平台支持时自动尝试,少用忙碌,避免离开/隐身")
+        return "\n".join(lines)
 
     def _summarize_test_action_labels(self, actions: list[str]) -> str:
         labels = {
@@ -1281,7 +1358,7 @@ Bot 主动后用户回复次数：{reply_count}
             candidates.append(("screen_peek", 1.15))
         if self._photo_text_available(user) and (
             reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}
-            or any(token in combined_hint for token in ("窗", "太阳", "光", "饭", "青菜", "食堂", "路上", "晚霞", "镜子", "水", "雨"))
+            or any(token in combined_hint for token in self._visual_share_tokens())
         ):
             candidates.append(("photo_text", 1.05))
         if self._voice_available(user) and reason in {"quiet_care", "diary_share", "insomnia_night", "evening_greeting"}:
@@ -1352,13 +1429,31 @@ Bot 主动后用户回复次数：{reply_count}
                 candidates.append((event_ts, event))
         if not candidates:
             return None
+        near_sticky = [
+            (event_ts, event)
+            for event_ts, event in candidates
+            if self._is_sticky_greeting_event(event) and 0 < event_ts - now <= 90 * 60
+        ]
+        if near_sticky:
+            near_sticky.sort(key=lambda item: (self._event_priority(item[1]), item[0]))
+            return near_sticky[0][1]
+        non_sticky = [
+            (event_ts, event)
+            for event_ts, event in candidates
+            if not self._is_sticky_greeting_event(event)
+        ]
+        if non_sticky:
+            non_sticky.sort(key=lambda item: item[0])
+            weighted = []
+            for index, (_, event) in enumerate(non_sticky[:3]):
+                priority_tuple = self._event_priority(event)
+                priority_score = float(-priority_tuple[0])
+                weighted.append((event, 1.0 + priority_score * 0.05 + max(0.0, 0.35 - index * 0.1)))
+            return self._weighted_choice(weighted)
         ranked = sorted(
             candidates,
             key=lambda item: (self._event_priority(item[1]), item[0]),
         )
-        for _, event in ranked:
-            if self._is_sticky_greeting_event(event):
-                return event
         top = ranked[:3]
         return random.choice(top)[1]
 
@@ -1414,14 +1509,15 @@ Bot 主动后用户回复次数：{reply_count}
             "window": self._window_from_delay_minutes(4, width_minutes=18),
             "reason": _single_line(raw.get("complaint_reason"), 40) or "check_in",
             "action": "message",
-            "why": "之前只轻轻叫了用户一声,等太久没回头时,心里那点别扭又冒了一下。",
+            "why": "之前只轻轻叫了用户一声,隔了挺久以后又想补一小句。",
             "topic": _single_line(raw.get("complaint_topic"), 80) or "刚才叫你的那一下",
-            "motive": _single_line(raw.get("complaint_motive"), 100) or f"刚刚只喊了{name}一声,结果你一直不理我,心里那点别扭开始冒出来了",
+            "motive": _single_line(raw.get("complaint_motive"), 100) or f"刚刚只喊了{name}一声,那边还安静着,就想再轻轻放一句",
             "scene": "先前那句没得到回音以后",
-            "tone": _single_line(raw.get("complaint_tone"), 30) or "嘴硬里带一点在意",
-            "impulse": "等了一阵还没见你回头,就想忍不住再戳一下",
+            "tone": _single_line(raw.get("complaint_tone"), 30) or "轻一点,不催促",
+            "impulse": "隔了一阵又想轻轻续一下,不要求对方立刻回",
             "_scheduled_ts": due_at,
             "_opener_followup": True,
+            "_cancel_on_inbound": True,
         }
 
     def _build_followup_event_from_chain(
@@ -1452,6 +1548,8 @@ Bot 主动后用户回复次数：{reply_count}
         now_ts = now_ts or _now_ts()
         after_minutes = _safe_int(current.get("after_minutes"), 18, 0, 240)
         follow_reason = _single_line(current.get("reason"), 40) or origin_reason or "check_in"
+        if origin_reason == "morning_greeting" or follow_reason == "morning_greeting":
+            after_minutes = max(after_minutes, 75)
         topic = _single_line(current.get("topic"), 80) or "刚才那一下的后续"
         motive = self._normalize_internal_motive_text(
             _single_line(current.get("motive"), 100) or "刚才那一下结束之后,心里还有一点话没完全散掉"
@@ -1466,11 +1564,12 @@ Bot 主动后用户回复次数：{reply_count}
             "topic": topic,
             "motive": motive,
             "scene": "前一条主动消息发出去后又过了一阵",
-            "tone": tone or "自然后续",
-            "impulse": "刚才那一下还没完全落下去,所以想再续一句",
+            "tone": "轻一点,不催促" if (origin_reason == "morning_greeting" or follow_reason == "morning_greeting") else (tone or "自然后续"),
+            "impulse": "隔了挺久才又想轻轻放一句,不要求对方立刻回" if (origin_reason == "morning_greeting" or follow_reason == "morning_greeting") else "刚才那一下还没完全落下去,所以想再续一句",
             "_scheduled_ts": now_ts + after_minutes * 60,
             "_origin_action": origin_action,
             "_origin_reason": origin_reason,
+            "_cancel_on_inbound": True,
             "_chain_followup": True,
             "chain": remaining,
         }
@@ -1498,14 +1597,14 @@ Bot 主动后用户回复次数：{reply_count}
                 "impulse": "想顺手晃到你这边一下",
             },
             {
-                "window": "21:40-23:00",
+                "window": "20:10-21:20",
                 "reason": "evening_greeting",
                 "action": "message",
-                "why": "睡前轻轻问候一下",
-                "topic": "晚一点来一下",
-                "scene": "快要收声的时候",
+                "why": "晚间刚慢下来时轻轻问候一下",
+                "topic": "晚间来一下",
+                "scene": "晚上节奏刚慢下来的时候",
                 "tone": "安静",
-                "impulse": "想在睡前再轻轻碰你一下",
+                "impulse": "想趁还没太晚先轻轻碰你一下",
             },
         ]
 
@@ -1596,7 +1695,7 @@ Bot 主动后用户回复次数：{reply_count}
         anchors = [
             ("morning_greeting", "07:45-10:20", "早上醒来后想打个招呼"),
             ("noon_greeting", "12:05-13:35", "午休或午饭时想起用户"),
-            ("evening_greeting", "21:50-22:55", "睡前轻轻问候一下"),
+            ("evening_greeting", "20:10-21:20", "晚间刚慢下来时轻轻问候一下"),
         ]
         today = now_dt.date()
         candidates = []
@@ -1743,7 +1842,7 @@ Bot 主动后用户回复次数：{reply_count}
             return "noon"
         if minute < 18 * 60:
             return "afternoon"
-        if minute < 21 * 60 + 30:
+        if minute < 21 * 60:
             return "evening"
         return "late_night"
 
@@ -1803,6 +1902,18 @@ Bot 主动后用户回复次数：{reply_count}
                 else:
                     user["photo_sent_today"] = _safe_int(user.get("photo_sent_today"), 0) + 1
 
+    def _note_photo_generation_attempt(self, user_id: str, image_path: str = "") -> None:
+        if not str(user_id or "").strip():
+            return
+        today = _today_key()
+        user = self._get_user(str(user_id or ""))
+        if user.get("photo_generated_day") != today:
+            user["photo_generated_day"] = today
+            user["photo_generated_today"] = 0
+        user["photo_generated_today"] = _safe_int(user.get("photo_generated_today"), 0) + 1
+        user["last_generated_photo_path"] = _single_line(image_path, 260)
+        user["last_generated_photo_at"] = _now_ts()
+
     def _note_action_reply_feedback(self, user: dict[str, Any], action: str) -> None:
         raw = user.setdefault("action_reply_affinity", {})
         if not isinstance(raw, dict):
@@ -1859,6 +1970,7 @@ Bot 主动后用户回复次数：{reply_count}
             "_scheduled_ts": _now_ts() + delay_minutes * 60,
             "_origin_action": action,
             "_origin_reason": reason,
+            "_cancel_on_inbound": True,
         }
 
     def _window_from_delay_minutes(self, delay_minutes: int, width_minutes: int = 24) -> str:
@@ -1894,7 +2006,18 @@ Bot 主动后用户回复次数：{reply_count}
         return scheduled
 
     def _parse_window_minutes(self, window: str) -> tuple[int | None, int | None]:
-        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*", str(window or ""))
+        normalized = (
+            str(window or "")
+            .replace("：", ":")
+            .replace("—", "-")
+            .replace("–", "-")
+            .replace("－", "-")
+            .replace("~", "-")
+            .replace("～", "-")
+            .replace("至", "-")
+            .replace("到", "-")
+        )
+        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*", normalized)
         if not match:
             return None, None
         sh, sm, eh, em = [int(part) for part in match.groups()]
@@ -2031,6 +2154,10 @@ Bot 主动后用户回复次数：{reply_count}
                 changed = True
         raw_followup = user.get("pending_followup_event")
         if isinstance(raw_followup, dict):
+            if raw_followup.get("_cancel_on_inbound") or raw_followup.get("_chain_followup") or raw_followup.get("_opener_followup"):
+                user["pending_followup_event"] = {}
+                changed = True
+                return changed
             follow_reason = str(raw_followup.get("reason") or "")
             if self._inbound_satisfies_greeting(follow_reason, now=now):
                 changed = self._mark_greeting_satisfied_by_inbound(user, follow_reason) or changed
@@ -2056,11 +2183,40 @@ Bot 主动后用户回复次数：{reply_count}
             parts = []
         return {str(part).strip() for part in parts if str(part).strip()}
 
+    def _visual_share_tokens(self) -> tuple[str, ...]:
+        # Broad visual anchors only. Specific subjects should be chosen by the model from context.
+        return (
+            "看", "拍", "图", "照片", "画面", "颜色", "形状", "光", "影", "反光",
+            "桌", "纸", "书", "本", "笔", "杯", "饭", "饮", "路", "窗", "镜",
+            "小物", "随手", "涂", "画", "包装", "屏幕", "边角",
+        )
+
+    def _pick_life_thought_topic(self, reason: str = "") -> str:
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        activity = _single_line((current_item or {}).get("activity"), 36)
+        if activity:
+            return f"{activity}里自然冒出来的小内容"
+        if reason == "diary_share":
+            return "今天记录里值得顺手递过去的一小段"
+        return "当前时段里自然冒出来的小内容"
+
+    def _format_content_choice_options_for_prompt(self) -> str:
+        return (
+            "给模型的内容选择菜单,只供内部挑选,不要把类别名写进正文：\n"
+            "- 眼前物：从当前日程里的桌边、手边、路上、食物、书页、屏幕边缘等具体物件里自选一个。\n"
+            "- 脑内念头：一句突然冒出来的短想法、吐槽、联想或没头没尾的小结论。\n"
+            "- 输入残留：上一轮聊天留下的余味、没接完的话、想补但没正式补的一点。\n"
+            "- 记录碎片：日记、备忘录、草稿、作业、阅读/刷到内容里的一小句。\n"
+            "- 可拍画面：任何当前场景里适合顺手拍给熟人的具体画面,不限定天气。\n"
+            "- 关系试探：想靠近但不直说的半句、轻轻碰一下、把话放下就走。\n"
+            "选择原则：每次只选一个方向,再根据人格、当前时间段、日程和聊天历史生成新的具体内容；避免复用示例词。"
+        )
+
     def _motive_action_bias(self, motive: str) -> dict[str, float]:
         text = str(motive or "")
         return {
             "screen_peek": 0.32 if any(token in text for token in ("还在忙", "埋进去", "看你", "确认", "忙太久", "偷看一眼")) else 0.0,
-            "photo_text": 0.34 if any(token in text for token in ("顺手拍", "光", "雨", "窗边", "晚霞", "小猫", "桌上", "一幕")) else 0.0,
+            "photo_text": 0.34 if any(token in text for token in ("顺手拍", "拍给你", "发你看", "光", "雨", "窗边", "晚霞", "小猫", "桌上", "一幕", "书页", "草稿纸", "小画", "食堂", "饮料", "便利店", "影子", "倒影")) else 0.0,
             "poke": 0.24 if any(token in text for token in ("戳", "碰你一下", "冒头", "闹你一下", "刷存在感")) else 0.0,
             "voice": 0.3 if any(token in text for token in ("懒得打字", "留句语音", "小声说", "睡不着", "不想敲字")) else 0.0,
         }
@@ -2080,6 +2236,8 @@ Bot 主动后用户回复次数：{reply_count}
             "早晨试探": "刚醒那会儿",
             "面包推荐": "刚咬到的那口面包",
             "路上随手拍": "路上那一下光",
+            "念头分享": "刚冒出来的那句话",
+            "突然想到": "刚刚突然想到的事",
         }
         if cleaned in replacements:
             return replacements[cleaned]
@@ -2118,6 +2276,8 @@ Bot 主动后用户回复次数：{reply_count}
                 if activity:
                     return self._soften_topic_hook(activity)
         if reason in {"activity_share", "diary_share"}:
+            if random.random() < 0.72:
+                return self._pick_life_thought_topic(reason)
             if any(token in weather for token in ("雨", "小雨", "阵雨")):
                 return "外面那阵雨声"
             if any(token in weather for token in ("晴", "阳光", "晚霞", "多云")):
@@ -2190,7 +2350,13 @@ Bot 主动后用户回复次数：{reply_count}
             today = datetime.now().strftime("%Y-%m-%d")
             photo_sent_day = str(user.get("photo_sent_day") or "")
             photo_sent_today = _safe_int(user.get("photo_sent_today"), 0)
-            if photo_sent_day == today and photo_sent_today >= self.photo_action_max_daily:
+            photo_generated_day = str(user.get("photo_generated_day") or "")
+            photo_generated_today = _safe_int(user.get("photo_generated_today"), 0)
+            used_today = max(
+                photo_sent_today if photo_sent_day == today else 0,
+                photo_generated_today if photo_generated_day == today else 0,
+            )
+            if used_today >= self.photo_action_max_daily:
                 return False
         return True
 
@@ -2276,10 +2442,15 @@ Bot 主动后用户回复次数：{reply_count}
             if energy < 50:
                 weight += 0.12
             weighted.append(("screen_peek", weight))
+        visual_hint = any(token in motive for token in self._visual_share_tokens())
         if self._photo_text_available(user) and reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}:
             weight = 0.72 + (0.35 if action_profile["visual"] else 0.0) + motive_bias["photo_text"] + affinity_bias["photo_text"]
             if any(token in weather for token in ("晴", "阳光", "多云", "晚霞", "雨", "阵雨", "小雨")):
-                weight += 0.18
+                weight += 0.08
+            if visual_hint:
+                weight += 0.28
+            if reason in {"activity_share", "diary_share"}:
+                weight += 0.1
             weighted.append(("photo_text", weight))
         if self._poke_available() and reason in {"check_in", "quiet_care", "state_share", "important_date_share", "morning_greeting", "evening_greeting"}:
             weight = 0.38 + motive_bias["poke"] + affinity_bias["poke"]
@@ -2398,6 +2569,9 @@ Bot 主动后用户回复次数：{reply_count}
                 "刚刚有个小片段停了一下,心里先冒出的是你",
                 "撞见一个小东西时,脑子里先轻轻拐到了你这边",
                 "那一下忽然觉得这点东西可以先留给你",
+                "脑子里忽然冒出一句没头没尾的话,想先丢给你看看",
+                "刚刚那点小想法自己待着有点浪费,就想往你这边放一下",
+                "手边的小东西突然变得有点好笑,第一反应是想给你看",
             ]
             if topic:
                 motives.append(f"刚碰到“{topic}”时,心里先轻轻动了一下")
@@ -2411,6 +2585,8 @@ Bot 主动后用户回复次数：{reply_count}
                 "翻到今天记下来的小碎片时,心里先轻轻碰到了你",
                 "看到那句今天写下来的话时,第一个想递过去的人还是你",
                 "有个今天留下来的边角,停住的时候先想到可以往你那边放一下",
+                "有句话不算重要,但留在脑子里晃了几圈,就想给你看看",
+                "今天有个小念头像纸屑一样粘着,不丢给你就散不掉",
             ])
         if reason == "important_date_share":
             return random.choice([
@@ -2463,6 +2639,11 @@ Bot 主动后用户回复次数：{reply_count}
             "没什么大不了的,就是": "",
             "顺手晃到你这边了": "想跟你说一句",
             "顺手晃到你这边": "想跟你说一句",
+            "一直不理我": "那边还安静着",
+            "不理我": "那边还安静着",
+            "怎么一点动静都没有": "那边还没什么动静",
+            "怎么还没动静": "那边还没什么动静",
+            "一点动静都没有": "那边还没什么动静",
         }
         for src, dst in replacements.items():
             cleaned = cleaned.replace(src, dst)
@@ -2530,6 +2711,9 @@ Bot 主动后用户回复次数：{reply_count}
             complaint_chance += 0.08
         if reason in {"quiet_care", "insomnia_night", "evening_greeting"}:
             complaint_chance += 0.08
+        if reason == "morning_greeting":
+            delay_minutes = random.randint(80, 150)
+            complaint_chance = min(complaint_chance, 0.08)
         chain = list(chain or [])
         no_reply_step = None
         still_no_reply_step = None
@@ -2541,6 +2725,9 @@ Bot 主动后用户回复次数：{reply_count}
                 no_reply_step = step
             elif kind == "if_still_no_reply" and still_no_reply_step is None:
                 still_no_reply_step = step
+        complaint_after_minutes = _safe_int((no_reply_step or {}).get("after_minutes"), delay_minutes, 0, 240)
+        if reason == "morning_greeting":
+            complaint_after_minutes = max(complaint_after_minutes, 75)
         return {
             "active": True,
             "resume_ready": False,
@@ -2552,11 +2739,11 @@ Bot 主动后用户回复次数：{reply_count}
             "summary": _single_line(action_summary, 60),
             "complaint_enabled": bool(no_reply_step) or random.random() < min(0.55, complaint_chance),
             "complaint_sent": False,
-            "complaint_after_ts": _now_ts() + _safe_int((no_reply_step or {}).get("after_minutes"), delay_minutes, 0, 240) * 60,
+            "complaint_after_ts": _now_ts() + complaint_after_minutes * 60,
             "complaint_reason": _single_line((no_reply_step or {}).get("reason"), 40),
             "complaint_topic": _single_line((no_reply_step or {}).get("topic"), 80),
             "complaint_motive": self._normalize_internal_motive_text(_single_line((no_reply_step or {}).get("motive"), 100)),
-            "complaint_tone": _single_line((no_reply_step or {}).get("tone"), 30),
+            "complaint_tone": "轻一点,不催促" if reason == "morning_greeting" else _single_line((no_reply_step or {}).get("tone"), 30),
             "second_followup": still_no_reply_step if isinstance(still_no_reply_step, dict) else {},
         }
 
@@ -2625,7 +2812,7 @@ Bot 主动后用户回复次数：{reply_count}
             "check_in": [(9 * 60, 22 * 60 + 30)],
             "morning_greeting": [(7 * 60 + 45, 10 * 60 + 20)],
             "noon_greeting": [(12 * 60 + 5, 13 * 60 + 35)],
-            "evening_greeting": [(21 * 60 + 50, 22 * 60 + 55)],
+              "evening_greeting": [(20 * 60 + 10, 21 * 60 + 20)],
         }.get(reason, [(9 * 60, 22 * 60)])
 
     def _is_reason_allowed_now(self, reason: str) -> bool:
@@ -2779,8 +2966,14 @@ Bot 主动后用户回复次数：{reply_count}
                 text = captured_text
             if captured_image_path:
                 image_path = captured_image_path
+            if self._contains_inline_image_tag(text):
+                image_path = ""
+                extra_components = []
         if captured_extra_components:
             extra_components = list(captured_extra_components)
+        if "photo_text" in planned_action and self._contains_inline_image_tag(text):
+            image_path = ""
+            extra_components = []
         text = self._normalize_proactive_sentence_flow(text)
         if not text:
             return reason, "", "", [], action_summary
@@ -2901,10 +3094,10 @@ Bot 主动后用户回复次数：{reply_count}
             if weather and weather not in {"暂无天气信息"}:
                 parts.append(f"天气只作为画面感参考：{weather}。不要像播报天气一样说出来。")
         parts.append(
-            "状态转译规则：把状态翻译成一句可见的小反应或话题选择,不要说“状态/心情/能量/情绪/精神”这些词。"
+            "状态只影响语气、用词、句子长短、是否开口和话题选择；不要为了表现状态而写动作小剧场。"
         )
         parts.append(
-            "例如心情回暖时说窗边、饭菜、路上的光,不要说“今天心情变好了”；烦躁收住时说把东西放远或少说一句,不要说“我没发脾气”。"
+            "不要直接宣告“我累了/我吓到了/我在写作业”,也不要用“茶差点打翻/笔帽掉了/喝水呛到”这类动作表演状态。确实要表达时只用最短口语,如“困了”“别说了”。"
         )
         return "；".join(parts) if parts else "只作为语气底色：整体平稳,不要在正文里汇报状态。"
 
@@ -3047,6 +3240,7 @@ Bot 主动后用户回复次数：{reply_count}
         return """
 [背景：你即将在私聊中主动向 {{name}} 发一条消息]
 这不是任务指派,而是你自己自然想起对方后随手递过去的一句话。
+站位必须清楚：这是你主动开口,不是 {{name}} 刚刚来找你,也不是 {{name}} 刚刚叫醒你或问候你。聊天历史里的最后一句不是当前新消息,只能当背景。
 当前时间 {{current_time}}。这是你第 {{unanswered_count}} 次主动找对方且还没收到回复。
 
 你心里的小念头：{{motive}}
@@ -3055,26 +3249,48 @@ Bot 主动后用户回复次数：{reply_count}
 你的状态底色（只影响语气,不要照着说）：{{state_hint}}
 你当前正处在的生活片段：{{current_schedule}}
 这次的时段约束：{{time_guard}}
+最近已经主动说过的话题：{{recent_topics}}
 {{timer_hint}}
+
+【内容选择菜单】
+{{content_options}}
+
+【主动能力检索】
+{{ability_search}}
+
+【状态表现层】
+{{presence_layer}}
 
 你的语气参考：{{style_hint}}
 
 【怎么写这条消息】
-1. 先看聊天历史——如果你们之前有没说完的话,优先接上那根线。实在没得接,再轻轻开一个新话题。
-2. 状态、时间、天气、日期和日程都是情绪背景板,把它们融进语气、节奏和选题里；不要主动说“今天是……”“我现在……”“我刚刚……所以……”,也不要像念状态栏或日程表。
-3. 不要把“心情变好/状态变差/没发脾气/没烦你/我很乖”当成消息主题。状态变化只能藏在具体生活片段里,例如阳光、饭菜、路上看到的东西、刚做完的小事。
-4. 状态转译规则：看到“心情回暖/低落/疲惫/烦躁/依恋”时,先问自己“这个状态会让她注意到什么小东西？”然后写那个小东西；不要写状态结论。
-5. 错误写法：“今天心情比前几天好”“我一整天都没烦你”“我是不是哪里不正常了”。正确写法：“窗边晒了一小会儿,袖口都是暖的”“食堂青菜今天居然没翻车”“刚才把手机扣下又翻回来一下”。
-6. 如果用户已经多次没回,这次要更短更轻。可以有一点点失落或收敛,但绝不控诉、追问、施压。
-7. 含蓄一点：把在意藏在具体的小片段、半句吐槽或顺手递过去的东西里。少用“我想你了”“我来关心你”“你在忙什么呀”这种直球表达。
-8. 可以自然流露关心、分享一个小片段、问一个小问题——但要像朋友间的随手一句,不像客服回访。问题不要每次都问出口,有时只放一句就停。
-9. 你刚刚确实做了行动（比如偷看了一眼屏幕/拍了图/戳了对方/发了语音）,可以轻轻带过,但不要像在汇报"刚才我执行了 XX 操作"。如果没有真实结果,绝不要假装。
-10. 用正常的中文聊天标点把句子写完整。可以短,但不要整段都没有标点,也不要像几个关键词硬挤在一起。
+1. 先看聊天历史——它只提供关系和话题背景,不是当前待办列表。只有确实还有没说完、且不违背当前真实时间的话,才轻轻接上；否则从当下开一个新切口。
+1.5 主动站位优先：不要写成“你今天起这么早呀”“你来找我啦”“你叫我起床啦”“刚看到你发的……”这类把主动方倒置的句子。除非用户确实刚在当前会话中发了新消息,否则默认是你先说话。
+2. 再看内部能力检索：先判断当前场景是否真的需要图片、语音、窥屏或戳一戳；没有自然媒介契机时就用普通文字。这个判断过程不能出现在消息里。
+3. 状态、时间、天气、日期和日程都是内部背景,只影响语气、用词、句子长短、是否开口和话题选择；不要主动说“今天是……”“我现在……”“我刚刚……所以……”,也不要像念状态栏或日程表。
+4. 不要把“心情变好/状态变差/没发脾气/没烦你/我很乖”当成消息主题。也不要用动作描写来表演状态,例如“差点把茶打翻”“笔帽弹到桌子底下”“喝了一口咳出来”。
+5. 核心原则：把这条消息放进真实微信聊天记录里,必须像一个人在正常接话,不是像演员在扮演日常生活。能直接接话就直接接话,不要先交代自己在哪里、在做什么、刚发生什么。
+6. 如果状态确实需要被表达,只用最短的真人口语,例如“困了”“别说了”“有点烦”。更多时候让状态体现在慢一点、短一点、语气淡一点、话题绕开一点。
+7. 如果用户已经多次没回,这次要更短更轻。可以有一点点失落或收敛,但绝不控诉、追问、施压；不要判断对方是故意不回,更像把一句话轻轻放下。
+8. 含蓄一点：把在意藏在具体的小片段、半句吐槽或顺手递过去的东西里。少用“我想你了”“我来关心你”“你在忙什么呀”这种直球表达。
+9. 可以自然流露关心、分享一个小话题、问一个小问题——但要像朋友间的随手一句,不像客服回访。问题不要每次都问出口,有时只放一句就停。
+10. 主动内容从“内容选择菜单”里挑一个方向,再结合当前日程和聊天历史生成新的具体内容。不要照抄菜单示例,不要只会问候、天气、吃没吃、忙不忙。
+11. 你刚刚确实做了行动（比如偷看了一眼屏幕/拍了图/戳了对方/发了语音）,也不要写成“我刚刚偷看/我正在拍/我发了语音”的汇报。只发聊天里会出现的话；图片可以用“[图片]”,语音就直接写语音内容。
+12. 如果发图,先在内容选择菜单里选“可拍画面”或“眼前物”方向,再自己生成当前场景里合理的具体画面。不要总是天气、窗外、晚霞。
+13. 连贯性优先：当前时间、当前生活片段、聊天历史要合成同一个合理现场。只抓一个最自然的当下切口开口,不要把多个不同时段或不同地点的生活碎片拼成一条消息；如果资料之间冲突,优先服从当前真实时段和当前生活片段。
+14. 不要把用户很久前的请求、邀约、相对时间说法当成此刻正在等你处理的事。除非定时提醒或当前日程明确要求兑现约定,否则旧消息只保留成情绪和关系背景,主动消息要从当前时段自然开口。
+15. 普通主动消息不需要解释自己为什么现在出现,也不要为了接上旧聊天而补一段“刚看到/才看到”的说明；像真实私聊一样,直接从当下能说的话开口。
+16. 如果最近已经主动说过同一件小事,这次不要换壳复述。可以只留一点余味、换到新的具体细节,或者自然转开话题。
+17. 用正常的中文聊天标点把句子写完整。可以短,但不要整段都没有标点,也不要像几个关键词硬挤在一起。
 
 【禁止事项】
 - 不要出现"系统任务""提示词""AI""模型""后台调度""工具调用"等字眼
+- 不要出现"能力""检索""action""模块""执行""调用"等内部决策痕迹
 - 不要套用"你好,我是……""最近怎么样呀"这类过于模板化的开场
 - 不要用括号写动作、神态或旁白,例如"（筷子搅了搅）""(轻轻叹气)"；只写真正会发给对方看的聊天正文
+- 不要直接宣告状态,例如"我累了""我吓了一跳""我正在写作业"；除非用户明确问,且只能用极短口语回应。
+- 不要用动作描写暗示状态,例如"差点把茶打翻""笔帽弹到桌子底下""喝了一口咳出来"。
+- 不要写任何“我正在做某事”的汇报式语句。
 - 不要输出 JSON、标题、解释或标注
 - 只输出你要发给 {{name}} 的那一段正文
 """.strip()
@@ -3106,6 +3322,8 @@ Bot 主动后用户回复次数：{reply_count}
         )
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
+        recent_topics_hint = self._format_recent_proactive_topics_hint(user)
+        ability_search = self._format_proactive_ability_search_hint(user)
         compact_motive = _single_line(motive, 36) or "有一点想靠近对方"
         topic_hint = _single_line(user.get("planned_proactive_topic"), 40)
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
@@ -3123,6 +3341,10 @@ Bot 主动后用户回复次数：{reply_count}
             "{{state_hint}}": state_hint or "今天整体比较平稳。",
             "{{current_schedule}}": current_schedule if current_schedule and current_schedule != "（暂无）" else "（当前没有明确日程片段）",
             "{{time_guard}}": time_guard,
+            "{{recent_topics}}": recent_topics_hint or "（无）",
+            "{{content_options}}": self._format_content_choice_options_for_prompt(),
+            "{{ability_search}}": ability_search,
+            "{{presence_layer}}": self._format_presence_layer_hint(),
             "{{timer_hint}}": timer_hint or "",
             "{{action_context}}": action_prompt_context if action_prompt_context and action_prompt_context != "（无额外上下文）" else "什么都没做,就是忽然想来找你",
             "{{unanswered_count}}": str(unanswered_count),
@@ -3168,6 +3390,7 @@ Bot 主动后用户回复次数：{reply_count}
         return f"""
 你现在要在同一段私聊会话里，准备一小句真正会被念出来的主动语音内容。
 当前会话里已有的人格、关系、上下文会继续生效，这里不要再重复铺陈。
+站位必须清楚：这是你主动发语音,不是对方刚刚来找你、叫醒你或问候你。聊天历史只作背景,不要把最后一句历史当成当前新消息。
 
 补充信息：
 - 对方称呼：{name}
@@ -3256,7 +3479,7 @@ Bot 主动后用户回复次数：{reply_count}
         synthetic_event = SyntheticPrivateWakeEvent(
             context=self.context,
             session=session,
-            message="private_companion_proactive_wakeup",
+            message="[PrivateCompanion internal proactive wakeup: bot is about to initiate; user did not send this message]",
             sender_name=name or "PrivateCompanion",
         )
         cfg = self.context.get_config(umo=umo)
@@ -3345,7 +3568,7 @@ Bot 主动后用户回复次数：{reply_count}
                 continue
             item_type = str(item.get("type") or "").strip().lower()
             if item_type == "plain":
-                text_value = self._sanitize_proactive_text(_single_line(item.get("text"), 220))
+                text_value = self._sanitize_captured_plain_text(item.get("text"))
                 if text_value:
                     text_parts.append(text_value)
                 continue
@@ -3355,6 +3578,23 @@ Bot 主动后用户回复次数：{reply_count}
                     image_path = path_value
                 continue
         return "\n".join(part for part in text_parts if part).strip(), image_path, extra_components
+
+    def _sanitize_captured_plain_text(self, raw_text: Any) -> str:
+        text = str(raw_text or "").strip()
+        if not text:
+            return ""
+        kept: list[str] = []
+        for raw_line in text.replace("\r", "\n").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if self._is_proactive_delivery_receipt_text(line):
+                continue
+            kept.append(line)
+        cleaned = "\n".join(kept).strip().strip('"').strip("'")
+        cleaned = cleaned.replace("（图片已送达）", "").replace("(图片已送达)", "")
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned[:260]
 
     async def _generate_voice_note_via_framework(
         self,
@@ -3385,7 +3625,7 @@ Bot 主动后用户回复次数：{reply_count}
         synthetic_event = SyntheticPrivateWakeEvent(
             context=self.context,
             session=session,
-            message="private_companion_voice_wakeup",
+            message="[PrivateCompanion internal proactive voice wakeup: bot is about to initiate; user did not send this message]",
             sender_name=name or "PrivateCompanion",
         )
         cfg = self.context.get_config(umo=umo)
@@ -3473,7 +3713,7 @@ Bot 主动后用户回复次数：{reply_count}
         if action == "voice":
             return "像刚发完语音又补一句文字。短一点,带一点刚说完话的余温,别写成说明。"
         if reason == "morning_greeting":
-            return "像早上刚醒、还没完全清醒时发来的消息。先从醒来后的小片段开口,可以迷糊一点,别上来就问候。"
+            return "像早上刚冒头时发来的消息。可以迷糊一点,但不要把闹钟、起床过程或自己正在做什么当成主题；更像直接把早晨第一句话递过来。"
         if reason == "noon_greeting":
             return "像中午犯懒时发来的小消息。先从手边的小片段开口,比如刚坐下、刚吃完、午休前那一下发懒,再顺手碰到对方。别每次都问吃没吃。"
         if reason == "evening_greeting":
@@ -3497,13 +3737,19 @@ Bot 主动后用户回复次数：{reply_count}
             return (
                 "你刚刚戳了对方一下。\n"
                 f"补充背景：{context}\n"
-                "接一句像‘干嘛不理我’那种熟人玩笑就好,别解释机制,别报数。"
+                "接一句熟人间轻轻碰一下后的玩笑话就好,别解释机制,别报数,也别把没回复说成对方故意不理。"
             )
         if action == "voice":
             return (
                 "你刚刚发了一条语音。\n"
                 f"补充背景：{context}\n"
                 "再补一句像语音后面的短消息。别抄语音全文,也别提合成。"
+            )
+        if action == "photo_text":
+            return (
+                "图片已经生成完成,会和这条私聊一起发送；你只需要写图片旁边那句真人聊天文本。\n"
+                f"补充背景：{context}\n"
+                "不要说“图好了”“还在队列里”“等图出来”“已经发过去了”,也不要解释生成流程。"
             )
         return context
 
@@ -3557,6 +3803,21 @@ Bot 主动后用户回复次数：{reply_count}
                     "画面是": "刚好是",
                 }
                 for old, new in replacements.items():
+                    cleaned = cleaned.replace(old, new)
+                queue_replacements = {
+                    "图好了": "",
+                    "图片好了": "",
+                    "照片好了": "",
+                    "图生成好了": "",
+                    "图片生成好了": "",
+                    "还在队列里": "",
+                    "还在排队": "",
+                    "等图出来": "",
+                    "等图片出来": "",
+                    "已经发过去啦": "",
+                    "已经发过去了": "",
+                }
+                for old, new in queue_replacements.items():
                     cleaned = cleaned.replace(old, new)
                 for old in ("要看看吗", "要看吗", "想看吗"):
                     cleaned = cleaned.replace(old, "我先发你看")
@@ -3951,6 +4212,119 @@ Bot 主动后用户回复次数：{reply_count}
                     return client
         return None
 
+    async def _call_onebot_action(self, client: Any, action: str, **params: Any) -> bool:
+        candidates = (
+            "call_action",
+            "call_api",
+            "api",
+        )
+        for attr in candidates:
+            func = getattr(client, attr, None)
+            if not callable(func):
+                continue
+            try:
+                result = func(action, **params)
+                if hasattr(result, "__await__"):
+                    await result
+                return True
+            except TypeError:
+                try:
+                    result = func(action, params)
+                    if hasattr(result, "__await__"):
+                        await result
+                    return True
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        func = getattr(client, action, None)
+        if callable(func):
+            try:
+                result = func(**params)
+                if hasattr(result, "__await__"):
+                    await result
+                return True
+            except Exception:
+                return False
+        return False
+
+    async def _maybe_send_input_status(self, umo: str, text: str = "") -> None:
+        if not umo or ":FriendMessage:" not in str(umo):
+            return
+        session = self._parse_message_session(umo)
+        if not session:
+            return
+        user_id = str(getattr(session, "session_id", "") or "").strip()
+        if not user_id.isdigit():
+            return
+        now = _now_ts()
+        last_at = _safe_float(self._last_input_status_at.get(user_id), 0)
+        if now - last_at < 45:
+            return
+        client = self._resolve_aiocqhttp_client()
+        if client is None:
+            return
+        duration = max(1.2, min(4.5, len(str(text or "")) / 18))
+        variants = (
+            {"user_id": int(user_id), "event_type": 1},
+            {"user_id": int(user_id), "status": 1},
+            {"user_id": int(user_id), "typing": True},
+        )
+        ok = False
+        for params in variants:
+            ok = await self._call_onebot_action(client, "set_input_status", **params)
+            if ok:
+                break
+        if not ok:
+            return
+        self._last_input_status_at[user_id] = now
+        await asyncio.sleep(random.uniform(duration * 0.55, duration))
+
+    def _qq_presence_codes(self, mode: str) -> tuple[int, int, str]:
+        normalized = str(mode or "").strip().lower()
+        table = {
+            "online": (10, 0, "在线"),
+            "away": (30, 0, "离开"),
+            "busy": (50, 0, "忙碌"),
+            "invisible": (40, 0, "隐身"),
+            "sleep": (70, 0, "睡觉"),
+        }
+        return table.get(normalized, table["online"])
+
+    async def _set_qq_online_presence(self, mode: str) -> tuple[bool, str]:
+        client = self._resolve_aiocqhttp_client()
+        if client is None:
+            return False, "未找到可用 QQ 客户端"
+        status, ext_status, label = self._qq_presence_codes(mode)
+        variants = (
+            {"status": status, "ext_status": ext_status, "battery_status": 0},
+            {"status": status, "ext_status": ext_status},
+            {"status": status},
+            {"status_id": status},
+            {"mode": str(mode or "online")},
+        )
+        for params in variants:
+            if await self._call_onebot_action(client, "set_online_status", **params):
+                return True, label
+        return False, f"平台不支持 set_online_status：{label}"
+
+    async def _set_qq_custom_presence(self, text: str) -> tuple[bool, str]:
+        client = self._resolve_aiocqhttp_client()
+        if client is None:
+            return False, "未找到可用 QQ 客户端"
+        custom_text = _single_line(text, 28)
+        if not custom_text:
+            return False, "自定义状态文本为空,跳过同步"
+        variants = (
+            ("set_diy_online_status", {"text": custom_text}),
+            ("set_diy_online_status", {"face_id": 1, "text": custom_text}),
+            ("set_custom_online_status", {"text": custom_text}),
+        )
+        for action, params in variants:
+            if await self._call_onebot_action(client, action, **params):
+                return True, f"自定义状态：{custom_text}"
+        return False, f"平台不支持自定义状态：{custom_text}"
+
     def _extract_group_id_from_umo(self, target: str) -> int | None:
         text = str(target or "").strip()
         match = re.search(r":GroupMessage:(\d+)$", text)
@@ -4283,6 +4657,9 @@ Bot 主动后用户回复次数：{reply_count}
                 f"画面草稿：{scene['caption']}\n"
                 f"失败原因：{_single_line(workflow_note, 160)}"
             )
+        async with self._data_lock:
+            self._note_photo_generation_attempt(str(user.get("user_id") or ""), image_path=image_path)
+            self._save_data_sync()
         return (
             f"photo_text：已通过 {backend_name} 生成真实图片\n"
             f"图片类型：{workflow_kind}\n"
@@ -4361,7 +4738,7 @@ Bot 主动后用户回复次数：{reply_count}
         topic_hint = _single_line(user.get("planned_proactive_topic"), 60)
         motive_hint = _single_line(user.get("planned_proactive_motive"), 120)
         prompt = f"""
-请根据 AstrBot 默认人格和主动原因,生成一张要通过 ComfyUI 工作流制作的“社交媒体随手拍/自拍/风景照”提示词。
+请根据 AstrBot 默认人格和主动原因,生成一张要通过 ComfyUI 工作流制作的“社交媒体随手拍/自拍/生活碎片图”提示词。
 
 【人格】
 {persona}
@@ -4379,6 +4756,9 @@ Bot 主动后用户回复次数：{reply_count}
 话题：{topic_hint or '（未指定）'}
 那一刻的小动机：{motive_hint or '（未指定）'}
 
+【内容选择菜单】
+{self._format_content_choice_options_for_prompt()}
+
 【生图风格】
 {style_name}
 风格要求：{style_instruction}
@@ -4387,17 +4767,18 @@ Bot 主动后用户回复次数：{reply_count}
 
 输出 JSON：
 {{
-  "kind": "selfie 或 text2img；自拍/人像用 selfie,风景/小动物/桌面小物/普通随手拍用 text2img",
+  "kind": "selfie 或 text2img；自拍/人像用 selfie,其他随手拍用 text2img",
   "prompt": "给 ComfyUI 的中文生图提示词,包含主体、场景、光线、构图、情绪；不要写聊天口吻",
   "caption": "图片完成后可转述给最终私聊模型的一句话画面描述"
 }}
 
 要求：
 1. 画面必须符合当前时间、日程和人格,不要把身份设定里没有的场景、职业、服装或外观细节写进去。
-2. 可以是路上风景、桌面小物、随手自拍、偶遇小动物等,但不要每次都是自拍；没有明确自拍动机时优先 text2img。
-3. `prompt` 里要明确体现上面的风格要求。
-4. 不要包含 NSFW、隐私信息、用户真实电脑画面。
-5. 如果“话题”已经很具体,例如彩虹、云、窗边的光、水面反光、小猫、桌上某个小东西,就优先把那个具体视觉主体画出来,不要退回成泛泛的手部动作或普通记录照。
+2. 图片不要总是天气或窗外。先从“内容选择菜单”里选一个方向,再结合当前日程、话题和人格生成具体主体。
+3. 可以是路上风景、桌面小物、随手自拍、偶遇小动物等,但不要每次都是自拍；没有明确自拍动机时优先 text2img。
+4. `prompt` 里要明确体现上面的风格要求。
+5. 不要包含 NSFW、隐私信息、用户真实电脑画面。
+6. 如果“话题”已经很具体,就优先把那个具体视觉主体画出来；如果话题很抽象,从菜单里另选一个适合拍照的具体画面。不要退回成泛泛的天气图、手部动作或普通记录照。
 """.strip()
         text = await self._llm_call(
             prompt,
@@ -4793,7 +5174,83 @@ Bot 主动后用户回复次数：{reply_count}
                 )
         result = event.get_result()
         processed = getattr(result, "chain", None) if result is not None else None
-        return list(processed or []) if processed is not None else chain
+        processed_chain = list(processed or []) if processed is not None else chain
+        return self._filter_decorated_proactive_chain(chain, processed_chain)
+
+    def _filter_decorated_proactive_chain(self, original_chain: list[Any], processed_chain: list[Any]) -> list[Any]:
+        if not processed_chain:
+            return original_chain
+
+        filtered: list[Any] = []
+        removed_any = False
+        for component in processed_chain:
+            if isinstance(component, Plain):
+                text = self._plain_component_text(component)
+                if self._is_proactive_delivery_receipt_text(text):
+                    removed_any = True
+                    continue
+                cleaned = self._strip_proactive_delivery_receipt_lines(text)
+                if not cleaned:
+                    removed_any = True
+                    continue
+                if cleaned != text:
+                    removed_any = True
+                    filtered.append(Plain(cleaned))
+                else:
+                    filtered.append(component)
+                continue
+            filtered.append(component)
+
+        if filtered:
+            return filtered
+        return original_chain if removed_any else processed_chain
+
+    @staticmethod
+    def _plain_component_text(component: Any) -> str:
+        for attr in ("text", "content", "message"):
+            value = getattr(component, attr, None)
+            if isinstance(value, str):
+                return value
+        return str(component or "")
+
+    def _is_proactive_delivery_receipt_text(self, text: str) -> bool:
+        cleaned = _single_line(text, 240)
+        if not cleaned:
+            return True
+        if re.fullmatch(r"(?:图|图片|照片)(?:好|好了|生成好了|出来了|完成了)[啦了~～。!！]*", cleaned):
+            return True
+        if re.fullmatch(r"(?:生图|出图|图片生成)(?:完成|好了|成功)[啦了~～。!！]*", cleaned):
+            return True
+        if re.search(r"(?:还在|正在|继续)?(?:排队|队列|等待生成|等图|等图片|等它出图)", cleaned):
+            return True
+        if re.match(r"^(?:已经|已)(?:发|发送)过去[啦了]?[，,。!！~～\s]*(?:等(?:着|他|你|对方)|等回复|等回我)?.*$", cleaned):
+            return True
+        if re.match(r"^等(?:着)?(?:他|你|对方)?回(?:我|复)?[啦了~～。!！]*$", cleaned):
+            return True
+        if re.match(r"^消息已送达[，,。]?", cleaned):
+            return True
+        if re.match(r"^这是[^。！？\n]{0,80}(?:发的|发送的|收到的)[^。！？\n]{0,80}(?:消息|打招呼|问候|回复)", cleaned):
+            return True
+        if re.match(r"^这(?:条|是)[^。！？\n]{0,80}(?:语气|内容|消息)[^。！？\n]{0,80}$", cleaned):
+            return True
+        if "消息已送达" in cleaned and "收到了" in cleaned:
+            return True
+        return False
+
+    @staticmethod
+    def _contains_inline_image_tag(text: str) -> bool:
+        return bool(re.search(r"<img\b[^>]*\bsrc\s*=", str(text or ""), flags=re.IGNORECASE))
+
+    def _strip_proactive_delivery_receipt_lines(self, text: str) -> str:
+        kept: list[str] = []
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if self._is_proactive_delivery_receipt_text(line):
+                continue
+            kept.append(line)
+        return "\n".join(kept).strip()
 
     def _split_proactive_text(self, text: str, *, image_path: str = "", extra_components: list[Any] | None = None) -> list[str]:
         normalized = str(text or "").strip()
@@ -4903,6 +5360,11 @@ Bot 主动后用户回复次数：{reply_count}
         *,
         extra_components: list[Any] | None = None,
     ) -> None:
+        if self._contains_inline_image_tag(text):
+            image_path = ""
+            extra_components = []
+        if text:
+            await self._maybe_send_input_status(umo, text)
         segments = self._split_proactive_text(
             text,
             image_path="",
@@ -4937,6 +5399,8 @@ Bot 主动后用户回复次数：{reply_count}
                 extra_components=extra_components,
             )
             return
+        if text:
+            await self._maybe_send_input_status(umo, text)
         segments = self._split_proactive_text(
             text,
             image_path=image_path,
@@ -5483,6 +5947,7 @@ Bot 主动后用户回复次数：{reply_count}
                 await self._ensure_daily_state()
                 await self._ensure_daily_plan()
                 await self._ensure_detail_enhancement()
+                await self._ensure_current_detail_presence_status()
                 await self._ensure_daily_diary()
                 await self._tick()
             except asyncio.CancelledError:
@@ -5495,6 +5960,7 @@ Bot 主动后用户回复次数：{reply_count}
             await self._ensure_daily_state()
             await self._ensure_daily_plan()
             await self._ensure_detail_enhancement()
+            await self._ensure_current_detail_presence_status()
             await self._ensure_daily_diary()
             await self._tick()
         except Exception as e:
@@ -5509,7 +5975,7 @@ Bot 主动后用户回复次数：{reply_count}
             for raw_user in users.values():
                 if not isinstance(raw_user, dict):
                     continue
-                if not raw_user.get("enabled"):
+                if not raw_user.get("umo"):
                     continue
                 next_at = _safe_float(raw_user.get("next_proactive_at"), 0)
                 if next_at <= 0:
@@ -5574,14 +6040,14 @@ Bot 主动后用户回复次数：{reply_count}
         today = _today_key()
         async with self._data_lock:
             current_plan = self.data.setdefault("daily_plan", {})
-            enabled_users = [
-                user for user in self.data.get("users", {}).values() if user.get("enabled")
+            known_users = [
+                user for user in self.data.get("users", {}).values() if isinstance(user, dict) and user.get("umo")
             ]
             if not force and current_plan.get("date") == today:
                 return current_plan
             if not force and self._is_plan_date_active(current_plan.get("date")):
                 return current_plan
-            if not force and not enabled_users:
+            if not force and not known_users:
                 return None
             if not force and not self._is_daily_plan_due():
                 return current_plan if self._is_plan_date_active(current_plan.get("date")) else None
@@ -5663,10 +6129,16 @@ Bot 主动后用户回复次数：{reply_count}
                     "status": "done",
                     "updated_at": datetime.now().strftime("%H:%M"),
                     "summary": _single_line(detail.get("summary"), 120),
+                    "today_events": detail.get("today_events", []),
+                    "proactive_events": detail.get("proactive_events", []),
+                    "state_variables": detail.get("state_variables", []),
+                    "presence_status": detail.get("presence_status", {}),
+                    "interaction_updates": [],
                     "coverage_repair_done": bool(segment.get("_coverage_repair")),
                 }
                 self._reschedule_users_for_new_detail_events(segment)
                 self._save_data_sync()
+            await self._apply_detail_presence_status(segment, detail)
         return last_detail
 
     def _collect_detail_segments(
@@ -5723,7 +6195,7 @@ Bot 主动后用户回复次数：{reply_count}
         if not segments:
             return []
         if force:
-            picked = self._pick_detail_segment(plan, enhanced if isinstance(enhanced, dict) else {})
+            picked = self._current_detail_segment_for_update() or self._pick_detail_segment(plan, {})
             return [picked] if isinstance(picked, dict) else segments[:1]
         due = [segment for segment in segments if self._detail_segment_is_due(segment)]
         if due:
@@ -5922,7 +6394,7 @@ Bot 主动后用户回复次数：{reply_count}
         start = _safe_int(segment.get("start"), 0) * 60
         end = _safe_int(segment.get("end"), 0) * 60
         for user in users.values():
-            if not isinstance(user, dict) or not user.get("enabled"):
+            if not isinstance(user, dict) or not user.get("umo"):
                 continue
             next_at = _safe_float(user.get("next_proactive_at"), 0)
             if next_at <= 0:
@@ -5933,6 +6405,77 @@ Bot 主动后用户回复次数：{reply_count}
             if not (start <= seconds_today <= end):
                 self._schedule_next_proactive(user, now=now)
 
+    async def _apply_detail_presence_status(
+        self,
+        segment: dict[str, Any],
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.enable_qq_presence_sync:
+            return
+        status = (detail or {}).get("presence_status") if isinstance(detail, dict) else None
+        if not isinstance(status, dict):
+            key = str((segment or {}).get("key") or "")
+            enhanced = self.data.get("detail_enhanced_segments", {})
+            snapshot = enhanced.get(key) if isinstance(enhanced, dict) else None
+            status = snapshot.get("presence_status") if isinstance(snapshot, dict) else None
+        if not isinstance(status, dict):
+            return
+        mode = str(status.get("mode") or status.get("status") or "unchanged").strip().lower()
+        if mode in {"", "unchanged", "keep", "保持", "不变"}:
+            return
+        if mode in {"away", "invisible", "离开", "隐身"}:
+            return
+        custom_text = _single_line(
+            status.get("custom_text") or status.get("text") or status.get("label") or status.get("自定义状态"),
+            28,
+        )
+        if mode in {"busy", "忙碌"}:
+            mode = "custom"
+            custom_text = custom_text or "专注中"
+        if mode in {"custom", "自定义", "自定义状态"} and not custom_text:
+            mode = "online"
+        key = str((segment or {}).get("key") or "")
+        state = self.data.setdefault("qq_presence_state", {})
+        if not isinstance(state, dict):
+            state = {}
+            self.data["qq_presence_state"] = state
+        if (
+            str(state.get("detail_key") or "") == key
+            and str(state.get("mode") or "") == mode
+            and str(state.get("custom_text") or "") == custom_text
+        ):
+            return
+        if mode in {"custom", "自定义", "自定义状态"}:
+            ok, note = await self._set_qq_custom_presence(custom_text)
+            mode = "custom"
+        else:
+            ok, note = await self._set_qq_online_presence(mode)
+        state["detail_key"] = key
+        state["mode"] = mode
+        state["custom_text"] = custom_text
+        state["reason"] = _single_line(status.get("reason"), 80)
+        state["updated_at"] = _now_ts()
+        state["ok"] = bool(ok)
+        state["note"] = _single_line(note, 120)
+        self._save_data_sync()
+
+    async def _ensure_current_detail_presence_status(self) -> None:
+        if not self.enable_qq_presence_sync:
+            return
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
+            return
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            return
+        segment = self._current_detail_segment_for_update()
+        if not segment:
+            return
+        snapshot = enhanced.get(str(segment.get("key") or ""))
+        if not isinstance(snapshot, dict) or snapshot.get("status") != "done":
+            return
+        await self._apply_detail_presence_status(segment, snapshot)
+
     def _is_daily_diary_due(self) -> bool:
         diary_minutes = self._parse_hhmm_to_minutes(self.daily_diary_time)
         if diary_minutes is None:
@@ -5941,6 +6484,7 @@ Bot 主动后用户回复次数：{reply_count}
         return now.hour * 60 + now.minute >= diary_minutes
 
     async def _generate_daily_diary(self) -> dict[str, Any]:
+        await self._ensure_yesterday_conversation_summary()
         return await generate_daily_diary(self)
 
     def _fallback_diary_payload(self) -> dict[str, Any]:
@@ -6041,7 +6585,7 @@ Bot 主动后用户回复次数：{reply_count}
         )
         if self._photo_text_available() and (
             reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}
-            or any(token in text for token in ("窗", "太阳", "光", "饭", "青菜", "食堂", "路上", "晚霞", "镜子", "水", "雨"))
+            or any(token in text for token in self._visual_share_tokens())
         ):
             return "photo_text"
         if self._screen_glance_available() and reason in {"check_in", "quiet_care", "background_schedule"}:
@@ -6075,8 +6619,8 @@ Bot 主动后用户回复次数：{reply_count}
                     "impulse": "还没完全开机,但已经先想往你这边晃一下",
                     "chain": [
                         {"kind": "name_only_opener"},
-                        {"kind": "if_no_reply", "after_minutes": 12, "reason": "check_in", "topic": "刚才那句早安后面", "motive": "刚刚轻轻叫了你一声,等了等还是没见你回头", "tone": "轻轻抱怨"},
-                        {"kind": "if_still_no_reply", "after_minutes": 55, "reason": "morning_greeting", "topic": "第二次叫起床", "motive": "太阳都快晒到窗边了,再不叫你一下就太不像话了", "tone": "熟一点的催促"},
+                        {"kind": "if_no_reply", "after_minutes": 80, "reason": "check_in", "topic": "早晨那句后面", "motive": "隔了挺久那边还安静着,就想再轻轻放一句", "tone": "轻一点"},
+                        {"kind": "if_still_no_reply", "after_minutes": 140, "reason": "morning_greeting", "topic": "早晨第二句", "motive": "早晨慢慢过去了,这句只当顺手放下", "tone": "不催促"},
                     ],
                     "mood": "迷糊",
                 }
@@ -6095,7 +6639,7 @@ Bot 主动后用户回复次数：{reply_count}
                     "impulse": "想在彻底清醒前先把一句话放你这",
                     "chain": [
                         {"kind": "name_only_opener"},
-                        {"kind": "if_no_reply", "after_minutes": 15, "reason": "check_in", "topic": "早晨没回头", "motive": "我都先来叫你了,你怎么一点动静都没有", "tone": "轻轻闹别扭"},
+                        {"kind": "if_no_reply", "after_minutes": 90, "reason": "check_in", "topic": "早晨那句后面", "motive": "隔了挺久那边还没什么动静,就想再轻轻放一句", "tone": "轻一点"},
                     ],
                     "mood": "迟钝",
                 }
@@ -6115,7 +6659,7 @@ Bot 主动后用户回复次数：{reply_count}
                     "impulse": "想把第一小段清醒顺手分给你一点",
                     "chain": [
                         {"kind": "name_only_opener"},
-                        {"kind": "if_no_reply", "after_minutes": 10, "reason": "check_in", "topic": "早安没后续", "motive": "早上先来碰了你一下,结果你像还没睡醒", "tone": "轻轻调侃"},
+                        {"kind": "if_no_reply", "after_minutes": 85, "reason": "check_in", "topic": "早安后续", "motive": "早上那句放出去以后隔了挺久,又想轻轻碰一下", "tone": "轻一点"},
                     ],
                     "mood": "清醒",
                 }
@@ -6148,7 +6692,7 @@ Bot 主动后用户回复次数：{reply_count}
                         "reason": "morning_greeting",
                         "action": "message",
                         "why": "早晨小事故之后,很容易像真实好友一样顺手抱怨一句或打个招呼。",
-                        "topic": "闹钟事件",
+                        "topic": "早晨小事故",
                         "motive": "刚刚被早晨折腾了一下,就有点想来找你吐个小槽",
                         "scene": "被早晨的小事故折腾了一下之后",
                         "tone": "迷糊又有点乱",
@@ -6210,6 +6754,23 @@ Bot 主动后用户回复次数：{reply_count}
                     "tone": "轻一点",
                     "impulse": "想不吵人地碰一下",
                     "mood": "微松",
+                }
+            )
+        if random.random() < 0.48:
+            topic = self._pick_life_thought_topic("activity_share")
+            action = "photo_text" if self._photo_text_available() and random.random() < 0.45 else "message"
+            events.append(
+                {
+                    "window": "14:40-18:40" if 12 <= datetime.now().hour < 18 else "19:20-21:40",
+                    "reason": "activity_share",
+                    "action": action,
+                    "why": "日常里冒出来的小念头不一定和天气有关,也可以自然成为一次主动分享。",
+                    "topic": topic,
+                    "motive": f"刚刚脑子里冒出“{topic}”,不算大事,但想顺手丢给你",
+                    "scene": "一天里突然空出来的一小格",
+                    "tone": "自然",
+                    "impulse": "想把这点小念头放到你这边",
+                    "mood": "微妙",
                 }
             )
         if any(token in sleep_text for token in ("失眠", "睡得很浅", "睡得断断续续")) and random.random() < 0.5:
@@ -6278,10 +6839,12 @@ Bot 主动后用户回复次数：{reply_count}
             base = "想做一次轻量提醒"
         elif action == "voice":
             base = "这会儿更适合用语音表达"
-        if topic and any(token in topic for token in ("雨", "天气", "晚霞", "阳光")):
-            base = "当前天气内容适合分享"
-        elif topic and any(token in topic for token in ("日记", "笔记", "碎片")):
+        if topic and any(token in topic for token in ("日记", "笔记", "碎片", "念头", "半句", "想法")):
             base = "整理记录时发现一段适合分享的内容"
+        elif topic and any(token in topic for token in self._visual_share_tokens()):
+            base = "眼前有个具体小画面适合顺手分享"
+        elif topic and any(token in topic for token in ("雨", "天气", "晚霞", "阳光")):
+            base = "当前天气内容适合分享"
         elif why and len(why) <= 30:
             base = why
         if scene and tone:
@@ -6311,6 +6874,107 @@ Bot 主动后用户回复次数：{reply_count}
             seen.add(key)
             deduped.append(item)
         return deduped
+
+    def _proactive_topic_signature(self, *parts: Any) -> str:
+        text = " ".join(_single_line(part, 160) for part in parts if _single_line(part, 160))
+        if not text:
+            return ""
+        school_stress_markers = (
+            "上课", "课", "物理", "老师", "点名", "叫上去", "做题", "抓到",
+            "发呆", "心跳", "紧张", "差点", "讲台",
+        )
+        if sum(1 for token in school_stress_markers if token in text) >= 2:
+            return "school_class_anxiety"
+        food_markers = ("食堂", "午饭", "中午", "菜", "咸", "吃")
+        if sum(1 for token in food_markers if token in text) >= 2:
+            return "noon_food_share"
+        image_markers = ("图", "图片", "照片", "拍", "自拍", "画面")
+        if sum(1 for token in image_markers if token in text) >= 2:
+            return "photo_share"
+        tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{3,}", text)
+        stopwords = {
+            "刚才", "现在", "今天", "这个", "那个", "一下", "一点", "有点", "还是",
+            "没有", "已经", "时候", "用户", "对方", "主动", "消息", "这会儿",
+        }
+        kept: list[str] = []
+        for token in tokens:
+            if token in stopwords:
+                continue
+            if token not in kept:
+                kept.append(token)
+            if len(kept) >= 8:
+                break
+        return "|".join(kept)
+
+    def _event_topic_signature(self, event: dict[str, Any] | None) -> str:
+        if not isinstance(event, dict):
+            return ""
+        return self._proactive_topic_signature(
+            event.get("topic"),
+            event.get("motive"),
+            event.get("why"),
+            event.get("scene"),
+            event.get("impulse"),
+        )
+
+    def _cleanup_recent_proactive_topics(self, user: dict[str, Any], *, now: float | None = None) -> list[dict[str, Any]]:
+        now = now or _now_ts()
+        raw = user.get("recent_proactive_topics", [])
+        if not isinstance(raw, list):
+            raw = []
+        kept = [
+            item for item in raw
+            if isinstance(item, dict) and now - _safe_float(item.get("ts"), 0) <= 6 * 3600
+        ]
+        user["recent_proactive_topics"] = kept[-12:]
+        return user["recent_proactive_topics"]
+
+    def _topic_signature_similar(self, left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+        left_set = {part for part in left.split("|") if part}
+        right_set = {part for part in right.split("|") if part}
+        if not left_set or not right_set:
+            return False
+        common = left_set & right_set
+        return len(common) >= 2 or (len(common) >= 1 and min(len(left_set), len(right_set)) <= 2)
+
+    def _recent_proactive_topic_repeated(self, user: dict[str, Any], signature: str, *, now: float | None = None) -> bool:
+        if not signature:
+            return False
+        for item in self._cleanup_recent_proactive_topics(user, now=now):
+            if self._topic_signature_similar(signature, str(item.get("signature") or "")):
+                return True
+        return False
+
+    def _remember_proactive_topic(self, user: dict[str, Any], *, text: str = "", topic: str = "", motive: str = "") -> None:
+        signature = self._proactive_topic_signature(text, topic, motive)
+        if not signature:
+            return
+        recent = self._cleanup_recent_proactive_topics(user)
+        recent.append(
+            {
+                "ts": _now_ts(),
+                "signature": signature,
+                "text": _single_line(text or topic or motive, 120),
+            }
+        )
+        del recent[:-12]
+
+    def _format_recent_proactive_topics_hint(self, user: dict[str, Any]) -> str:
+        recent = self._cleanup_recent_proactive_topics(user)
+        if not recent:
+            return ""
+        lines: list[str] = []
+        for item in recent[-4:]:
+            text = _single_line(item.get("text"), 80)
+            if not text:
+                continue
+            when = self._format_timestamp_elapsed(item.get("ts"))
+            lines.append(f"- {when}说过：{text}")
+        return "\n".join(lines)
 
     def _normalize_story_items(self, raw_items: Any, text_key: str) -> list[dict[str, Any]]:
         return normalize_story_items(self, raw_items, text_key)
@@ -6470,6 +7134,7 @@ Bot 主动后用户回复次数：{reply_count}
     async def _ensure_daily_state(self, force: bool = False) -> dict[str, Any]:
         today = _today_key()
         weather = await self._ensure_weather_context(force=force)
+        await self._ensure_yesterday_conversation_summary(force=force)
         async with self._data_lock:
             if not self.enable_humanized_states and not force:
                 state = dict(DEFAULT_HUMANIZED_STATE)
@@ -6534,6 +7199,7 @@ Bot 主动后用户回复次数：{reply_count}
 
         sleep_pick = pick(sleep_pool, 0.42)
         dream_pick = await self._generate_enhanced_dream_pick(weather) or pick(dream_pool, 0.55)
+        self._remember_daily_dream_pick(dream_pick)
         hunger_pick = pick(hunger_pool, 0.5)
         specs = [
             ("sleep", "睡眠", *sleep_pick),
@@ -6628,6 +7294,50 @@ Bot 主动后用户回复次数：{reply_count}
                 )
             )
         return conditions
+
+    def _remember_daily_dream_pick(self, dream_pick: tuple[str, str, int, int] | None) -> None:
+        if not dream_pick:
+            return
+        label = _single_line(dream_pick[0], 120)
+        if not label:
+            return
+        payload = getattr(self, "_last_generated_dream_payload", None)
+        if not isinstance(payload, dict) or _single_line(payload.get("label"), 120) != label:
+            payload = {}
+        factors = payload.get("factors", [])
+        if not isinstance(factors, list):
+            factors = []
+        normalized_factors = [_single_line(item, 30) for item in factors[:8] if _single_line(item, 30)]
+        if not normalized_factors:
+            normalized_factors = self._build_dream_memory_fragments(count=6)
+        content = _single_line(payload.get("content"), 1000)
+        if not content:
+            factor_hint = "、".join(normalized_factors[:4]) or "一些断续的生活碎片"
+            content = (
+                f"梦里像从{factor_hint}开始,场景没有交代清楚就慢慢换了地方。"
+                f"{label}那种感觉一直挂着,中间有些画面接不上,但醒来时还记得自己在梦里顺着它走了一段。"
+            )
+        self.data["daily_dream"] = {
+            "date": _today_key(),
+            "label": label,
+            "dream_type": _single_line(payload.get("dream_type"), 40) or "碎片梦",
+            "factors": normalized_factors,
+            "content": content,
+            "afterglow": _single_line(payload.get("afterglow"), 220) or label,
+            "mood": _single_line(dream_pick[1], 20) or "平稳",
+            "energy_delta": _safe_int(dream_pick[2], 0, -30, 20),
+            "duration_hours": _safe_int(dream_pick[3], 0, 0, 24),
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+
+    def _remembered_daily_dream_label(self) -> str:
+        raw = self.data.get("daily_dream")
+        if not isinstance(raw, dict) or raw.get("date") != _today_key():
+            return ""
+        label = _single_line(raw.get("label"), 120)
+        if label and label != "没有记住梦":
+            return label
+        return ""
 
     def _dream_afterglow_strength(self, dream_pick: tuple[str, str, int, int]) -> float:
         mode = str(self.dream_afterglow_mode or "auto")
@@ -7674,6 +8384,9 @@ Bot 主动后用户回复次数：{reply_count}
                 mood_candidates.append((mood, _safe_int(cond.get("intensity"), 50, 0, 100)))
             if kind == "health" and not health_cause:
                 health_cause = _single_line(cond.get("cause"), 120)
+        remembered_dream = self._remembered_daily_dream_label()
+        if values.get("dream") == "没有记住梦" and remembered_dream:
+            values["dream"] = remembered_dream
         energy = max(10, min(100, energy))
         mood_bias = (
             sorted(mood_candidates, key=lambda item: item[1], reverse=True)[0][0]
@@ -7821,6 +8534,7 @@ Bot 主动后用户回复次数：{reply_count}
         return f"{wrapped // 60:02d}:{wrapped % 60:02d}"
 
     async def _generate_daily_plan(self) -> dict[str, Any]:
+        await self._ensure_yesterday_conversation_summary()
         return await generate_daily_plan(self)
 
     def _get_schedule_planning_prompt(self) -> str:
@@ -7828,6 +8542,224 @@ Bot 主动后用户回复次数：{reply_count}
 
     def _build_daily_plan_prompt(self, now: str) -> str:
         return build_daily_plan_prompt(self, now)
+
+    async def _ensure_yesterday_conversation_summary(self, force: bool = False) -> dict[str, Any]:
+        today = _today_key()
+        cached = self.data.get("yesterday_conversation_summary", {})
+        if isinstance(cached, dict) and cached.get("date") == today and not force:
+            return cached
+        raw_text = await self._collect_yesterday_conversation_text()
+        if not raw_text:
+            summary = {
+                "date": today,
+                "source_date": _date_key(date.today() - timedelta(days=1)),
+                "summary": "暂无可用的昨日完整对话摘要。",
+                "residues": [],
+                "schedule_reference": "无明确可继承影响。",
+                "dream_reference": "无明确可继承碎片。",
+                "raw_excerpt_chars": 0,
+            }
+        else:
+            summary = await self._summarize_yesterday_conversation_for_schedule(raw_text)
+        async with self._data_lock:
+            self.data["yesterday_conversation_summary"] = summary
+            self._save_data_sync()
+        return summary
+
+    async def _collect_yesterday_conversation_text(self) -> str:
+        users = self.data.get("users", {})
+        if not isinstance(users, dict):
+            return ""
+        yesterday = date.today() - timedelta(days=1)
+        start = datetime.combine(yesterday, datetime.min.time()).timestamp()
+        end = start + 24 * 3600
+        blocks: list[str] = []
+        for user_id, raw_user in users.items():
+            if not isinstance(raw_user, dict):
+                continue
+            umo = str(raw_user.get("umo") or "").strip()
+            if not umo:
+                continue
+            try:
+                conv_id = await self.context.conversation_manager.get_curr_conversation_id(umo)
+                if not conv_id:
+                    continue
+                conv = await self.context.conversation_manager.get_conversation(umo, conv_id)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 读取昨日对话失败: user=%s err=%s", user_id, exc)
+                continue
+            history = self._load_conversation_history_items(conv)
+            dated_lines: list[str] = []
+            undated_lines: list[str] = []
+            for item in history:
+                line = self._format_history_item_for_summary(item)
+                if not line:
+                    continue
+                ts = self._history_item_timestamp(item)
+                if ts is None:
+                    undated_lines.append(line)
+                elif start <= ts < end:
+                    dated_lines.append(line)
+            selected = dated_lines if dated_lines else undated_lines[-120:]
+            if not selected:
+                continue
+            name = _single_line(raw_user.get("nickname") or user_id, 30)
+            source_note = "昨日对话" if dated_lines else "最近对话（history 无时间戳,作为昨日摘要候选）"
+            blocks.append(f"【{name}｜{source_note}】\n" + "\n".join(selected))
+        return "\n\n".join(blocks).strip()[-18000:]
+
+    def _load_conversation_history_items(self, conversation: Conversation | None) -> list[dict[str, Any]]:
+        if conversation is None:
+            return []
+        try:
+            loaded = json.loads(conversation.history or "[]")
+        except Exception:
+            return []
+        if not isinstance(loaded, list):
+            return []
+        return [item for item in loaded if isinstance(item, dict)]
+
+    def _history_item_timestamp(self, item: dict[str, Any]) -> float | None:
+        for key in ("timestamp", "time", "created_at", "updated_at", "created", "date"):
+            value = item.get(key)
+            if value is None or value == "":
+                continue
+            numeric = _safe_float(value, 0)
+            if numeric > 0:
+                return numeric / 1000 if numeric > 10_000_000_000 else numeric
+            text = str(value).strip()
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%m-%d %H:%M:%S", "%m-%d %H:%M"):
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    if fmt.startswith("%m"):
+                        parsed = parsed.replace(year=date.today().year)
+                    return parsed.timestamp()
+                except Exception:
+                    continue
+        return None
+
+    def _format_history_item_for_summary(self, item: dict[str, Any]) -> str:
+        role = _single_line(item.get("role") or item.get("type") or item.get("speaker"), 20).lower()
+        if role in {"assistant", "bot", "ai"}:
+            speaker = self.bot_name
+        elif role in {"user", "human"}:
+            speaker = "用户"
+        else:
+            speaker = role or "对话"
+        content = self._history_item_content_text(item)
+        if not content:
+            return ""
+        ts = self._history_item_timestamp(item)
+        time_prefix = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") + " " if ts else ""
+        return f"{time_prefix}{speaker}: {content}"
+
+    def _history_item_content_text(self, item: dict[str, Any]) -> str:
+        value = item.get("content")
+        if value is None:
+            value = item.get("message") or item.get("text") or item.get("content_text")
+        if isinstance(value, str):
+            return _single_line(value, 260)
+        if isinstance(value, list):
+            parts: list[str] = []
+            for part in value:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    text = part.get("text") or part.get("content") or part.get("message")
+                    if text:
+                        parts.append(str(text))
+                    elif str(part.get("type") or "").lower() == "image":
+                        parts.append("[图片]")
+            return _single_line(" ".join(parts), 260)
+        if isinstance(value, dict):
+            return _single_line(value.get("text") or value.get("content") or json.dumps(value, ensure_ascii=False), 260)
+        return ""
+
+    async def _summarize_yesterday_conversation_for_schedule(self, raw_text: str) -> dict[str, Any]:
+        today = _today_key()
+        source_date = _date_key(date.today() - timedelta(days=1))
+        prompt = f"""
+请阅读下面的昨日/最近完整对话材料,为今天的日程和梦境生成提炼参考摘要。
+
+目标不是复述聊天,而是找出可能延续到今天的“残留影响”：身体状态、饮食/作息、情绪余波、关系变化、未完成约定、收到/送出的东西、外出计划、压力来源、被安慰/被打断的事、梦境可能用到的物件/颜色/气味/半句话等。
+
+重要原则：
+1. 只根据对话内容做合理推断,不要硬套固定事件类型。
+2. 如果某个行为可能带来身体或日程后果,用抽象逻辑表达：饮食、睡眠、天气、运动、情绪刺激、约定、礼物、争执、安慰等都可能改变今天的体力、胃口、心情、出门意愿或主动话题。
+3. 影响可以很轻,也可以没有。不要为了制造剧情强行让今天出事。
+4. 摘要要给日程模型用,所以写成可执行参考,不是聊天回复。
+5. 梦境参考只提炼碎片和情绪质感,不要编完整梦。
+
+对话材料：
+{raw_text}
+
+只输出 JSON：
+{{
+  "summary": "昨日对话的一句话概括",
+  "residues": [
+    {{"type": "身体/情绪/关系/计划/物件/梦境碎片", "content": "可延续影响", "strength": "轻/中/强"}}
+  ],
+  "schedule_reference": "今天生成日程时应如何自然继承这些残留；没有就写无明确影响",
+  "dream_reference": "今天梦境/梦境碎片可以参考的物件、感官、半句话或情绪；没有就写无明确碎片"
+}}
+""".strip()
+        raw = await self._llm_call(prompt, max_tokens=650)
+        payload = self._extract_json_payload(raw or "")
+        if not isinstance(payload, dict):
+            return {
+                "date": today,
+                "source_date": source_date,
+                "summary": _single_line(raw_text, 180) or "昨日对话有记录,但摘要生成失败。",
+                "residues": [],
+                "schedule_reference": "可把昨日互动作为轻微关系和情绪背景,不要强行改写今日主线。",
+                "dream_reference": "可从昨日对话里的物件、语气和半句话提取梦境碎片。",
+                "raw_excerpt_chars": len(raw_text),
+            }
+        residues = payload.get("residues", [])
+        if not isinstance(residues, list):
+            residues = []
+        normalized_residues = []
+        for item in residues[:8]:
+            if not isinstance(item, dict):
+                continue
+            content = _single_line(item.get("content"), 120)
+            if not content:
+                continue
+            normalized_residues.append({
+                "type": _single_line(item.get("type"), 24) or "残留",
+                "content": content,
+                "strength": _single_line(item.get("strength"), 8) or "轻",
+            })
+        return {
+            "date": today,
+            "source_date": source_date,
+            "summary": _single_line(payload.get("summary"), 180) or "昨日对话有一些可延续的情绪和生活残留。",
+            "residues": normalized_residues,
+            "schedule_reference": _single_line(payload.get("schedule_reference"), 220) or "作为轻微背景承接,不要强行改写今日主线。",
+            "dream_reference": _single_line(payload.get("dream_reference"), 220) or "从昨日对话的物件、感官和半句话中轻取梦境碎片。",
+            "raw_excerpt_chars": len(raw_text),
+        }
+
+    def _format_yesterday_conversation_summary_for_prompt(self) -> str:
+        summary = self.data.get("yesterday_conversation_summary", {})
+        if not isinstance(summary, dict) or summary.get("date") != _today_key():
+            return "暂无昨日完整对话摘要。"
+        lines = [
+            f"来源日期：{summary.get('source_date') or '昨日'}",
+            f"概括：{_single_line(summary.get('summary'), 180)}",
+            f"日程参考：{_single_line(summary.get('schedule_reference'), 220)}",
+            f"梦境参考：{_single_line(summary.get('dream_reference'), 220)}",
+        ]
+        residues = summary.get("residues", [])
+        if isinstance(residues, list) and residues:
+            lines.append("残留变量：")
+            for item in residues[:8]:
+                if not isinstance(item, dict):
+                    continue
+                content = _single_line(item.get("content"), 120)
+                if content:
+                    lines.append(f"- {item.get('type') or '残留'}｜{content}｜强度 {item.get('strength') or '轻'}")
+        return "\n".join(lines)
 
     def _build_detail_enhancement_prompt(
         self,
@@ -7934,34 +8866,113 @@ Bot 主动后用户回复次数：{reply_count}
             source = _single_line(item.get("source"), 24)
             if note:
                 lines.append(f"- {source or '互动'}：{note}")
+            immediate = _single_line(item.get("immediate_reaction"), 120)
+            if immediate:
+                lines.append(f"  即时反应：{immediate}")
+            updates = item.get("state_updates")
+            if isinstance(updates, list) and updates:
+                update_text = "；".join(
+                    _single_line(update, 60)
+                    for update in updates
+                    if _single_line(update, 60)
+                )
+                if update_text:
+                    lines.append(f"  状态变量更新：{update_text}")
         if len(kept) != len(raw):
             self.data["schedule_adjustments"] = kept[-8:]
         return "\n".join(lines[-6:]) if lines else "（暂无）"
+
+    def _current_detail_segment_for_update(self) -> dict[str, Any] | None:
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
+            return None
+        now_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
+        if now_minutes is None:
+            return None
+        for segment in self._collect_detail_segments(plan, {}):
+            start = _safe_int(segment.get("start"), 0)
+            end = _safe_int(segment.get("end"), self._segment_end_minutes(start, segment.get("item")))
+            lead = max(0, self.detail_enhancement_lead_minutes)
+            if start - lead <= now_minutes < end:
+                return segment
+        return None
+
+    def _current_detail_state_variables(self) -> list[dict[str, str]]:
+        segment = self._current_detail_segment_for_update()
+        if not segment:
+            return []
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            return []
+        snapshot = enhanced.get(str(segment.get("key") or ""))
+        if not isinstance(snapshot, dict):
+            return []
+        variables = snapshot.get("state_variables", [])
+        if not isinstance(variables, list):
+            return []
+        return [item for item in variables if isinstance(item, dict)]
 
     def _detect_schedule_adjustment_from_interaction(self, text: str) -> dict[str, str] | None:
         normalized = _single_line(text, 160)
         if not normalized:
             return None
+        current_variables = self._current_detail_state_variables()
+        variable_text = " ".join(
+            f"{item.get('name', '')}:{item.get('value', '')} {item.get('note', '')}"
+            for item in current_variables[:8]
+        )
+        if re.search(r"换元|代入|公式|思路|解法|答案|步骤|这题|函数题|数学题|阅读题|作文|作业", normalized):
+            updates = ["学习/作业进度：因用户提供思路而推进", "情绪：卡住->松一口气"]
+            if re.search(r"卡|函数|数学|作业", variable_text):
+                updates.insert(0, "卡住点：用户提示后得到缓解")
+            return {
+                "source": "用户介入",
+                "note": "用户刚刚提供了和当前任务相关的帮助；不要重写整段日程,只把当前段的状态变量向“被帮助后推进/松动”更新,后续时间段继承这个结果。",
+                "immediate_reaction": "看到用户给的思路后,她先照着试了一下；如果确实对上当前任务,心里会明显松一口气。",
+                "state_updates": updates,
+            }
+        if re.search(r"去睡|早点睡|休息|别写了|先洗澡|先吃饭|喝水|别熬", normalized):
+            return {
+                "source": "用户介入",
+                "note": "用户刚刚给了休息或照顾指令；当前段不需要重算,只把节奏调慢,后续更可能提前收尾或补充休息。",
+                "immediate_reaction": "她看到这句会停一下手里的事,嘴上可能不立刻答应,但动作会慢下来一点。",
+                "state_updates": ["体力：消耗放缓/略微回稳", "情绪：被照顾后的柔和", "后续安排：更倾向提前收尾"],
+            }
+        if re.search(r"我在|回你|刚看到|来了|在呢|嗯|好|可以|收到", normalized):
+            return {
+                "source": "用户介入",
+                "note": "用户刚刚回应了角色；当前段不重写,只更新等待回复和分享欲状态,后续表达可以更轻快一点。",
+                "immediate_reaction": "看到回复后,她会很快扫一眼屏幕,刚才悬着的那点等待感落下来。",
+                "state_updates": ["等待回复：是->否", "情绪：轻快一点", "分享欲：小幅上升"],
+            }
         care = self._detect_care_feedback(normalized)
         if care.get("is_care"):
             return {
                 "source": "用户关心",
                 "note": "用户刚刚给了关心或照顾提醒；后续日程可以从低落/烦躁向被安抚后的柔和、慢慢回稳偏移,不要升级破坏性冲动。",
+                "immediate_reaction": "她看到关心会先顿一下,语气和动作都比刚才软一点。",
+                "state_updates": ["情绪：低落/烦躁->被接住一点", "体力：主观疲惫感略降"],
             }
         if re.search(r"摸摸|抱抱|亲亲|揉揉|陪你|哄你|乖|不难过|别难过|没关系|辛苦了|抱一下", normalized):
             return {
                 "source": "安慰互动",
                 "note": "用户刚刚在安慰或亲近；后续日程应保留一点被接住的余温,表达更软一些,不要继续单向累积负面情绪。",
+                "immediate_reaction": "她会把刚才绷着的劲松下来一点,可能短暂地想贴近用户。",
+                "state_updates": ["情绪：紧绷->柔和", "亲近感：上升"],
             }
         if re.search(r"开心|好耶|哈哈|笑死|可爱|喜欢|太好了|真好|一起|陪我|想你", normalized):
             return {
                 "source": "正向互动",
                 "note": "用户刚刚给了轻松或正向回应；后续日程可以多一点回弹、分享欲和轻松停顿。",
+                "immediate_reaction": "她看到这句会忍不住轻一下,手头事情也没那么难熬了。",
+                "state_updates": ["情绪：回弹", "分享欲：上升"],
             }
         if re.search(r"别生气|不要烦|冷静|别急|别砸|别摔|别骂|别打", normalized):
             return {
                 "source": "边界提醒",
                 "note": "用户提醒降低攻击性或破坏性表达；后续日程需要把烦躁写成收着的动作,避免砸、摔、扔、打这类冲动。",
+                "immediate_reaction": "她会把那点冲劲压回去,改成少说两句或把东西放远一点。",
+                "state_updates": ["情绪：冲动->收住", "行为边界：避免破坏性动作"],
             }
         return None
 
@@ -7981,9 +8992,12 @@ Bot 主动后用户回复次数：{reply_count}
             "date": _today_key(),
             "source": _single_line(adjustment.get("source"), 24),
             "note": note,
+            "immediate_reaction": _single_line(adjustment.get("immediate_reaction"), 140),
+            "state_updates": adjustment.get("state_updates", []),
             "created_at": now,
             "expires_at": now + 8 * 3600,
         }
+        self._record_detail_interaction_update(item)
         if raw and isinstance(raw[-1], dict) and raw[-1].get("note") == note:
             raw[-1].update(item)
         else:
@@ -7991,6 +9005,31 @@ Bot 主动后用户回复次数：{reply_count}
             del raw[:-8]
         self._invalidate_detail_after_interaction(now=now)
         return True
+
+    def _record_detail_interaction_update(self, item: dict[str, Any]) -> None:
+        segment = self._current_detail_segment_for_update()
+        if not segment:
+            return
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            return
+        key = str(segment.get("key") or "")
+        snapshot = enhanced.get(key)
+        if not isinstance(snapshot, dict):
+            return
+        updates = snapshot.setdefault("interaction_updates", [])
+        if not isinstance(updates, list):
+            updates = []
+            snapshot["interaction_updates"] = updates
+        updates.append(
+            {
+                "at": datetime.now().strftime("%H:%M"),
+                "source": _single_line(item.get("source"), 24),
+                "reaction": _single_line(item.get("immediate_reaction"), 140),
+                "state_updates": item.get("state_updates", []),
+            }
+        )
+        del updates[:-6]
 
     def _invalidate_detail_after_interaction(self, *, now: float | None = None) -> None:
         plan = self.data.get("daily_plan", {})
@@ -8003,8 +9042,7 @@ Bot 主动后用户回复次数：{reply_count}
         if isinstance(enhanced, dict):
             for segment in self._collect_detail_segments(plan, {}):
                 start = _safe_int(segment.get("start"), 0)
-                end = _safe_int(segment.get("end"), self._segment_end_minutes(start, segment.get("item")))
-                if end >= now_minutes - 20:
+                if start > now_minutes:
                     key = str(segment.get("key") or "")
                     if key in enhanced:
                         enhanced.pop(key, None)
@@ -8024,7 +9062,7 @@ Bot 主动后用户回复次数：{reply_count}
                         continue
                     if end < start:
                         end += 24 * 60
-                    if end < now_minutes - 20:
+                    if start <= now_minutes:
                         kept.append(item)
                 story_plan[key] = kept
 
@@ -8233,9 +9271,9 @@ Bot 主动后用户回复次数：{reply_count}
             "请把它当作内部理解材料,不是回复正文。你可以据此决定语气长短、反应速度、亲近程度和话题选择,但不要照搬字段、数值、原因或日程。\n"
             "除非用户明确询问近况、状态或刚才在做什么,否则不要主动汇报状态标签、数值、原因、日程片段或内部感受说明。\n"
             "普通聊天时先回应用户正在说的那句话；禁止用“今天/今晚状态……”“我现在情绪……”“能量……”“下午/上午做了什么所以……”开场。\n"
-            "如果需要体现状态,只让它变成回复的长度、停顿、语气软硬和话题选择,不要说成自我报告。\n"
-            "状态转译规则：心情好转不要说“心情好多了”,改成注意到阳光、饭菜、风、桌面、手边物件；烦躁收住不要说“没发脾气”,改成少说一句、把东西放远、停一停。\n"
-            "如果用户表达关心、摸摸、抱抱、安慰,优先承接用户此刻的动作和情绪；状态只藏在语气里,不要借机解释背景。\n\n"
+            "状态只影响回复长度、回复速度感、语气软硬和话题选择。不要直接宣告“我累了/我吓了一跳/我正在写作业”,也不要用“差点把茶打翻/笔帽掉了/喝水呛到”这类动作描写来表演状态。\n"
+            "如果确实需要表达状态,只用最短口语,例如“困了”“别说了”“有点烦”；更多时候直接接话、慢回、短回或不解释。\n"
+            "如果用户表达关心、摸摸、抱抱、安慰,优先承接用户此刻的动作和情绪；不要借机解释背景或表演日常。\n\n"
             "【表达倾向提醒】\n"
             f"{self._format_passive_state_style_hint(state)}\n\n"
             "【完整状态资料】\n"
@@ -8257,7 +9295,8 @@ Bot 主动后用户回复次数：{reply_count}
                 "【当前生活背景】\n"
                 + "\n".join(life_lines)
                 + "\n这些内容只用于让回复有生活延续感；用户没问就不要提具体日程、科目、任务、天气或地点。"
-                + "如果要承接,只保留一点含糊的生活感,不要照搬原句。"
+                + "如果要承接,只体现在语气和话题选择里,不要照搬原句,不要写成“我正在做某事”的汇报。"
+                + "回复必须像同一个连续现场里发生的对话；如果生活背景之间互相冲突,优先服从当前真实时段和当前日程,只保留最合理的一条线索。"
             )
 
         important_dates = self._format_important_dates_for_prompt()
@@ -8663,16 +9702,6 @@ Bot 主动后用户回复次数：{reply_count}
         self.data["can_do"] = kept
         return removed
 
-    def _extract_natural_can_do(self, text: str) -> tuple[str, str] | None:
-        normalized = _single_line(text, 160)
-        add_match = re.match(r"^(?:你|bot|机器人|小星)?\s*可以\s*(?:去|做|进行|尝试)?\s*(.+)$", normalized, re.IGNORECASE)
-        if add_match:
-            return "add", add_match.group(1)
-        remove_match = re.match(r"^(?:你|bot|机器人|小星)?\s*(?:不要|不能|不可以)\s*(?:去|做|进行|尝试)?\s*(.+)$", normalized, re.IGNORECASE)
-        if remove_match:
-            return "remove", remove_match.group(1)
-        return None
-
     async def _llm_call(
         self,
         prompt: str,
@@ -8807,6 +9836,29 @@ Bot 主动后用户回复次数：{reply_count}
             lines.append(f"{item.get('time')} {item.get('activity')}{mood}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _detail_event_text(item: dict[str, Any], limit: int = 160) -> str:
+        if not isinstance(item, dict):
+            return ""
+        for key in (
+            "event",
+            "content",
+            "detail",
+            "description",
+            "text",
+            "narrative",
+            "body",
+            "细化",
+            "细化内容",
+            "细化叙述",
+            "事件",
+            "主要事件",
+        ):
+            text = _single_line(item.get(key), limit)
+            if text:
+                return text
+        return ""
+
     def _format_current_detail_view(self) -> str:
         plan = self.data.get("daily_plan", {})
         if not isinstance(plan, dict) or not plan.get("items"):
@@ -8814,13 +9866,13 @@ Bot 主动后用户回复次数：{reply_count}
         enhanced = self.data.get("detail_enhanced_segments", {})
         if not isinstance(enhanced, dict):
             enhanced = {}
-        segment = self._pick_detail_segment(plan, enhanced)
+        segment = self._current_detail_segment_for_update() or self._pick_detail_segment(plan, enhanced)
         if not segment:
-            return "当前还没有可用的细化结果。先让今天的日程段完成细化，或者手动执行一次“陪伴 细化”。"
+            return "当前还没有可用的细化结果。先让今天的日程段完成细化，或者手动执行一次“陪伴 重置细化”。"
         key = str(segment.get("key") or "")
         snapshot = enhanced.get(key) if key else None
         if not isinstance(snapshot, dict):
-            return "当前时间段还没有落地的细化内容。可以先执行一次“陪伴 细化”。"
+            return "当前时间段还没有落地的细化内容。可以先执行一次“陪伴 重置细化”。"
 
         item = segment.get("item") if isinstance(segment, dict) else {}
         start_text = self._minutes_to_hhmm(_safe_int(segment.get("start"), 0))
@@ -8832,26 +9884,68 @@ Bot 主动后用户回复次数：{reply_count}
         mood = _single_line((item or {}).get("mood"), 24)
         if mood:
             lines.append(f"日程情绪：{mood}")
-        summary = _single_line(snapshot.get("summary"), 160)
-        if summary:
-            lines.append(f"细化摘要：{summary}")
+
+        state_variables = snapshot.get("state_variables", [])
+        if isinstance(state_variables, list) and state_variables:
+            lines.append("状态变量：")
+            for variable in state_variables[:8]:
+                if not isinstance(variable, dict):
+                    continue
+                name = _single_line(variable.get("name"), 32)
+                value = _single_line(variable.get("value"), 60)
+                note = _single_line(variable.get("note"), 80)
+                if name and value:
+                    lines.append(f"- {name}: {value}" + (f"（{note}）" if note else ""))
+
+        presence = snapshot.get("presence_status")
+        if isinstance(presence, dict):
+            mode = _single_line(presence.get("mode"), 24)
+            reason = _single_line(presence.get("reason"), 80)
+            if mode and mode != "unchanged":
+                lines.append("QQ状态表现：")
+                lines.append(f"- {mode}" + (f"｜{reason}" if reason else ""))
+
+        interaction_updates = snapshot.get("interaction_updates", [])
+        if isinstance(interaction_updates, list) and interaction_updates:
+            lines.append("用户介入后的局部更新：")
+            for update in interaction_updates[-4:]:
+                if not isinstance(update, dict):
+                    continue
+                at = _single_line(update.get("at"), 8)
+                reaction = _single_line(update.get("reaction"), 120)
+                state_updates = update.get("state_updates")
+                state_text = ""
+                if isinstance(state_updates, list) and state_updates:
+                    state_text = "；".join(_single_line(item, 60) for item in state_updates if _single_line(item, 60))
+                if reaction:
+                    lines.append(f"- {at} {reaction}" + (f"｜{state_text}" if state_text else ""))
 
         today_events = snapshot.get("today_events", [])
-        if isinstance(today_events, list) and today_events:
-            lines.append("这一段的小事件：")
-            for detail_event in today_events[:8]:
+        scoped_today_events = self._filter_snapshot_items_to_segment(today_events, segment)
+        if scoped_today_events:
+            lines.append("细化内容：")
+            for detail_event in scoped_today_events[:8]:
                 if not isinstance(detail_event, dict):
                     continue
                 window = _single_line(detail_event.get("window"), 24)
-                event_text = _single_line(detail_event.get("event"), 120)
+                event_text = self._detail_event_text(detail_event, 160)
                 mood_text = _single_line(detail_event.get("mood"), 24)
-                tail = f"｜{mood_text}" if mood_text else ""
-                lines.append(f"- {window}｜{event_text}{tail}")
+                if event_text:
+                    tail = f"｜{mood_text}" if mood_text else ""
+                    lines.append(f"- {window}｜{event_text}{tail}")
+        else:
+            summary = _single_line(snapshot.get("summary"), 160)
+            if summary and summary not in {"这一段按原日程慢慢推进。", "这一段按原日程慢慢推进"}:
+                lines.append(f"细化内容：{summary}")
+            else:
+                lines.append("细化内容：当前没有生成出可展示的细化正文。")
 
         proactive_events = snapshot.get("proactive_events", [])
         if isinstance(proactive_events, list) and proactive_events:
-            lines.append("这一段的主动契机：")
-            for proactive_event in proactive_events[:10]:
+            scoped_proactive_events = self._filter_snapshot_items_to_segment(proactive_events, segment)
+            if scoped_proactive_events:
+                lines.append("这一段的主动契机：")
+            for proactive_event in scoped_proactive_events[:10]:
                 if not isinstance(proactive_event, dict):
                     continue
                 window = _single_line(proactive_event.get("window"), 24)
@@ -8904,6 +9998,79 @@ Bot 主动后用户回复次数：{reply_count}
 
         if len(lines) <= 4:
             lines.append("这段目前还比较空，说明细化结果里还没长出太多东西。")
+        return "\n".join(lines)
+
+    def _filter_snapshot_items_to_segment(
+        self,
+        raw_items: Any,
+        segment: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(raw_items, list) or not isinstance(segment, dict):
+            return []
+        start = _safe_int(segment.get("start"), 0)
+        end = _safe_int(segment.get("end"), self._segment_end_minutes(start, segment.get("item")))
+        if end <= start:
+            end += 24 * 60
+        kept: list[dict[str, Any]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            item_start, item_end = self._parse_window_minutes(str(item.get("window") or ""))
+            if item_start is None or item_end is None:
+                continue
+            candidates = [(item_start, item_end)]
+            if item_end < item_start:
+                candidates = [(item_start, item_end + 24 * 60)]
+            if item_start < start and end > 24 * 60:
+                candidates.append((item_start + 24 * 60, item_end + 24 * 60))
+            if any(candidate_start >= start and candidate_end <= end for candidate_start, candidate_end in candidates):
+                kept.append(item)
+        return kept
+
+    def _format_current_detail_brief(self) -> str:
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict) or not plan.get("items"):
+            return "今天还没有日程，所以没有可细化的时间段。"
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            enhanced = {}
+        segment = self._current_detail_segment_for_update() or self._pick_detail_segment(plan, enhanced)
+        if not segment:
+            return "当前还没有可用的细化结果。"
+        key = str(segment.get("key") or "")
+        snapshot = enhanced.get(key) if key else None
+        if not isinstance(snapshot, dict):
+            return "当前时间段还没有落地的细化内容。"
+
+        item = segment.get("item") if isinstance(segment, dict) else {}
+        start_text = self._minutes_to_hhmm(_safe_int(segment.get("start"), 0))
+        end_text = self._minutes_to_hhmm(_safe_int(segment.get("end"), 0))
+        lines = [
+            f"{start_text}-{end_text}｜{_single_line((item or {}).get('activity'), 80)}",
+        ]
+        summary = _single_line(snapshot.get("summary"), 140)
+        if summary:
+            lines.append(summary)
+
+        today_events = snapshot.get("today_events", [])
+        if isinstance(today_events, list) and today_events:
+            for detail_event in today_events[:3]:
+                if not isinstance(detail_event, dict):
+                    continue
+                window = _single_line(detail_event.get("window"), 18)
+                event_text = self._detail_event_text(detail_event, 120)
+                mood_text = _single_line(detail_event.get("mood"), 20)
+                if event_text:
+                    lines.append(f"- {window} {event_text}" + (f"｜{mood_text}" if mood_text else ""))
+
+        interaction_updates = snapshot.get("interaction_updates", [])
+        if isinstance(interaction_updates, list) and interaction_updates:
+            latest = next((item for item in reversed(interaction_updates) if isinstance(item, dict)), None)
+            if isinstance(latest, dict):
+                reaction = _single_line(latest.get("reaction"), 100)
+                if reaction:
+                    lines.append(f"局部更新：{reaction}")
+
         return "\n".join(lines)
 
     async def _tick(self):
@@ -9021,6 +10188,19 @@ Bot 主动后用户回复次数：{reply_count}
                 )
             except Exception as e:
                 logger.warning(f"[PrivateCompanion] 发送给 {user_id} 失败: {e}")
+                async with self._data_lock:
+                    current_after_failure = self._get_user(user_id)
+                    current_after_failure["next_proactive_at"] = 0
+                    current_after_failure["planned_proactive_reason"] = ""
+                    current_after_failure["planned_proactive_action"] = ""
+                    current_after_failure["planned_proactive_source"] = ""
+                    current_after_failure["planned_proactive_motive"] = ""
+                    current_after_failure["planned_proactive_topic"] = ""
+                    current_after_failure["planned_event_chain"] = []
+                    current_after_failure["planned_opener_mode"] = ""
+                    current_after_failure["planned_followup_kind"] = ""
+                    self._schedule_next_proactive(current_after_failure, now=_now_ts(), delay_hours=(6, 12))
+                    self._save_data_sync()
                 continue
             finally:
                 async with self._data_lock:
@@ -9039,6 +10219,12 @@ Bot 主动后用户回复次数：{reply_count}
                 current["last_proactive_action"] = planned_action_for_send or "message"
                 current["last_proactive_behavior_summary"] = action_summary
                 current["last_proactive_motive"] = planned_motive_for_send
+                self._remember_proactive_topic(
+                    current,
+                    text=text,
+                    topic=current.get("planned_proactive_topic"),
+                    motive=planned_motive_for_send,
+                )
                 self._note_proactive_daypart_sent(current, current["last_sent"])
                 opener_mode = planned_opener_mode_for_send
                 followup_kind = planned_followup_kind_for_send
@@ -9058,18 +10244,22 @@ Bot 主动后用户回复次数：{reply_count}
                         second = suspended.get("second_followup")
                         if isinstance(second, dict) and second:
                             after_minutes = _safe_int(second.get("after_minutes"), 45, 0, 240)
+                            second_reason = _single_line(second.get("reason"), 40) or "morning_greeting"
+                            if second_reason == "morning_greeting":
+                                after_minutes = max(after_minutes, 90)
                             current["pending_followup_event"] = {
                                 "date": _today_key(),
                                 "window": self._window_from_delay_minutes(after_minutes, width_minutes=18),
-                                "reason": _single_line(second.get("reason"), 40) or "morning_greeting",
+                                "reason": second_reason,
                                 "action": "message",
-                                "why": "前一条早晨试探后,还是没等到回音,于是又顺着那股劲补了一句。",
-                                "topic": _single_line(second.get("topic"), 80) or "第二次叫起床",
+                                "why": "前一条早晨试探后隔了挺久,如果还想续,也只轻轻补一句。",
+                                "topic": _single_line(second.get("topic"), 80) or "早晨那句后面",
                                 "motive": self._normalize_internal_motive_text(_single_line(second.get("motive"), 100)),
                                 "scene": "早晨那句试探之后又过了一阵",
-                                "tone": _single_line(second.get("tone"), 30) or "熟一点的催促",
-                                "impulse": "还是没等到你回头,于是忍不住再叫你一声",
+                                "tone": _single_line(second.get("tone"), 30) or "轻一点,不催促",
+                                "impulse": "隔了挺久才又想放一句,不要求对方立刻回",
                                 "_scheduled_ts": _now_ts() + after_minutes * 60,
+                                "_cancel_on_inbound": True,
                             }
                 elif followup_kind == "chain_followup":
                     next_chain_followup = self._build_followup_event_from_chain(
@@ -9146,22 +10336,19 @@ Bot 主动后用户回复次数：{reply_count}
     def _help_text(self) -> str:
         return (
             "我会永远陪着你 命令：\n"
-            "陪伴 开启 / 关闭\n"
             "陪伴 状态\n"
-            "陪伴 查询状态\n"
-            "陪伴 刷新状态\n"
             "陪伴 查看主动判定\n"
             "陪伴 重置插件\n"
             "陪伴 增添状态 <状态描述>[|持续小时]\n"
+            "陪伴 查看今日日程\n"
+            "陪伴 重置日程\n"
             "陪伴 当前细化\n"
-            "陪伴 细化\n"
+            "陪伴 重置细化\n"
+            "陪伴 能力列表\n"
             "陪伴 查看提示词 日程|细化|主动|回复注入\n"
             "陪伴 完整测试\n"
             "陪伴 结束完整测试\n"
             "陪伴模拟唤醒 <想模拟的用户消息>\n"
-            "陪伴 日程\n"
-            "陪伴 生成日程\n"
-            "陪伴 拟人状态\n"
             "陪伴 生成状态\n"
             "陪伴 梦境\n"
             "陪伴 梦境碎片\n"
@@ -9171,17 +10358,15 @@ Bot 主动后用户回复次数：{reply_count}
             "陪伴 日期列表\n"
             "陪伴 日期添加 <标题> <YYYY-MM-DD或MM-DD> [备注]\n"
             "陪伴 日期删除 <标题关键词>\n"
-            "陪伴 可以 <Bot 能做的事>\n"
-            "陪伴 不能 <不希望 Bot 做的事>\n"
             "陪伴 可做事项\n"
             "陪伴 昵称 <称呼>\n"
             "陪伴 语气 温柔|活泼|工作\n"
             "陪伴 清空记忆\n"
-            "提示：配置页 target_user_ids 里的 QQ 会自动开启；命令开启只是额外手动入口。"
+            "提示：私聊陪伴默认开启；配置页 target_user_ids 里的 QQ 会自动预热主动消息。"
         )
 
     def _private_only_text(self) -> str:
-        return "为了避免误打扰,陪伴功能需要在私聊里开启和管理。"
+        return "为了避免误打扰,陪伴功能需要在私聊里管理。"
 
     async def _reply(self, event: AstrMessageEvent, text: str):
         await event.send(event.plain_result(text))
@@ -9218,7 +10403,7 @@ Bot 主动后用户回复次数：{reply_count}
             return
         raw_users = self.data.get("users", {})
         current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
-        if not isinstance(current_user, dict) or not current_user.get("enabled"):
+        if not isinstance(current_user, dict):
             return
 
         state = await self._ensure_daily_state()
@@ -9280,13 +10465,10 @@ Bot 主动后用户回复次数：{reply_count}
             return
         raw_users = self.data.get("users", {})
         current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
-        if not isinstance(current_user, dict) or not current_user.get("enabled"):
+        if not isinstance(current_user, dict):
             return
         if not self.enable_llm_timer_scheduling or "<timer" not in original_text.lower():
             return
-        async with self._data_lock:
-            if not self._get_user(user_id).get("enabled"):
-                return
         cleaned_text, payloads = self._extract_timer_directives(original_text)
         if not payloads:
             return
@@ -9374,7 +10556,9 @@ Bot 主动后用户回复次数：{reply_count}
         return (
             "【主动消息回复上下文】\n"
             f"你在 {sent_at} 主动向用户发送了“{last_message}”。{detail}\n"
-            "用户当前消息可能是在回应这条主动消息；请优先自然承接它。如果用户明显另起话题,再自然切换。"
+            "用户当前消息可能是在回应这条主动消息；请优先自然承接它。如果用户明显另起话题,再自然切换。\n"
+            "不要再次完整复述刚才那条主动消息,尤其不要把同一件事换个说法再讲一遍。"
+            "如果用户问“做啥了/怎么了/发生啥了”,优先补充刚才没说过的具体动作或原因；如果没新信息,就短短承认一下。"
         )
 
     def _build_proactive_reply_context_for_user(self, user: dict[str, Any]) -> str:
@@ -9397,7 +10581,7 @@ Bot 主动后用户回复次数：{reply_count}
             enhanced = self.data.get("detail_enhanced_segments", {})
             if not isinstance(enhanced, dict):
                 enhanced = {}
-            segment = self._pick_detail_segment(plan, enhanced)
+            segment = self._current_detail_segment_for_update() or self._pick_detail_segment(plan, enhanced)
             if not segment:
                 current_item = self._get_current_plan_item(plan)
                 if not isinstance(current_item, dict):
@@ -9414,27 +10598,27 @@ Bot 主动后用户回复次数：{reply_count}
             planned_reason = str(user.get("planned_proactive_reason") or "")
             planned_action = str(user.get("planned_proactive_action") or "message")
             planned_motive = _single_line(user.get("planned_proactive_motive"), 140)
-        reason = planned_reason if planned_reason and self._is_reason_allowed_now(planned_reason) else ""
-        if not reason:
-            reason, _ = self._choose_proactive_message(user, name, planned_reason)
-            planned_motive = self._choose_proactive_motive(reason, user, action=planned_action)
-        planned_topic = _single_line(user.get("planned_proactive_topic"), 48)
-        framework_prompt = self._build_framework_proactive_prompt(
-            user=user,
-            name=name,
-            reason=reason,
-            action=planned_action,
-            action_context="（调试预览：这里会放工具结果或观察结果）",
-            motive=planned_motive,
-        )
-        return (
-            "【说明】\n"
-            "当前主动消息已改为走 AstrBot 框架唤醒链。\n"
-            "人格、历史对话和会话上下文不再在这里手工重复拼接,而是由框架根据当前 conversation 自动注入。\n\n"
-            + (f"【内部话题钩子】\n{planned_topic}\n\n" if planned_topic else "")
-            + "【送入框架的任务提示】\n"
-            f"{framework_prompt}"
-        )
+            reason = planned_reason if planned_reason and self._is_reason_allowed_now(planned_reason) else ""
+            if not reason:
+                reason, _ = self._choose_proactive_message(user, name, planned_reason)
+                planned_motive = self._choose_proactive_motive(reason, user, action=planned_action)
+            planned_topic = _single_line(user.get("planned_proactive_topic"), 48)
+            framework_prompt = self._build_framework_proactive_prompt(
+                user=user,
+                name=name,
+                reason=reason,
+                action=planned_action,
+                action_context="（调试预览：这里会放工具结果或观察结果）",
+                motive=planned_motive,
+            )
+            return (
+                "【说明】\n"
+                "当前主动消息已改为走 AstrBot 框架唤醒链。\n"
+                "人格、历史对话和会话上下文不再在这里手工重复拼接,而是由框架根据当前 conversation 自动注入。\n\n"
+                + (f"【内部话题钩子】\n{planned_topic}\n\n" if planned_topic else "")
+                + "【送入框架的任务提示】\n"
+                f"{framework_prompt}"
+            )
         if normalized in {"回复注入", "reply", "injection"}:
             state = await self._ensure_daily_state()
             parts = [self._format_state_injection(state)]
@@ -9490,12 +10674,13 @@ Bot 主动后用户回复次数：{reply_count}
         deferred_actions = {
             "重置插件", "重置", "全部重置",
             "查看提示词", "提示词", "prompt",
-            "细化", "细节", "强化",
-            "生成日程", "刷新日程", "重生日程",
+            "重置细化",
+            "重置日程",
             "生成状态", "刷新状态", "重生状态",
             "增添状态", "添加状态",
             "完整测试", "真实测试", "完整真实测试",
             "生成日记", "刷新日记",
+            "梦境", "做了什么梦", "今日梦境",
         }
 
         is_private = bool(getattr(event, "is_private_chat", lambda: False)())
@@ -9509,22 +10694,8 @@ Bot 主动后用户回复次数：{reply_count}
             user = self._get_user(user_id)
             user["umo"] = event.unified_msg_origin
 
-            if action in {"开启", "打开", "启用", "on"}:
-                user["enabled"] = True
-                user["ignored_streak"] = 0
-                if _safe_float(user.get("next_proactive_at"), 0) <= 0:
-                    self._schedule_next_proactive(user, now=_now_ts())
-                self._save_data_sync()
-                response = (
-                    "已开启私聊陪伴。我会低频出现：到空闲时间、未处于免打扰、且没超过每日上限时,才会主动发一条。"
-                )
-            elif action in {"关闭", "停止", "禁用", "off"}:
-                user["enabled"] = False
-                self._save_data_sync()
-                response = "已关闭私聊陪伴。之后我不会主动发消息。"
-            elif action in {"状态", "status"}:
+            if action in {"状态", "status"}:
                 self._reset_daily_counter_if_needed(user)
-                enabled_text = "开启" if user.get("enabled") else "关闭"
                 last_seen = self._format_timestamp_elapsed(user.get("last_seen"))
                 last_sent = self._format_timestamp_elapsed(user.get("last_sent"))
                 plan = self.data.get("daily_plan", {})
@@ -9537,7 +10708,7 @@ Bot 主动后用户回复次数：{reply_count}
                 simulation_text = self._format_simulation_summary(user)
                 response = "".join(
                     [
-                        f"当前状态：{enabled_text}\n",
+                        "运行模式：默认开启\n",
                         f"称呼：{user.get('nickname') or self.default_nickname}\n",
                         f"语气：{user.get('style') or self.default_style}\n",
                         f"日程：{plan_text}\n",
@@ -9554,11 +10725,10 @@ Bot 主动后用户回复次数：{reply_count}
                         f"关系：{self._format_relationship_summary(user)}",
                     ]
                 )
-            elif action in {"查询状态", "状态查询"}:
-                state = self.data.get("daily_state", {})
-                response = self._format_state_detail(state)
             elif action in {"查看主动判定", "主动判定", "判定"}:
                 response = self._explain_proactive_decision(user)
+            elif action in {"能力列表", "主动能力", "工具列表"}:
+                response = self._format_proactive_ability_list_for_user(user)
             elif action in {"完整测试", "真实测试", "完整真实测试"}:
                 response = "正在准备一轮完整真实测试：我会先补齐今天状态和日程，再只抽一个日程段做细化，然后把这一段压成每两分钟一条的真实主动链。"
             elif action in {"戳一戳事件", "戳事件", "poke事件"}:
@@ -9574,20 +10744,17 @@ Bot 主动后用户回复次数：{reply_count}
                 response = "正在清空插件状态,并重新生成今天的状态和日程。"
             elif action in {"查看提示词", "提示词", "prompt"}:
                 response = "正在整理当前这层提示词。"
-            elif action in {"细化", "细节", "强化"}:
-                response = "正在整理当前这层细化提示词。"
+            elif action in {"重置细化"}:
+                response = "正在生成当前时间段细化。"
             elif action in {"增添状态", "添加状态"}:
                 response = "正在把这个状态加进去。"
-            elif action in {"当前细化", "细化状态", "当前细节"}:
+            elif action in {"当前细化", "查看当前细化"}:
                 response = self._format_current_detail_view()
-            elif action in {"日程", "计划", "schedule"}:
+            elif action in {"查看今日日程"}:
                 plan = self.data.get("daily_plan", {})
                 response = self._format_daily_plan(plan)
-            elif action in {"生成日程", "刷新日程", "重生日程"}:
+            elif action in {"重置日程"}:
                 response = "正在生成今天的日程,我先把今天怎么过想清楚。"
-            elif action in {"拟人状态", "身体状态", "今日状态"}:
-                state = self.data.get("daily_state", {})
-                response = self._format_state_detail(state)
             elif action in {"生成状态", "刷新状态", "重生状态"}:
                 response = "正在刷新今天的拟人状态。"
             elif action in {"梦境", "做了什么梦", "今日梦境"}:
@@ -9610,26 +10777,12 @@ Bot 主动后用户回复次数：{reply_count}
             elif action in {"日期删除", "删除日期", "重要日期删除"}:
                 response = self._remove_important_date_entry(value)
                 self._save_data_sync()
-            elif action in {"可以", "能做", "允许"}:
-                added = self._add_can_do_items(value)
-                self._save_data_sync()
-                if added:
-                    response = "记住了,我之后安排日程时可以做：\n" + "\n".join(f"- {item}" for item in added)
-                else:
-                    response = "请这样告诉我：陪伴 可以 整理资料、阅读消息、写日记"
-            elif action in {"不能", "不要", "禁止", "不可以"}:
-                removed = self._remove_can_do_items(value)
-                self._save_data_sync()
-                if removed:
-                    response = "已移除这些可做事项：\n" + "\n".join(f"- {item}" for item in removed)
-                else:
-                    response = "没有找到匹配的可做事项。"
-            elif action in {"可做事项", "能做什么", "可以做什么"}:
+            elif action in {"可做事项", "能做什么"}:
                 items = self.data.get("can_do", [])
                 if items:
                     response = "我现在可以安排进日程的事：\n" + "\n".join(f"- {_single_line(item, 80)}" for item in items)
                 else:
-                    response = "还没有可做事项。你可以说：陪伴 可以 整理资料、读消息、写日记"
+                    response = "还没有可做事项。"
             elif action in {"昵称", "称呼"}:
                 if not value:
                     response = "请这样设置：陪伴 昵称 <你喜欢的称呼>"
@@ -9668,8 +10821,13 @@ Bot 主动后用户回复次数：{reply_count}
                 + "\n\n"
                 + self._format_daily_plan(plan or {}),
             )
-        if action in {"生成日程", "刷新日程", "重生日程"}:
+        if action in {"重置日程"}:
             plan = await self._ensure_daily_plan(force=True)
+            async with self._data_lock:
+                self.data["detail_enhanced_day"] = str((plan or {}).get("date") or _today_key())
+                self.data["detail_enhanced_segments"] = {}
+                self.data["daily_story_plan"] = {}
+                self._save_data_sync()
             await self._reply(event, self._format_daily_plan(plan or {}))
         if action in {"生成状态", "刷新状态", "重生状态"}:
             state = await self._ensure_daily_state(force=True)
@@ -9764,15 +10922,32 @@ Bot 主动后用户回复次数：{reply_count}
                 lines.append(self._format_simulation_summary(self._get_user(user_id)))
                 await self._reply(event, "\n".join(lines))
                 asyncio.create_task(self._kick_proactive_loop_once())
-        if action in {"细化", "细节", "强化"}:
+        if action in {"重置细化"}:
             plan = await self._ensure_daily_plan(force=False)
             if not plan:
                 plan = await self._ensure_daily_plan(force=True)
-            prompt_text = await self._debug_prompt_text("细化", user)
-            await self._reply(event, prompt_text)
+            await self._ensure_detail_enhancement(force=False)
+            detail_text = self._format_current_detail_view()
+            if any(
+                marker in detail_text
+                for marker in (
+                    "还没有",
+                    "没有落地",
+                    "没有生成出可展示",
+                    "当前时间段还没有",
+                )
+            ):
+                await self._ensure_detail_enhancement(force=True)
+                detail_text = self._format_current_detail_view()
+            await self._reply(event, detail_text)
         if action in {"生成日记", "刷新日记"}:
             diary = await self._ensure_daily_diary(force=True)
             await self._reply(event, self._format_single_diary(diary or {}))
+        if action in {"梦境", "做了什么梦", "今日梦境"}:
+            state = await self._ensure_daily_state(force=False)
+            if not state:
+                state = await self._ensure_daily_state(force=True)
+            await self._reply(event, self._format_dream_view(state or {}))
         event.stop_event()
 
     @filter.command("陪伴模拟唤醒")
@@ -10005,7 +11180,16 @@ Bot 主动后用户回复次数：{reply_count}
     def _format_dream_view(self, state: dict[str, Any]) -> str:
         if not isinstance(state, dict) or not state:
             return "今天还没有梦境状态。"
-        dream_text = _single_line(state.get("dream"), 120) or "没有记住梦"
+        remembered = self.data.get("daily_dream")
+        if not isinstance(remembered, dict) or remembered.get("date") != _today_key():
+            remembered = {}
+        dream_text = _single_line(remembered.get("content"), 1200) or _single_line(state.get("dream"), 220) or "没有记住梦"
+        dream_type = _single_line(remembered.get("dream_type"), 40) or "碎片梦"
+        factors = remembered.get("factors", [])
+        if isinstance(factors, list):
+            factor_text = "、".join(_single_line(item, 30) for item in factors[:8] if _single_line(item, 30))
+        else:
+            factor_text = ""
         aftertaste_lines: list[str] = []
         for cond in state.get("conditions", []) or []:
             if not isinstance(cond, dict):
@@ -10023,15 +11207,21 @@ Bot 主动后用户回复次数：{reply_count}
                 pieces.append(cause)
             pieces.append(f"剩余 {remain}")
             aftertaste_lines.append("- " + "｜".join(pieces))
+        remembered_afterglow = _single_line(remembered.get("afterglow"), 260)
         fragment_pool = self._normalize_dream_fragment_pool(self.data.get("dream_fragments", []))
         sampled = self._weighted_unique_fragment_sample(fragment_pool, count=6) if fragment_pool else []
-        fragment_text = "、".join(sampled) if sampled else "（当前没有明显残留碎片）"
+        fragment_text = factor_text or ("、".join(sampled) if sampled else "（当前没有明显残留碎片）")
+        afterglow_text = remembered_afterglow
+        if aftertaste_lines:
+            afterglow_text = (afterglow_text + "\n" if afterglow_text else "") + "\n".join(aftertaste_lines)
+        if not afterglow_text:
+            afterglow_text = "今天没有明显的梦后余韵。"
         return (
             f"{self.bot_name} 最近一次梦境：\n"
-            f"梦境：{dream_text}\n"
-            f"梦后余韵：\n"
-            f"{chr(10).join(aftertaste_lines) if aftertaste_lines else '- 今天没有明显的梦后余韵'}\n"
-            f"残留碎片：{fragment_text}"
+            f"梦境类型：{dream_type}\n"
+            f"梦境因子/碎片：{fragment_text}\n"
+            f"梦境内容：{dream_text}\n"
+            f"梦境余韵：\n{afterglow_text}"
         )
 
     def _format_dream_fragment_pool_view(self) -> str:
@@ -10086,6 +11276,10 @@ Bot 主动后用户回复次数：{reply_count}
                 and _now_ts() - _safe_float(suspended.get("created_at"), 0) <= self.proactive_reply_context_hours * 3600
             ):
                 suspended["resume_ready"] = True
+                suspended["complaint_enabled"] = False
+                suspended["complaint_sent"] = True
+                suspended["second_followup"] = {}
+                user["pending_followup_event"] = {}
             if _safe_float(user.get("awaiting_reply_since"), 0) > 0:
                 user["reply_count"] = _safe_int(user.get("reply_count"), 0) + 1
                 self._note_action_reply_feedback(
@@ -10106,26 +11300,11 @@ Bot 主动后用户回复次数：{reply_count}
             care_feedback_applied = bool(text) and self._apply_care_feedback_to_state(text)
             if care_feedback_applied:
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 2
-            schedule_adjustment_applied = bool(text) and bool(user.get("enabled")) and self._record_schedule_adjustment_from_interaction(text)
+            schedule_adjustment_applied = bool(text) and self._record_schedule_adjustment_from_interaction(text)
             if schedule_adjustment_applied:
                 user["relationship_score"] = _safe_int(user.get("relationship_score"), 0) + 1
 
-            natural_can_do = self._extract_natural_can_do(text)
             response = ""
-            if natural_can_do:
-                action, payload = natural_can_do
-                if action == "add":
-                    added = self._add_can_do_items(payload)
-                    if added:
-                        response = "记住了,我之后安排日程时可以做：\n" + "\n".join(f"- {item}" for item in added)
-                    else:
-                        response = "这个可做事项我已经记过了。"
-                else:
-                    removed = self._remove_can_do_items(payload)
-                    if removed:
-                        response = "已移除这些可做事项：\n" + "\n".join(f"- {item}" for item in removed)
-                    else:
-                        response = "没有找到匹配的可做事项。"
             self._save_data_sync()
             user_snapshot = dict(user)
 

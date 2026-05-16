@@ -68,15 +68,15 @@
     "default": "你"
   },
   "require_private_opt_in": {
-    "description": "只允许私聊开启",
+    "description": "只允许私聊管理",
     "type": "bool",
-    "hint": "仅影响手动命令开启。配置里的 target_user_ids 会在启动时自动开启，不需要用户私聊指令。",
+    "hint": "仅限制命令管理入口。配置里的 target_user_ids 会在启动时自动预热，不需要用户私聊开启指令。",
     "default": true
   },
   "target_user_ids": {
     "description": "主动私聊目标 QQ 号",
     "type": "list",
-    "hint": "填写后插件启动时会自动为这些 QQ 开启陪伴，不需要对方发送“陪伴 开启”。",
+    "hint": "填写后插件启动时会自动为这些 QQ 建立主动私聊来源，不需要对方发送开启指令。",
     "default": []
   },
   "target_platform": {
@@ -86,9 +86,9 @@
     "default": "aiocqhttp"
   },
   "default_enable_configured_targets": {
-    "description": "启动时自动开启配置目标",
+    "description": "启动时自动预热配置目标",
     "type": "bool",
-    "hint": "开启后 target_user_ids 中的用户会自动启用主动陪伴。",
+    "hint": "开启后 target_user_ids 中的用户会自动建立私聊会话来源并预热主动陪伴。",
     "default": true
   },
   "LLM_PROVIDER_ID": {
@@ -492,13 +492,13 @@
   "detail_enhancement_lead_minutes": {
     "description": "提前强化日程段（分钟）",
     "type": "int",
-    "hint": "例如设为 30，则 08:30 的日程段会在约 08:00 后开始尝试细节强化。",
+    "hint": "建议设为 3，则 08:30 的日程段会在约 08:27 后开始尝试细节强化，更贴近当前区间。",
     "slider": {
       "min": 0,
       "max": 180,
-      "step": 5
+      "step": 1
     },
-    "default": 30
+    "default": 3
   },
   "enable_screen_glance_action": {
     "description": "允许主动看一眼屏幕",
@@ -509,8 +509,19 @@
   "enable_photo_text_action": {
     "description": "允许主动拍照/生图",
     "type": "bool",
-    "hint": "开启后，Bot 可能在放学、散步、看到风景等动机下调用 ComfyUI 工作流生成图片，拿到图片后再由 LLM 自然写成主动消息并一起发送。",
+    "hint": "开启后，Bot 可能在合适动机下调用 ComfyUI 工作流生成图片，拿到图片后再由 LLM 自然写成主动消息并一起发送。生成成功即计入图片额度，即使发送失败也不会立刻继续生图。",
     "default": true
+  },
+  "photo_action_max_daily": {
+    "description": "每日主动生图最多次数",
+    "type": "int",
+    "hint": "按用户计数。真实生成出图片就会消耗额度，避免发送失败或重启后反复生图。设为 0 表示不限制，不建议。",
+    "slider": {
+      "min": 0,
+      "max": 5,
+      "step": 1
+    },
+    "default": 1
   },
   "enable_poke_action": {
     "description": "允许主动戳一戳",
@@ -534,6 +545,12 @@
     "type": "bool",
     "hint": "开启后，Bot 可能在深夜、晚间、状态分享或想更贴近一点时主动留一小句语音。需要当前会话已配置可用的 TTS provider。",
     "default": false
+  },
+  "enable_qq_presence_sync": {
+    "description": "允许细化模型同步 QQ 全局状态",
+    "type": "bool",
+    "hint": "开启后，当前时间段细化可决定在线/睡觉/自定义短状态，并通过 OneBot 尝试同步。会减少忙碌，避免离开/隐身；失败会静默跳过。",
+    "default": true
   },
   "voice_action_max_chars": {
     "description": "主动语音最大字数",

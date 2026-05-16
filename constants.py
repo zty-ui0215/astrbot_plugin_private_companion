@@ -82,8 +82,10 @@ _DATA_STORE_KEYS = (
     "detail_enhanced_day",
     "detail_enhanced_segments",
     "schedule_adjustments",
+    "yesterday_conversation_summary",
     "can_do",
     "important_dates",
+    "qq_presence_state",
 )
 
 # 触发原因 - 真人化表达
@@ -109,6 +111,50 @@ _ACTION_TEXT = {
     "poke": "轻轻戳了戳你",
     "voice": "发了段语音跟你说",
 }
+
+# 主动能力注册表 - 给提示词和调试输出共用
+PROACTIVE_ABILITY_REGISTRY = [
+    {
+        "module": "主动消息",
+        "name": "message",
+        "label": "文字私聊",
+        "when": "没有明确媒介契机,或只需要很轻地接一句话",
+        "use_for": "早安、午间碰一下、轻关心、顺手分享、承接用户上一句",
+        "avoid": "把生活状态写成汇报,或为了发消息硬编动作",
+    },
+    {
+        "module": "主动行为",
+        "name": "screen_peek",
+        "label": "轻窥屏",
+        "when": "想确认对方在不在、忙不忙,且语气更像探头一下",
+        "use_for": "check_in、quiet_care、短空档里的试探",
+        "avoid": "复述屏幕内容、承认偷看、把观察写成分析报告",
+    },
+    {
+        "module": "主动行为",
+        "name": "photo_text",
+        "label": "图片加一句话",
+        "when": "当前场景里有任何适合顺手拍给熟人的具体画面",
+        "use_for": "activity_share、diary_share、午间或傍晚的小分享；具体主体由模型按上下文选择,不要只用于天气",
+        "avoid": "说图在生成、图好了、还在队列里,或解释生成流程",
+    },
+    {
+        "module": "主动行为",
+        "name": "voice",
+        "label": "短语音",
+        "when": "不想打长字、夜里想轻一点、或关系足够近时留一句短声",
+        "use_for": "quiet_care、evening_greeting、insomnia_night、很短的贴近感",
+        "avoid": "描述自己发语音的过程,或让语音像正式播报",
+    },
+    {
+        "module": "主动行为",
+        "name": "poke",
+        "label": "戳一戳",
+        "when": "很熟、很短、偏玩笑的触碰感,通常只做前置动作",
+        "use_for": "轻提醒、半撒娇的试探、名字开场后的补一下",
+        "avoid": "连续戳、报数、解释为什么戳",
+    },
+]
 
 # 模拟事件 - 软萌内心想法
 _SIMULATION_FALLBACK_EVENTS = [
@@ -143,7 +189,7 @@ _SIMULATION_FALLBACK_EVENTS = [
 
 # 默认用户模板（无文本，无需修改）
 _DEFAULT_USER_TEMPLATE = {
-    "enabled": False,
+    "enabled": True,
     "nickname": "",
     "style": "",
     "umo": "",
@@ -158,6 +204,7 @@ _DEFAULT_USER_TEMPLATE = {
     "last_proactive_action": "",
     "last_proactive_behavior_summary": "",
     "last_proactive_motive": "",
+    "recent_proactive_topics": [],
     "pending_followup_event": {},
     "suspended_proactive": {},
     "simulation_mode": {},
@@ -187,4 +234,6 @@ _DEFAULT_USER_TEMPLATE = {
     "proactive_daypart_day": "",
     "photo_sent_today": 0,
     "photo_sent_day": "",
+    "photo_generated_today": 0,
+    "photo_generated_day": "",
 }

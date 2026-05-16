@@ -232,6 +232,22 @@ def build_dream_memory_fragments(plugin, count: int = 8) -> list[str]:
         )
         if joined:
             fragments.append(joined)
+    yesterday = plugin.data.get("yesterday_conversation_summary", {})
+    if isinstance(yesterday, dict) and yesterday.get("date") == _today_key():
+        for candidate in (
+            _single_line(yesterday.get("dream_reference"), 100),
+            _single_line(yesterday.get("summary"), 100),
+        ):
+            if candidate and "无明确" not in candidate:
+                fragments.append(candidate)
+        residues = yesterday.get("residues", [])
+        if isinstance(residues, list):
+            for item in residues[:4]:
+                if not isinstance(item, dict):
+                    continue
+                content = _single_line(item.get("content"), 80)
+                if content:
+                    fragments.append(content)
     weather = _single_line(plugin._weather_summary_text(plugin.data.get("daily_weather", {})), 60)
     if weather and weather != "暂无天气信息":
         fragments.append(weather)
@@ -277,11 +293,19 @@ def dream_theme_specs(plugin) -> list[tuple[str, str]]:
 
 
 async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = None) -> tuple[str, str, int, int] | None:
-    if not plugin.enable_enhanced_dreams:
-        return None
     fragments = plugin._build_dream_memory_fragments()
     if not fragments:
-        return None
+        persona_hint = _single_line(plugin._get_default_persona_prompt(), 80)
+        weather_hint = _single_line(plugin._weather_summary_text(weather or plugin.data.get("daily_weather", {})), 60)
+        can_do = plugin.data.get("can_do", [])
+        activity_hint = ""
+        if isinstance(can_do, list) and can_do:
+            activity_hint = _single_line(random.choice(can_do), 60)
+        fragments = [
+            item
+            for item in (persona_hint, weather_hint, activity_hint, "醒来后只剩一点断续的画面")
+            if item and item != "暂无天气信息"
+        ]
     dream_themes = plugin._dream_theme_specs()
     primary_name, primary_hint = random.choice(dream_themes)
     theme_name = primary_name
@@ -293,8 +317,8 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
     persona = plugin._get_default_persona_prompt()
     weather_text = plugin._weather_summary_text(weather or plugin.data.get("daily_weather", {}))
     prompt = f"""
-请根据这些记忆碎片,写一个拟人化 Bot 今早残留的梦境状态。
-这个梦不是完整故事,而是欠逻辑、会跳接、带一点生活残影的梦。它可以是奇幻、恐怖、暧昧、追逐、荒诞等题材,也可以轻微交杂。
+请根据这些记忆碎片,写一个拟人化 Bot 今早残留的完整梦境。
+这个梦可以欠逻辑、跳接、荒诞、前后矛盾,但不能空泛,不能只有“做了一个梦”的状态标签。它必须像醒来后还能复述出来的一段梦：有开头的画面、中间的变化、至少一个不合逻辑的转折、醒来后留下的余韵。
 
 【人格参考】
 {persona}
@@ -310,33 +334,58 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
 
 只输出 JSON：
 {{
-  "label": "20到40字,像‘做了一个很碎的梦,......’这样的一句梦境描述",
+  "dream_type": "梦境类型,例如温柔日常/奇幻/追逐/悬疑/荒诞/怀旧/混合类型",
+  "factors": ["梦境因子或碎片,3到8个,可以是物件/颜色/声音/气味/半句话/动作"],
+  "content": "180到600字的梦境内容,写成完整一段梦；可以短也可以长,可以没有现实逻辑,但要有具体画面、推进和至少一个转场",
+  "afterglow": "醒来后的梦境余韵,20到120字,说明身体或情绪残留",
+  "label": "20到50字的短标签,概括这个梦留在身上的感觉",
   "mood": "平稳/恍惚/柔和/低落/敏感/轻快 之一",
   "energy_delta": -12到6之间的整数",
   "duration_hours": 3到8之间的整数
 }}
 
 要求：
-1. 梦要像把记忆碎片欠逻辑地拼在一起,不要写成完整故事。
-2. 尽量保留一点真实生活残影,不要纯奇幻大场面。
-3. 梦境描述只是一句状态,不是文艺散文。
+1. 梦境内容要像把记忆碎片欠逻辑地拼在一起,允许断裂和跳场,但必须有“发生了什么”。
+2. 尽量保留一点真实生活残影,不要纯奇幻大场面；如果出现奇幻,也要让它从生活物件、聊天残留或身体感受里长出来。
+3. 不要写成日程、日记、设定说明或心理分析。梦里可以有人、物、地点变化,但不要解释得太清楚。
 4. 如果主题偏温柔,energy_delta 可以略微为正；如果主题偏压迫/追赶/恐怖,可以略微为负。
 5. 如果主题涉及暧昧或春梦,保持含蓄,只写心跳、靠近、错觉感,不要露骨。
+6. 如果碎片很少,也要用已有的人格、天气、最近日记补出一个完整梦,不能输出“没有梦”“记不清”“什么都没有”。
 """.strip()
     raw_text = await plugin._llm_call(
         prompt,
-        max_tokens=220,
+        max_tokens=1050,
         provider_id=plugin.dream_provider_id or plugin.llm_provider_id,
     )
     payload = plugin._extract_json_payload(raw_text or "")
     if not isinstance(payload, dict):
         return None
-    label = _single_line(payload.get("label"), 60)
+    content = _single_line(payload.get("content"), 900)
+    factors_raw = payload.get("factors")
+    factors = []
+    if isinstance(factors_raw, list):
+        factors = [_single_line(item, 30) for item in factors_raw[:8] if _single_line(item, 30)]
+    label = _single_line(payload.get("label"), 80)
+    if not label and content:
+        label = _single_line(content, 80)
     if not label:
         return None
     mood = _single_line(payload.get("mood"), 12) or "恍惚"
     energy_delta = _safe_int(payload.get("energy_delta"), -6, -12, 6)
     duration_hours = _safe_int(payload.get("duration_hours"), 5, 3, 8)
+    if not content:
+        content = f"梦里只剩下一段很断续的画面：{label}"
+    plugin._last_generated_dream_payload = {
+        "dream_type": _single_line(payload.get("dream_type"), 40) or theme_name,
+        "factors": factors or fragments[:8],
+        "content": content,
+        "afterglow": _single_line(payload.get("afterglow"), 180) or label,
+        "label": label,
+        "mood": mood,
+        "energy_delta": energy_delta,
+        "duration_hours": duration_hours,
+        "raw": raw_text or "",
+    }
     return label, mood, energy_delta, duration_hours
 
 
@@ -346,6 +395,7 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     plan = plugin.data.get("daily_plan", {})
     can_do = plugin._format_can_do_for_prompt()
     calendar_context = plugin._format_calendar_context_for_prompt()
+    yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
     prompt = f"""
 今天是 {today}。请为你自己写一条今天的日记,同时预设今天的生活碎片和主动聊天计划。
 
@@ -375,6 +425,9 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 
 最近日记：
 {plugin._recent_diary_context()}
+
+昨日完整对话摘要：
+{yesterday_conversation}
 
 近期重要日期：
 {plugin._format_important_dates_for_prompt()}
