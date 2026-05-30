@@ -469,6 +469,12 @@ def get_schedule_planning_prompt(plugin) -> str:
             + persona
             + "\n如果上面的日程专用角色设定/世界观与默认人格存在重叠,优先按日程专用内容理解生活设定；聊天时仍以 AstrBot 默认人格为准。"
         )
+    worldview_adaptation = ""
+    formatter = getattr(plugin, "_format_worldview_adaptation_prompt", None)
+    if callable(formatter):
+        worldview_adaptation = formatter()
+    if worldview_adaptation:
+        parts.append(worldview_adaptation)
     return "\n\n".join(parts)
 
 

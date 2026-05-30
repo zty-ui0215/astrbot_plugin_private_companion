@@ -8,6 +8,10 @@ const state = {
   diagnostics: [],
   availableProviders: [],
   tokenStats: null,
+  bookshelfUnlocked: null,
+  selectedBook: null,
+  bookshelfPage: "shelf",
+  selectedBookSpreadIndex: 0,
   selectedUserId: "",
   selectedGroupId: "",
   featureDraft: {},
@@ -18,8 +22,7 @@ const providerLabels = {
   MAI_STYLE_PROVIDER_ID: "陪伴通用模型",
   DAILY_PLAN_PROVIDER_ID: "日程生成",
   DETAIL_ENHANCEMENT_PROVIDER_ID: "日程细化",
-  DIARY_PROVIDER_ID: "日记生成",
-  DREAM_PROVIDER_ID: "强化梦境",
+  DREAM_DIARY_PROVIDER_ID: "日记与梦境",
   CREATIVE_PROVIDER_ID: "私下创作",
   VOICE_PROMPT_PROVIDER_ID: "主动语音文案",
   PHOTO_PROMPT_PROVIDER_ID: "生图提示词",
@@ -32,15 +35,27 @@ const providerLabels = {
   GROUP_INTERJECT_PROVIDER_ID: "群聊主动插话",
   GROUP_EPISODE_PROVIDER_ID: "群聊片段整理",
   GROUP_SLANG_PROVIDER_ID: "群内黑话释义",
+  PRIVATE_READING_VISION_PROVIDER_ID: "夹层阅读视觉",
 };
+
+const privateReadingConfigKeys = new Set([
+  "enable_private_reading_integration",
+  "enable_private_reading_boredom_read",
+  "enable_private_reading_ask_recommendation",
+  "private_reading_min_interval_hours",
+  "private_reading_max_photo_count",
+  "private_reading_share_probability",
+  "private_reading_ask_probability",
+  "private_reading_default_keywords",
+  "PRIVATE_READING_VISION_PROVIDER_ID",
+]);
 
 const providerDescriptions = {
   LLM_PROVIDER_ID: "基础兜底模型。主动消息、未指定模型的任务都会向这里回退。",
   MAI_STYLE_PROVIDER_ID: "陪伴风格通用模型。建议选择稳定、便宜、会写自然口语的模型。",
   DAILY_PLAN_PROVIDER_ID: "每天生成粗日程和纠偏重试。适合结构化稳定、能吃人格和世界观的模型。",
   DETAIL_ENHANCEMENT_PROVIDER_ID: "把当前日程段展开成细节事件、状态变量和主动契机。",
-  DIARY_PROVIDER_ID: "生成每日 Bot 日记、生活碎片、梦境碎片和日记主动契机。",
-  DREAM_PROVIDER_ID: "生成强化梦境内容和梦后余韵，适合短文本意象能力好的模型。",
+  DREAM_DIARY_PROVIDER_ID: "生成每日 Bot 日记、生活碎片、梦境碎片、强化梦境内容和梦后余韵。",
   CREATIVE_PROVIDER_ID: "生成小说项目设定和慢速续写正文，适合文风稳定、能守住人设身份的模型。",
   VOICE_PROMPT_PROVIDER_ID: "生成主动语音短句，并修复 TTS 标签、日语或双语格式。",
   PHOTO_PROMPT_PROVIDER_ID: "生成 photo_text 的画面提示词和画面描述，可单独使用视觉描述更强的模型。",
@@ -53,6 +68,7 @@ const providerDescriptions = {
   GROUP_INTERJECT_PROVIDER_ID: "群聊主动插话专用。建议选择短文本质量好、反应稳的模型。",
   GROUP_EPISODE_PROVIDER_ID: "整理群聊片段、群氛围和话题线，主要用于群聊观察。",
   GROUP_SLANG_PROVIDER_ID: "解释群内黑话、梗和成员称呼，适合用小模型。",
+  PRIVATE_READING_VISION_PROVIDER_ID: "观察私密阅读素材封面并形成非露骨的内部阅读印象。留空时尝试回退到工具转述模型。",
 };
 
 const featureMeta = {
@@ -66,10 +82,17 @@ const featureMeta = {
   enable_relationship_state_machine: ["关系状态机", "维护陌生、熟悉、亲近等关系阶段。"],
   enable_dialogue_episode_memory: ["私聊片段", "把连续对话整理成共同经历和可续话头。"],
   enable_open_loop_tracking: ["未完话头", "记录用户提到的待办、约定、之后再说的事。"],
+  enable_environment_perception: ["环境感知", "注入当前时间、日期语境、平台、群聊/私聊和消息媒介信息。"],
+  enable_holiday_perception: ["节假日感知", "识别工作日、周末、节假日和调休，影响生活节奏判断。"],
+  enable_platform_perception: ["平台感知", "识别 QQ/平台、私聊/群聊、群号群名以及图片语音视频消息。"],
+  enable_lunar_perception: ["农历感知", "可用时注入农历日期，辅助节日、生活氛围和日记语境。"],
+  enable_solar_term_perception: ["节气感知", "注入当天或临近节气，让日程和表达更贴合时令。"],
+  enable_almanac_perception: ["轻量黄历", "生成宜/忌氛围标签，默认关闭，避免玄学感太强。"],
   enable_group_companion: ["群聊总开关", "控制是否处理群聊观察、画像、黑话和上下文注入。"],
   enable_group_slang_learning: ["群黑话学习", "记录群内常用梗、简称和特殊表达。"],
   enable_group_member_profiles: ["群成员画像", "记录成员发言习惯和群内角色，帮助判断气氛。"],
   enable_group_context_injection: ["群上下文注入", "在群聊回复时加入群氛围、话题和成员信息。"],
+  enable_group_scene_awareness: ["群聊场景感知", "推断当前消息是在对 Bot、某个群友还是整个群说话，减少误以为别人都在问自己。"],
   enable_group_interjection: ["群主动插话", "允许 Bot 在群聊里主动插一句。谨慎开启。"],
   enable_group_topic_threads: ["群话题线", "维护当前群聊正在聊什么，以及话题如何变化。"],
   enable_group_episode_memory: ["群聊片段", "把群聊阶段性内容整理成摘要片段。"],
@@ -78,9 +101,13 @@ const featureMeta = {
   enable_group_relationship_graph: ["群关系网", "记录成员之间的互动关系和常见组合。"],
   enable_group_privacy_guard: ["群隐私保护", "避免把私聊记忆和私下关系泄露到群聊。建议开启。"],
   enable_worldbook_member_recognition: ["群聊关系网", "以 QQ 号确认成员身份，昵称和别名只作辅助线索。"],
+  enable_atrelay_tools: ["跨群转述与 @ 群友", "整合艾特群友能力，可让模型查询群成员、按关系网解析 @ 对象并发送群聊/私聊消息。"],
   enable_livingmemory_integration: ["LivingMemory 协同", "引导模型按需调用长期记忆工具，避免重复造轮子。"],
   enable_bilibili_integration: ["B 站联动", "读取 B 站 Bot 观看日志，并在合适节点私聊分享。"],
   enable_bilibili_boredom_watch: ["无聊刷 B 站", "空档或无聊时低频触发 B 站 Bot 自己看视频。"],
+  enable_private_reading_integration: ["夹层阅读素材", "检测到可用素材能力时，允许作为低频私下阅读来源。"],
+  enable_private_reading_boredom_read: ["私下阅读", "空档、无聊或夜里低频自己搜索并阅读，形成内部印象。"],
+  enable_private_reading_ask_recommendation: ["征求推荐", "空档或无聊时，低频私聊询问用户有没有好看的本子或漫画推荐。"],
   enable_unanswered_screen_peek_followup: ["沉默后窥屏", "主动消息后用户长时间没回、且 Bot 正好无聊时，可免日次数窥屏确认用户在做什么。"],
   enable_creative_writing: ["私下创作", "因生活小事或梦境灵感开小说坑，并按人格速度慢慢写。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
@@ -104,11 +131,24 @@ const featureGroups = [
     ],
   },
   {
+    title: "环境感知",
+    note: "时间、节假日、农历节气、平台和消息媒介。",
+    keys: [
+      "enable_environment_perception",
+      "enable_holiday_perception",
+      "enable_platform_perception",
+      "enable_lunar_perception",
+      "enable_solar_term_perception",
+      "enable_almanac_perception",
+    ],
+  },
+  {
     title: "群聊观察",
     note: "群氛围、黑话、话题线、插话和隐私边界。",
     keys: [
       "enable_group_companion",
       "enable_group_context_injection",
+      "enable_group_scene_awareness",
       "enable_group_slang_learning",
       "enable_group_slang_meanings",
       "enable_group_member_profiles",
@@ -125,6 +165,7 @@ const featureGroups = [
     note: "QQ 关系网、外部长期记忆和身份稳定识别。",
     keys: [
       "enable_worldbook_member_recognition",
+      "enable_atrelay_tools",
       "enable_livingmemory_integration",
     ],
   },
@@ -134,6 +175,9 @@ const featureGroups = [
     keys: [
       "enable_bilibili_integration",
       "enable_bilibili_boredom_watch",
+      "enable_private_reading_integration",
+      "enable_private_reading_boredom_read",
+      "enable_private_reading_ask_recommendation",
       "enable_unanswered_screen_peek_followup",
       "enable_creative_writing",
       "creative_hidden_mode",
@@ -150,7 +194,11 @@ const safeFeatureKeys = [
   "enable_relationship_state_machine",
   "enable_dialogue_episode_memory",
   "enable_open_loop_tracking",
+  "enable_environment_perception",
+  "enable_holiday_perception",
+  "enable_platform_perception",
   "enable_worldbook_member_recognition",
+  "enable_atrelay_tools",
 ];
 
 const configLabels = {
@@ -158,6 +206,9 @@ const configLabels = {
   user_count: "私聊对象总数",
   require_opt_in: "是否需要私聊确认",
   max_daily_messages: "每日主动上限",
+  daily_token_limit: "每日 Token 限额",
+  worldview_adaptation_mode: "世界观适配模式",
+  worldview_adaptation_prompt: "自定义世界观适配",
   idle_minutes: "空闲门槛分钟",
   min_interval_minutes: "最小主动间隔分钟",
   enabled: "群聊总开关",
@@ -209,7 +260,10 @@ const tokenTaskLabels = {
   creative_writing: "小说创作",
   photo_prompt: "生图提示",
   screen_narration: "识屏转述",
+  private_reading_vision: "夹层视觉",
   voice: "语音文本",
+  proactive_framework: "主动主回复",
+  voice_framework: "框架语音",
   voice_repair: "语音格式修复",
   yesterday_summary: "昨日摘要",
   full_test_detail: "完整测试细化",
@@ -347,7 +401,7 @@ function renderAll() {
   renderWorldbook();
   renderMemory();
   renderProactiveCandidates();
-  renderCreative();
+  renderBookshelf();
   renderTokens();
   renderModuleSettings();
   renderConfig();
@@ -364,7 +418,7 @@ function renderStats() {
   $("#stats").innerHTML = [
     statCard(privateInfo.enabled_user_count || 0, `私聊对象 / 共 ${privateInfo.user_count || 0}`),
     statCard(groupInfo.enabled_group_count || 0, `群聊观测 / 共 ${groupInfo.group_count || 0}`),
-    statCard(creative.active_projects || 0, `私下创作 / 共 ${creative.project_count || 0}`),
+    statCard(creative.active_projects || 0, `书柜创作 / 共 ${creative.project_count || 0}`),
     statCard(groupInfo.access_mode || "-", "群聊名单模式"),
     statCard(living.available ? "可用" : "未检测", "LivingMemory"),
     statCard(formatCompactNumber(tokens.total_tokens || 0), "累计 Token"),
@@ -440,7 +494,7 @@ function renderDashboardPulse() {
     ["modules", "模块配置", moduleShortcutNote(overview.settings || {})],
     ["config", "名单与开关", `${overview.group?.access_mode || "whitelist"} · 白 ${overview.group?.whitelist?.length || 0} / 黑 ${overview.group?.blacklist?.length || 0}`],
     ["models", "模型分流", providerShortcutNote(overview.providers || {})],
-    ["creative", "创作状态", overview.creative?.latest_title || "暂无项目"],
+    ["bookshelf", "书柜", overview.creative?.latest_title || "暂无项目"],
   ];
   $("#dashboardShortcuts").innerHTML = shortcuts.map(([tab, label, note]) => `
     <button type="button" class="shortcut-chip" data-jump-tab="${escapeHtml(tab)}">
@@ -557,18 +611,29 @@ function renderRelationshipChart() {
 
 function renderQuotaChart() {
   const maxDaily = Number(state.overview?.private?.max_daily_messages || 0);
-  const rows = state.users.slice(0, 12).map((user) => {
+  const quotaUsers = state.users.filter((user) => user.is_qq_user);
+  const rows = (quotaUsers.length ? quotaUsers : state.users).slice(0, 12).map((user) => {
     const used = Number(user.sent_today || 0);
     const pct = maxDaily > 0 ? Math.min(100, Math.round((used / maxDaily) * 100)) : 0;
     return `
       <div class="meter-row">
-        <span>${escapeHtml(user.nickname || user.user_id)}</span>
+        <span title="${escapeHtml(user.user_id || "")}">${escapeHtml(userQuotaLabel(user))}</span>
         <div class="meter"><i style="width:${pct}%"></i></div>
         <b>${escapeHtml(used)}${maxDaily ? `/${escapeHtml(maxDaily)}` : ""}</b>
       </div>
     `;
   });
   $("#quotaChart").innerHTML = rows.length ? rows.join("") : `<div class="empty small">暂无私聊对象</div>`;
+}
+
+function userQuotaLabel(user) {
+  const id = String(user?.user_id || "");
+  if (user?.display_name && !String(user.display_name).startsWith("临时会话")) return user.display_name;
+  if (user?.display_name && !user?.is_qq_user) return user.display_name;
+  const nickname = String(user?.nickname || "").trim();
+  const genericNames = new Set(["用户", "主人", "默认用户"]);
+  if (!nickname || genericNames.has(nickname)) return id || "未命名";
+  return id ? `${nickname} · ${id.slice(-4)}` : nickname;
 }
 
 function renderGroupBubbleChart() {
@@ -602,16 +667,17 @@ function renderGroupBubbleChart() {
 }
 
 function renderFeatureMatrix() {
+  const privateReadingAvailable = Boolean(state.overview?.private_reading?.available);
   const groups = [
     ["陪伴", ["enable_mai_style_integration", "enable_expression_learning", "enable_response_self_review", "enable_dialogue_episode_memory"]],
     ["群聊", ["enable_group_companion", "enable_group_context_injection", "enable_group_slang_learning", "enable_group_topic_threads", "enable_group_relationship_graph"]],
     ["记忆", ["enable_companion_memory", "enable_open_loop_tracking", "enable_livingmemory_integration"]],
-    ["主动联动", ["enable_unanswered_screen_peek_followup", "enable_bilibili_integration", "enable_bilibili_boredom_watch", "enable_creative_writing", "creative_hidden_mode"]],
+    ["主动联动", ["enable_unanswered_screen_peek_followup", "enable_bilibili_integration", "enable_bilibili_boredom_watch", "enable_private_reading_integration", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_creative_writing", "creative_hidden_mode"]],
   ];
   $("#featureMatrix").innerHTML = groups.map(([label, keys]) => `
     <section>
       <h3>${escapeHtml(label)}</h3>
-      ${keys.map((key) => `<span class="feature-dot ${state.overview?.features?.[key] ? "on" : "off"}" title="${escapeHtml(key)}">${escapeHtml(key.replace(/^enable_/, ""))}</span>`).join("")}
+      ${keys.filter((key) => privateReadingAvailable || !privateReadingConfigKeys.has(key)).map((key) => `<span class="feature-dot ${state.overview?.features?.[key] ? "on" : "off"}" title="${escapeHtml(key)}">${escapeHtml(key.replace(/^enable_/, ""))}</span>`).join("")}
     </section>
   `).join("");
 }
@@ -651,8 +717,16 @@ function renderTokens() {
   const calls = Number(totals.calls || 0);
   const errors = Number(totals.errors || 0);
   const estimatedRatio = Number(totals.estimated_ratio || 0);
+  const budget = stats.budget || {};
+  const dailyLimit = Number(budget.limit || 0);
+  const dailyUsed = Number(budget.used || 0);
+  const exemptUsed = Number(budget.exempt_used || 0);
+  const dailyRemaining = budget.remaining == null ? null : Number(budget.remaining || 0);
   $("#tokenSummary").innerHTML = [
     miniStat("总 Token", formatNumber(totalTokens)),
+    miniStat("今日用量", dailyLimit > 0 ? `${formatCompactNumber(dailyUsed)} / ${formatCompactNumber(dailyLimit)}` : formatCompactNumber(dailyUsed)),
+    miniStat("今日剩余", dailyRemaining == null ? "不限" : formatCompactNumber(dailyRemaining)),
+    miniStat("主动消息", formatCompactNumber(exemptUsed)),
     miniStat("调用次数", formatNumber(calls)),
     miniStat("平均 Token", formatNumber(Math.round(Number(totals.avg_tokens || 0)))),
     miniStat("平均延迟", `${formatNumber(Math.round(Number(totals.avg_latency_ms || 0)))} ms`),
@@ -663,6 +737,8 @@ function renderTokens() {
   renderTokenChart("#tokenProviderChart", stats.by_provider || [], "暂无 Provider 消耗数据", (item) => item.key || "default");
   renderTokenChart("#tokenTaskChart", stats.by_task || [], "暂无任务消耗数据", (item) => tokenTaskLabel(item.key));
   renderTokenHourlyChart(stats.by_hour || []);
+  renderTokenDailyChart(stats.by_day || []);
+  renderTokenDailyTable(stats.by_day_detail || stats.by_day || []);
   renderTokenProviderTable(stats.by_provider || []);
   renderTokenTaskTable(stats.by_task || []);
   renderTokenRecentTable(stats.recent || []);
@@ -690,18 +766,112 @@ function renderTokenHourlyChart(rows) {
   const normalized = rows.slice(-48);
   const max = Math.max(1, ...normalized.map((item) => Number(item.total_tokens || 0)));
   $("#tokenHourlyChart").innerHTML = normalized.length
-    ? normalized.map((item) => {
-      const tokens = Number(item.total_tokens || 0);
-      const height = Math.max(4, Math.round((tokens / max) * 112));
-      const label = formatHourKey(item.key);
-      return `
-        <div class="token-bar" title="${escapeHtml(label)} · ${escapeHtml(formatNumber(tokens))} token · ${escapeHtml(item.calls || 0)} 次">
-          <i style="height:${height}px"></i>
-          <span>${escapeHtml(label.slice(-5))}</span>
-        </div>
-      `;
-    }).join("")
+    ? tokenHourlySvg(normalized, max)
     : `<div class="empty small">暂无小时趋势数据</div>`;
+}
+
+function renderTokenDailyChart(rows) {
+  const normalized = rows.slice(-30);
+  const max = Math.max(1, ...normalized.map((item) => Number(item.total_tokens || 0)));
+  $("#tokenDailyChart").innerHTML = normalized.length
+    ? tokenDailySvg(normalized, max)
+    : `<div class="empty small">暂无每日统计数据</div>`;
+}
+
+function tokenDailySvg(rows, max) {
+  const chartHeight = 176;
+  const chartTop = 12;
+  const chartBottom = 36;
+  const axisLeft = 74;
+  const rightPad = 18;
+  const barStep = 34;
+  const width = Math.max(760, axisLeft + rightPad + rows.length * barStep);
+  const height = chartHeight + chartTop + chartBottom;
+  const plotHeight = chartHeight - chartTop;
+  const plotBottom = chartTop + plotHeight;
+  const labelStep = Math.max(1, Math.ceil(rows.length / 10));
+  const ticks = [1, 0.75, 0.5, 0.25, 0];
+  const grid = ticks.map((ratio) => {
+    const y = chartTop + (1 - ratio) * plotHeight;
+    const value = Math.round(max * ratio);
+    return `
+      <line class="token-grid-line" x1="${axisLeft}" y1="${y}" x2="${width - rightPad}" y2="${y}"></line>
+      <text class="token-axis-label y" x="${axisLeft - 10}" y="${y + 4}">${escapeHtml(formatNumber(value))}</text>
+    `;
+  }).join("");
+  const bars = rows.map((item, index) => {
+    const tokens = Number(item.total_tokens || 0);
+    const barHeight = Math.max(tokens > 0 ? 4 : 0, Math.round((tokens / max) * (plotHeight - 4)));
+    const x = axisLeft + index * barStep + 8;
+    const y = plotBottom - barHeight;
+    const label = String(item.key || "");
+    const labelNode = index % labelStep === 0 || index === rows.length - 1
+      ? `<text class="token-axis-label x" x="${x + 8}" y="${height - 8}">${escapeHtml(label.slice(5))}</text>`
+      : "";
+    return `
+      <g class="token-hour-group">
+        <title>${escapeHtml(label)} · ${escapeHtml(formatNumber(tokens))} token · ${escapeHtml(item.calls || 0)} 次</title>
+        <rect x="${x}" y="${y}" width="18" height="${barHeight}" rx="5"></rect>
+        ${labelNode}
+      </g>
+    `;
+  }).join("");
+  return `
+    <svg class="token-hourly-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="每日 Token 消耗趋势">
+      <line class="token-axis-line" x1="${axisLeft}" y1="${chartTop}" x2="${axisLeft}" y2="${plotBottom}"></line>
+      <line class="token-axis-line" x1="${axisLeft}" y1="${plotBottom}" x2="${width - rightPad}" y2="${plotBottom}"></line>
+      ${grid}
+      ${bars}
+    </svg>
+  `;
+}
+
+function tokenHourlySvg(rows, max) {
+  const chartHeight = 176;
+  const chartTop = 12;
+  const chartBottom = 34;
+  const axisLeft = 74;
+  const rightPad = 18;
+  const barStep = 30;
+  const width = Math.max(760, axisLeft + rightPad + rows.length * barStep);
+  const height = chartHeight + chartTop + chartBottom;
+  const plotHeight = chartHeight - chartTop;
+  const plotBottom = chartTop + plotHeight;
+  const labelStep = Math.max(1, Math.ceil(rows.length / 12));
+  const ticks = [1, 0.75, 0.5, 0.25, 0];
+  const grid = ticks.map((ratio) => {
+    const y = chartTop + (1 - ratio) * plotHeight;
+    const value = Math.round(max * ratio);
+    return `
+      <line class="token-grid-line" x1="${axisLeft}" y1="${y}" x2="${width - rightPad}" y2="${y}"></line>
+      <text class="token-axis-label y" x="${axisLeft - 10}" y="${y + 4}">${escapeHtml(formatNumber(value))}</text>
+    `;
+  }).join("");
+  const bars = rows.map((item, index) => {
+      const tokens = Number(item.total_tokens || 0);
+    const barHeight = Math.max(tokens > 0 ? 4 : 0, Math.round((tokens / max) * (plotHeight - 4)));
+      const label = formatHourKey(item.key);
+    const x = axisLeft + index * barStep + 7;
+    const y = plotBottom - barHeight;
+    const labelNode = index % labelStep === 0 || index === rows.length - 1
+      ? `<text class="token-axis-label x" x="${x + 8}" y="${height - 8}">${escapeHtml(label.slice(-5))}</text>`
+      : "";
+      return `
+      <g class="token-hour-group">
+        <title>${escapeHtml(label)} · ${escapeHtml(formatNumber(tokens))} token · ${escapeHtml(item.calls || 0)} 次</title>
+        <rect x="${x}" y="${y}" width="16" height="${barHeight}" rx="5"></rect>
+        ${labelNode}
+      </g>
+      `;
+  }).join("");
+  return `
+    <svg class="token-hourly-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="近 48 小时 Token 消耗趋势">
+      <line class="token-axis-line" x1="${axisLeft}" y1="${chartTop}" x2="${axisLeft}" y2="${plotBottom}"></line>
+      <line class="token-axis-line" x1="${axisLeft}" y1="${plotBottom}" x2="${width - rightPad}" y2="${plotBottom}"></line>
+      ${grid}
+      ${bars}
+    </svg>
+  `;
 }
 
 function renderTokenProviderTable(rows) {
@@ -736,6 +906,27 @@ function renderTokenTaskTable(rows) {
     ],
     "暂无任务明细"
   );
+}
+
+function renderTokenDailyTable(rows) {
+  $("#tokenDailyTable").innerHTML = tokenTable(
+    ["日期", "总 Token", "调用", "失败", "主要任务", "主要 Provider"],
+    rows.slice().reverse(),
+    (item) => [
+      item.key || "-",
+      formatNumber(item.total_tokens),
+      formatNumber(item.calls),
+      formatNumber(item.errors),
+      tokenTopList(item.tasks, tokenTaskLabel),
+      tokenTopList(item.providers, (key) => key || "default"),
+    ],
+    "暂无每日明细"
+  );
+}
+
+function tokenTopList(rows, labeler) {
+  if (!Array.isArray(rows) || !rows.length) return "-";
+  return rows.slice(0, 3).map((item) => `${labeler(item.key)} ${formatCompactNumber(item.total_tokens)}`).join(" / ");
 }
 
 function renderTokenRecentTable(rows) {
@@ -805,14 +996,26 @@ function renderUsers() {
   $("#userRows").innerHTML = rows.length
     ? rows.map((user) => `
       <tr data-user-id="${escapeHtml(user.user_id)}" class="${user.user_id === state.selectedUserId ? "is-selected" : ""}">
-        <td><strong>${escapeHtml(user.nickname || user.user_id)}</strong><br><span class="muted">${escapeHtml(user.user_id)}</span></td>
+        <td><strong>${escapeHtml(user.display_name || user.nickname || user.user_id)}</strong>${user.is_qq_user ? "" : ` <span class="badge off">非 QQ</span>`}<br><span class="muted">${escapeHtml(user.user_id)}</span></td>
         <td><span class="badge ${user.enabled ? "" : "off"}">${escapeHtml(user.enabled ? "启用" : "停用")}</span> <span class="muted">${escapeHtml(user.relationship_stage || "未分层")}</span><br><span>分数 ${escapeHtml(user.relationship_score)}</span></td>
         <td>入站 ${escapeHtml(user.inbound_count)} · 回复 ${escapeHtml(user.reply_count)}<br><span class="muted">记忆 ${escapeHtml(user.memory_items)} 条</span></td>
         <td>今日 ${escapeHtml(user.sent_today)} · 总计 ${escapeHtml(user.proactive_sent_count)}<br><span class="muted">${escapeHtml(user.next_proactive)}</span></td>
         <td>${escapeHtml(user.last_seen)}<br><span class="muted">上次主动 ${escapeHtml(user.last_sent)}</span></td>
+        <td><button type="button" class="table-action ${user.enabled ? "danger-outline" : ""}" data-user-toggle="${escapeHtml(user.user_id)}">${escapeHtml(user.enabled ? "停用" : "启用")}</button></td>
       </tr>
     `).join("")
-    : `<tr><td class="empty" colspan="5">暂无私聊对象</td></tr>`;
+    : `<tr><td class="empty" colspan="6">暂无私聊对象</td></tr>`;
+  document.querySelectorAll("[data-user-toggle]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const user = state.users.find((item) => item.user_id === button.dataset.userToggle);
+      if (!user) return;
+      await runAction(() => postJson("/user/update", {
+        user_id: user.user_id,
+        enabled: !user.enabled,
+      }));
+    });
+  });
   document.querySelectorAll("[data-user-id]").forEach((row) => {
     row.addEventListener("click", async () => {
       state.selectedUserId = row.dataset.userId;
@@ -946,7 +1149,7 @@ async function renderGroupDetail(forceFetch = false) {
     </div>
     <div class="detail-grid">
       ${detailBlock("群状态", detail.formatted?.status || "", [["常用词", formatSlangTerms(detail.slang_terms || [])]])}
-      <section class="detail-block"><h2>关系网</h2>${relationshipGraphSvg(detail.relationship_edges || {})}</section>
+      <section class="detail-block wide"><h2>关系网</h2>${relationshipGraphView(detail.relationship_edges || {}, detail.members || {})}</section>
       <section class="detail-block"><h2>消息活跃</h2>${messageTimelineSvg(detail.recent_messages || [])}</section>
       ${detailBlock("插话反馈", detail.formatted?.feedback || "", [])}
       ${detailBlock("话题线", "", topics)}
@@ -1298,7 +1501,7 @@ function renderDiaryCards(diaries) {
             <b>${escapeHtml(item.date || "未记录日期")}</b>
             <small>${escapeHtml(item.generated_at || "")}</small>
           </div>
-          <p>${escapeHtml(item.summary || "暂无日记摘要")}</p>
+          <p>${escapeHtml(item.body || item.summary || "暂无日记正文")}</p>
           ${item.share_seed ? `<blockquote>${escapeHtml(item.share_seed)}</blockquote>` : ""}
           <div class="diary-tags">${tags}</div>
         </section>
@@ -1321,28 +1524,321 @@ function renderDreamFragments(fragments) {
   }).join("");
 }
 
-function renderCreative() {
+function renderBookshelf() {
   const creative = state.overview?.creative || {};
+  const bookshelf = state.bookshelfUnlocked || state.overview?.bookshelf || {};
+  const privateReading = state.overview?.private_reading || {};
   const settings = state.overview?.settings || {};
-  $("#creativeActiveCount").textContent = creative.active_projects || 0;
-  $("#creativeProjectCount").textContent = creative.project_count || 0;
-  $("#creativeRevealMode").textContent = creative.hidden_mode ? "节点自然提起" : "普通模式";
-  $("#creativeLatestTitle").textContent = creative.latest_title || "暂无";
-  $("#creativeIntro").textContent = creative.enabled
-    ? "私下创作会从日程、日记、梦境或生活小事里长出灵感。它不是每天打卡式展示，而是由 Bot 自己按节奏写，写到开头、过半、完稿或想听读后感觉时才可能进入主动候选。"
-    : "私下创作当前未开启。开启后，Bot 会把创作当作自己的长线生活行为之一。";
-  renderDl("#creativeSettings", {
-    "功能状态": creative.enabled ? "开启" : "关闭",
-    "低调模式": creative.hidden_mode ? "开启" : "关闭",
+  $("#bookshelfPublicCount").textContent = bookshelf.public_count ?? creative.project_count ?? 0;
+  $("#bookshelfSecretCount").textContent = bookshelf.secret_count ?? 0;
+  $("#bookshelfDiaryCount").textContent = bookshelf.diary_count ?? 0;
+  $("#bookshelfJmCount").textContent = bookshelf.jm_album_count ?? 0;
+  $("#bookshelfLockState").textContent = bookshelf.unlocked ? "已解锁" : "未解锁";
+  $("#bookshelfIntro").textContent = creative.enabled
+    ? "这些书不是一次写完的成品，而是 Bot 按自己的节奏从日程、日记、梦境或生活小事里慢慢写出来的。"
+    : "创作当前未开启。开启后，新的项目会像书一样摆到上层书架。";
+  const creativeSettings = {
+    "创作": creative.enabled ? "开启" : "关闭",
+    "提起方式": creative.hidden_mode ? "节点自然提起" : "普通模式",
     "灵感触发概率": formatPercent(settings.creative_inspiration_probability),
     "节点提起概率": formatPercent(settings.creative_share_probability),
-    "基础写作速度": `${settings.creative_base_chars_per_hour || 0} 字/小时`,
-    "同时项目上限": settings.creative_max_active_projects || 0,
-  });
-  const items = creative.items || [];
-  $("#creativeProjects").innerHTML = items.length
-    ? items.slice().reverse().map(renderCreativeProjectCard).join("")
-    : `<div class="empty">暂无创作项目。等某个生活片段或梦境变成灵感时，这里会出现新的小坑。</div>`;
+    "写作速度": `${settings.creative_base_chars_per_hour || 0} 字/小时`,
+  };
+  if (privateReading.available) {
+    creativeSettings["夹层阅读"] = privateReading.boredom_read_enabled ? "可触发" : "关闭";
+    creativeSettings["征求推荐"] = privateReading.ask_recommendation_enabled ? "可触发" : "关闭";
+  }
+  renderDl("#creativeSettings", creativeSettings);
+  const publicBooks = bookshelf.public_books || [];
+  $("#bookshelfPublicBooks").innerHTML = publicBooks.length
+    ? publicBooks.slice().reverse().map(renderBookshelfBook).join("")
+    : `<div class="empty">上层书架还是空的。等某个生活片段或梦境变成灵感时，这里会多出一本书。</div>`;
+  const secretBooks = bookshelf.secret_books || [];
+  $("#bookshelfSecretBooks").innerHTML = bookshelf.unlocked
+    ? renderUnlockedDrawer(secretBooks)
+    : renderLockedDrawer(bookshelf.secret_count || 0);
+  const home = $("#bookcaseHome");
+  if (home) home.hidden = state.bookshelfPage !== "shelf";
+  renderBookDetailPanel();
+}
+
+function renderLockedDrawer(count) {
+  return `
+    <div class="drawer-locked">
+      <div class="drawer-face">
+        <span></span>
+        <i></i>
+      </div>
+      <div>
+        <b>${escapeHtml(count || 0)} 本锁在夹层里</b>
+        <p>日记本和夹层藏书不会直接展示。密码要在聊天里自然向 Bot 询问。</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderUnlockedDrawer(items) {
+  if (!items.length) {
+    return `<div class="empty small">抽屉已经打开，但里面暂时还没有日记本或夹层藏书。</div>`;
+  }
+  const diaryBooks = items.filter((item) => item.kind === "diary");
+  const privateBooks = items.filter((item) => item.kind !== "diary");
+  const groups = [
+    ["日记本", diaryBooks, "按日期收进同一本里"],
+    ["夹层藏书", privateBooks, "只保留标题和阅读印象"],
+  ].filter(([, books]) => books.length);
+  return groups.map(([title, books, note]) => `
+    <section class="drawer-book-group">
+      <header>
+        <span>${escapeHtml(title)}</span>
+        <small>${escapeHtml(note)}</small>
+      </header>
+      <div class="drawer-book-row">${books.slice().reverse().map(renderBookshelfBook).join("")}</div>
+    </section>
+  `).join("");
+}
+
+function renderBookshelfBook(item) {
+  const kind = item.kind || "creative";
+  const kindLabel = {
+    creative: "创作",
+    diary: "日记本",
+    jm_album: "夹层藏书",
+  }[kind] || kind;
+  const bookId = bookshelfBookId(item);
+  return `
+    <button type="button" class="shelf-book ${escapeHtml(kind)}" data-book-id="${escapeHtml(bookId)}">
+      <div class="book-spine">
+        <span>${escapeHtml(kindLabel)}</span>
+        <b>${escapeHtml(item.title || "未命名")}</b>
+      </div>
+    </button>
+  `;
+}
+
+function bookshelfBookId(item) {
+  return `${item.kind || "book"}:${item.id || item.title || ""}`;
+}
+
+function renderBookCoverInner(book, kindLabel, title, progress = "") {
+  const coverSrc = book.kind === "jm_album" ? String(book.cover_src || "") : "";
+  const image = coverSrc
+    ? `<img src="${escapeHtml(coverSrc)}" alt="${escapeHtml(title || "夹层藏书")}封面" loading="lazy" />`
+    : "";
+  return `
+    ${image}
+    <span>${escapeHtml(kindLabel)}</span>
+    <b>${escapeHtml(title || "未命名")}</b>
+    ${progress ? `<small>${escapeHtml(progress)}</small>` : ""}
+  `;
+}
+
+function allBookshelfBooks() {
+  const bookshelf = state.bookshelfUnlocked || state.overview?.bookshelf || {};
+  return [
+    ...(bookshelf.public_books || []),
+    ...(bookshelf.secret_books || []),
+  ];
+}
+
+function selectBookshelfBook(bookId) {
+  const book = allBookshelfBooks().find((item) => bookshelfBookId(item) === bookId);
+  if (!book) return;
+  state.selectedBook = book;
+  state.bookshelfPage = "detail";
+  state.selectedBookSpreadIndex = 0;
+  renderBookDetailPanel();
+  const panel = $("#bookDetailPanel");
+  if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function renderBookDetailPanel() {
+  const panel = $("#bookDetailPanel");
+  if (!panel) return;
+  const book = state.selectedBook;
+  if (!book || state.bookshelfPage === "shelf") {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  const kindLabel = {
+    creative: "创作书",
+    diary: "日记本",
+    jm_album: "夹层藏书",
+  }[book.kind] || "书";
+  const diaryEntries = book.kind === "diary" && Array.isArray(book.entries) ? book.entries : [];
+  const selectedDiaryDate = state.selectedDiaryDate || diaryEntries[diaryEntries.length - 1]?.date || "";
+  const diaryEntry = diaryEntries.find((entry) => entry.date === selectedDiaryDate) || diaryEntries[diaryEntries.length - 1] || null;
+  if (book.kind === "diary" && diaryEntry && state.selectedDiaryDate !== diaryEntry.date) {
+    state.selectedDiaryDate = diaryEntry.date;
+  }
+  const displayTitle = book.kind === "diary" && diaryEntry ? `${diaryEntry.date} 的日记` : (book.title || "未命名");
+  const displayIntro = book.kind === "diary" && diaryEntry ? (diaryEntry.intro || book.intro) : (book.intro || book.progress || "这本书还没有简介。");
+  const displayContent = book.kind === "diary" && diaryEntry ? (diaryEntry.content || diaryEntry.intro || book.content) : (book.content || book.intro || "这本书暂时没有正文。");
+  const diarySelector = diaryEntries.length
+    ? `
+      <label class="diary-date-picker">
+        <span>日期</span>
+        <select data-diary-date>
+          ${diaryEntries.slice().reverse().map((entry) => `<option value="${escapeHtml(entry.date)}"${entry.date === state.selectedDiaryDate ? " selected" : ""}>${escapeHtml(entry.date)}</option>`).join("")}
+        </select>
+      </label>
+    `
+    : "";
+  const activeTags = book.kind === "diary" && diaryEntry ? diaryEntry.tags : book.tags;
+  const tags = Array.isArray(activeTags) && activeTags.length
+    ? `<div class="book-tags">${activeTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`
+    : "";
+  const manageActions = `
+    <div class="book-manage-actions">
+      <button type="button" class="danger-outline" data-book-delete
+        data-book-kind="${escapeHtml(book.kind || "")}"
+        data-book-id="${escapeHtml(book.id || "")}"
+        data-book-album-id="${escapeHtml(book.album_id || "")}"
+        data-book-title="${escapeHtml(book.title || "")}"
+        data-book-date="${escapeHtml(book.kind === "diary" ? (state.selectedDiaryDate || "") : "")}">
+        ${escapeHtml(book.kind === "diary" ? "删除当前日记" : "从书柜移除")}
+      </button>
+    </div>
+  `;
+  panel.hidden = false;
+  if (state.bookshelfPage === "reader" && book.kind === "jm_album" && Array.isArray(book.pages) && book.pages.length) {
+    panel.innerHTML = renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro);
+    return;
+  }
+  panel.innerHTML = state.bookshelfPage === "reader"
+    ? `
+      <article class="reader-page subpage ${escapeHtml(book.kind || "book")}">
+        <nav class="book-breadcrumb">
+          <button type="button" data-book-close>书柜</button>
+          <span>/</span>
+          <button type="button" data-book-back>${escapeHtml(book.title || "未命名")}</button>
+          <span>/ 阅读</span>
+        </nav>
+        <div class="reader-toolbar">
+          <button type="button" data-book-back>返回简介</button>
+          <span>${escapeHtml(kindLabel)}</span>
+          <button type="button" data-book-close>收回书柜</button>
+        </div>
+        <div class="reader-book-shell">
+          <aside class="reader-cover ${book.cover_src ? "has-cover-image" : ""}">
+            ${renderBookCoverInner(book, kindLabel, displayTitle, book.progress || "")}
+          </aside>
+          <section class="reader-paper">
+            <header class="reader-page-head">
+              <span>${escapeHtml(kindLabel)}</span>
+              <h2>${escapeHtml(displayTitle)}</h2>
+              ${displayIntro ? `<p>${escapeHtml(displayIntro)}</p>` : ""}
+            </header>
+            <div class="reader-content">${formatBookContent(displayContent || "这本书暂时没有正文。")}</div>
+            <footer class="reader-page-foot">
+              <span>${escapeHtml(book.created || "书柜藏本")}</span>
+              <span>${escapeHtml(book.tone || book.status || "")}</span>
+            </footer>
+          </section>
+        </div>
+      </article>
+    `
+    : `
+      <article class="book-preview subpage ${escapeHtml(book.kind || "book")}">
+        <div class="book-preview-cover ${book.cover_src ? "has-cover-image" : ""}">
+          ${renderBookCoverInner(book, kindLabel, book.title || "未命名")}
+        </div>
+        <div class="book-preview-info">
+          <nav class="book-breadcrumb">
+            <button type="button" data-book-close>书柜</button>
+            <span>/ ${escapeHtml(kindLabel)}</span>
+          </nav>
+          <div class="reader-toolbar">
+            <span>${escapeHtml(kindLabel)}</span>
+            <button type="button" data-book-close>收回书柜</button>
+          </div>
+          <h2>${escapeHtml(book.title || "未命名")}</h2>
+          <p>${escapeHtml(displayIntro)}</p>
+          ${diarySelector}
+          <dl>
+            ${book.status ? `<div><dt>状态</dt><dd>${escapeHtml(book.status)}</dd></div>` : ""}
+            ${book.author ? `<div><dt>作者</dt><dd>${escapeHtml(book.author)}</dd></div>` : ""}
+            ${book.tone ? `<div><dt>气质</dt><dd>${escapeHtml(book.tone)}</dd></div>` : ""}
+            ${book.progress ? `<div><dt>进度</dt><dd>${escapeHtml(book.progress)}</dd></div>` : ""}
+            ${book.created ? `<div><dt>入柜</dt><dd>${escapeHtml(book.created)}</dd></div>` : ""}
+          </dl>
+          ${tags}
+          ${manageActions}
+          <button type="button" class="read-button" data-book-read>开始阅读</button>
+        </div>
+      </article>
+    `;
+}
+
+function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro) {
+  const pages = Array.isArray(book.pages) ? book.pages : [];
+  const maxStart = Math.max(0, pages.length - (pages.length % 2 === 0 ? 2 : 1));
+  const start = Math.min(Math.max(0, Number(state.selectedBookSpreadIndex || 0)), maxStart);
+  state.selectedBookSpreadIndex = start % 2 === 0 ? start : start - 1;
+  const spread = pages.slice(state.selectedBookSpreadIndex, state.selectedBookSpreadIndex + 2);
+  const firstPage = spread[0]?.index || state.selectedBookSpreadIndex + 1;
+  const lastPage = spread[spread.length - 1]?.index || firstPage;
+  return `
+    <article class="reader-page subpage jm_album image-reader">
+      <nav class="book-breadcrumb">
+        <button type="button" data-book-close>书柜</button>
+        <span>/</span>
+        <button type="button" data-book-back>${escapeHtml(book.title || "未命名")}</button>
+        <span>/ 阅读</span>
+      </nav>
+      <div class="reader-toolbar">
+        <button type="button" data-book-back>返回简介</button>
+        <span>${escapeHtml(kindLabel)} · ${escapeHtml(firstPage)}-${escapeHtml(lastPage)} / ${escapeHtml(pages.length)}</span>
+        <button type="button" data-book-close>收回书柜</button>
+      </div>
+      <div class="manga-reader-shell">
+        <header class="manga-reader-head">
+          <div>
+            <span>${escapeHtml(kindLabel)}</span>
+            <h2>${escapeHtml(displayTitle)}</h2>
+            ${displayIntro ? `<p>${escapeHtml(displayIntro)}</p>` : ""}
+          </div>
+          <div class="manga-reader-actions">
+            <button type="button" data-book-prev ${state.selectedBookSpreadIndex <= 0 ? "disabled" : ""}>上一页</button>
+            <button type="button" data-book-next ${state.selectedBookSpreadIndex + 2 >= pages.length ? "disabled" : ""}>下一页</button>
+            <button type="button" class="danger-outline" data-book-delete
+              data-book-kind="${escapeHtml(book.kind || "")}"
+              data-book-id="${escapeHtml(book.id || "")}"
+              data-book-album-id="${escapeHtml(book.album_id || "")}"
+              data-book-title="${escapeHtml(book.title || "")}">从书柜移除</button>
+          </div>
+        </header>
+        <div class="manga-spread">
+          ${spread.map((page) => `
+            <figure class="manga-page">
+              <img src="${escapeHtml(page.src)}" alt="${escapeHtml(book.title || "夹层藏书")} 第 ${escapeHtml(page.index)} 页" loading="lazy" />
+              <figcaption>${escapeHtml(page.index)} / ${escapeHtml(pages.length)}</figcaption>
+            </figure>
+          `).join("")}
+          ${spread.length < 2 ? `<figure class="manga-page blank"><span>末页</span></figure>` : ""}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function setBookshelfUnlockMessage(text, tone = "") {
+  const message = $("#bookshelfUnlockMessage");
+  if (!message) return;
+  message.textContent = text || "";
+  message.classList.toggle("ok", tone === "ok");
+  message.classList.toggle("error", tone === "error");
+}
+
+function formatBookContent(value) {
+  const parts = String(value || "")
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length
+    ? parts.map((part) => `<p>${escapeHtml(part)}</p>`).join("")
+    : `<p>这本书暂时没有正文。</p>`;
 }
 
 function renderProactiveCandidates() {
@@ -1592,16 +2088,24 @@ function renderConfig() {
   const group = overview.group || {};
   const creative = overview.creative || {};
   const bili = overview.bilibili || {};
-  renderDl("#privateConfig", overview.private || {});
-  renderDl("#groupConfig", group);
-  renderDl("#longTermConfig", {
+  const privateReading = overview.private_reading || {};
+  const longTermRows = {
     "B 站联动": bili.enabled ? "开启" : "关闭",
     "无聊刷视频": bili.boredom_watch_enabled ? "开启" : "关闭",
     "最新视频": bili.latest_video?.title || "暂无",
     "私下创作": creative.enabled ? "开启" : "关闭",
     "创作项目": `${creative.active_projects || 0}/${creative.project_count || 0}`,
     "最新创作": creative.latest_title || "暂无",
-  });
+  };
+  if (privateReading.available) {
+    longTermRows["夹层素材"] = privateReading.enabled ? "可用" : "关闭";
+    longTermRows["私下阅读"] = privateReading.boredom_read_enabled ? "开启" : "关闭";
+    longTermRows["征求推荐"] = privateReading.ask_recommendation_enabled ? "开启" : "关闭";
+    longTermRows["最近阅读"] = privateReading.last_album?.title || "暂无";
+  }
+  renderDl("#privateConfig", overview.private || {});
+  renderDl("#groupConfig", group);
+  renderDl("#longTermConfig", longTermRows);
   $("#groupAccessMode").value = group.access_mode || "whitelist";
   $("#groupWhitelist").value = (group.whitelist || []).join("\n");
   $("#groupBlacklist").value = (group.blacklist || []).join("\n");
@@ -1611,6 +2115,7 @@ function renderConfig() {
 
 function renderModuleSettings() {
   const settings = state.overview?.settings || {};
+  const privateReadingAvailable = Boolean(state.overview?.private_reading?.available);
   renderModuleSummary(settings);
   fillForm("#quickModuleForm", settings);
   fillForm("#privateModuleForm", settings);
@@ -1618,6 +2123,7 @@ function renderModuleSettings() {
   fillForm("#worldbookModuleForm", settings);
   fillForm("#memoryModuleForm", settings);
   fillForm("#longTermModuleForm", settings);
+  setPrivateReadingConfigVisible(privateReadingAvailable);
   const targetBox = document.querySelector('#quickModuleForm [name="target_user_ids"]');
   if (targetBox) targetBox.value = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.join("\n") : "";
   document.querySelectorAll(".module-form").forEach((form) => markModuleFormClean(form));
@@ -1627,6 +2133,7 @@ function renderModuleSettings() {
 function renderModuleSummary(settings) {
   const features = state.overview?.features || {};
   const groups = state.overview?.group || {};
+  const privateReadingAvailable = Boolean(state.overview?.private_reading?.available);
   const cards = [
     {
       label: "私聊主动",
@@ -1647,6 +2154,12 @@ function renderModuleSummary(settings) {
       tone: settings.enable_worldbook_member_recognition ? "ok" : "off",
     },
     {
+      label: "世界观适配",
+      value: settings.worldview_adaptation_mode || "auto",
+      note: settings.worldview_adaptation_prompt ? "自定义提示已设置" : "使用内置映射",
+      tone: settings.worldview_adaptation_mode === "off" ? "off" : "ok",
+    },
+    {
       label: "记忆整理",
       value: `${settings.memory_refresh_interval_minutes ?? 0} 分钟`,
       note: `片段阈值 ${settings.episode_memory_refresh_messages ?? 0} 条消息`,
@@ -1655,8 +2168,12 @@ function renderModuleSummary(settings) {
     {
       label: "长线行为",
       value: settings.enable_creative_writing ? "创作开启" : "创作关闭",
-      note: settings.enable_bilibili_boredom_watch ? "B 站无聊触发开启" : "B 站无聊触发关闭",
-      tone: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch ? "ok" : "off",
+      note: [
+        settings.enable_bilibili_boredom_watch ? "B 站" : "",
+        privateReadingAvailable && settings.enable_private_reading_boredom_read ? "夹层阅读" : "",
+        privateReadingAvailable && settings.enable_private_reading_ask_recommendation ? "征求推荐" : "",
+      ].filter(Boolean).join(" / ") || "联动关闭",
+      tone: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch || (privateReadingAvailable && (settings.enable_private_reading_boredom_read || settings.enable_private_reading_ask_recommendation)) ? "ok" : "off",
     },
   ];
   $("#moduleSummary").innerHTML = cards.map((item) => `
@@ -1666,6 +2183,15 @@ function renderModuleSummary(settings) {
       <small>${escapeHtml(item.note)}</small>
     </section>
   `).join("");
+}
+
+function setPrivateReadingConfigVisible(visible) {
+  const group = $("#privateReadingModuleGroup");
+  if (!group) return;
+  group.hidden = !visible;
+  group.querySelectorAll("[name]").forEach((input) => {
+    input.disabled = !visible;
+  });
 }
 
 function markModuleFormDirty(form) {
@@ -1716,6 +2242,7 @@ function collectFormSettings(selector) {
   const result = {};
   if (!form) return result;
   form.querySelectorAll("[name]").forEach((input) => {
+    if (input.disabled) return;
     if (input.type === "checkbox") {
       result[input.name] = input.checked;
     } else if (input.type === "number") {
@@ -1855,14 +2382,16 @@ function renderListCoverage(group, draft = null) {
 
 function renderFeatureSwitches() {
   const filter = ($("#featureFilter")?.value || "").trim().toLowerCase();
+  const privateReadingAvailable = Boolean(state.overview?.private_reading?.available);
   const knownKeys = new Set(featureGroups.flatMap((group) => group.keys));
-  const extraKeys = Object.keys(state.featureDraft || {}).filter((key) => !knownKeys.has(key));
+  const extraKeys = Object.keys(state.featureDraft || {}).filter((key) => !knownKeys.has(key) && (privateReadingAvailable || !privateReadingConfigKeys.has(key)));
   const groups = extraKeys.length
     ? [...featureGroups, { title: "其他", note: "来自配置但暂未归入固定分组的开关。", keys: extraKeys }]
     : featureGroups;
-  const total = Object.keys(state.featureDraft || {}).length;
-  const enabled = Object.values(state.featureDraft || {}).filter(Boolean).length;
-  const riskyEnabled = ["enable_group_interjection", "enable_bilibili_boredom_watch", "enable_unanswered_screen_peek_followup"]
+  const visibleDraftKeys = Object.keys(state.featureDraft || {}).filter((key) => privateReadingAvailable || !privateReadingConfigKeys.has(key));
+  const total = visibleDraftKeys.length;
+  const enabled = visibleDraftKeys.filter((key) => state.featureDraft[key]).length;
+  const riskyEnabled = ["enable_group_interjection", "enable_bilibili_boredom_watch", privateReadingAvailable ? "enable_private_reading_boredom_read" : "", privateReadingAvailable ? "enable_private_reading_ask_recommendation" : "", "enable_unanswered_screen_peek_followup"]
     .filter((key) => state.featureDraft[key]).length;
   $("#featureSwitchSummary").innerHTML = `
     <section class="feature-summary-card ok">
@@ -1884,6 +2413,7 @@ function renderFeatureSwitches() {
 
   const board = groups.map((group) => {
     const visibleKeys = group.keys.filter((key) => {
+      if (!privateReadingAvailable && privateReadingConfigKeys.has(key)) return false;
       if (!filter) return true;
       const haystack = `${key} ${featureLabel(key)} ${featureDescription(key)}`.toLowerCase();
       return haystack.includes(filter);
@@ -1895,7 +2425,6 @@ function renderFeatureSwitches() {
         <header>
           <div>
             <b>${escapeHtml(group.title)}</b>
-            <span>${escapeHtml(group.note)}</span>
           </div>
           <small>${escapeHtml(groupEnabled)} / ${escapeHtml(visibleKeys.length)}</small>
         </header>
@@ -1923,7 +2452,6 @@ function featureSwitchItem(key) {
       <span class="feature-switch-text">
         <b>${escapeHtml(featureLabel(key))}</b>
         <small>${escapeHtml(key)}</small>
-        <em>${escapeHtml(featureDescription(key))}</em>
       </span>
     </label>
   `;
@@ -1931,11 +2459,13 @@ function featureSwitchItem(key) {
 
 function renderProviders() {
   const providers = state.overview?.providers || {};
+  const privateReadingAvailable = Boolean(state.overview?.private_reading?.available);
   renderProviderFlow(providers);
-  $("#providerForm").innerHTML = Object.entries(providerLabels).map(([key, label]) => `
+  $("#providerForm").innerHTML = Object.entries(providerLabels)
+    .filter(([key]) => privateReadingAvailable || !privateReadingConfigKeys.has(key))
+    .map(([key, label]) => `
     <label class="provider-card">
       <span>${escapeHtml(label)}</span>
-      <small>${escapeHtml(providerDescriptions[key] || "选择一个 AstrBot 已配置 Provider，或手动输入 Provider ID。")}</small>
       ${providerSelect(key, providers[key] || "")}
       <span class="provider-row">
         <span class="hint">${escapeHtml(key)}</span>
@@ -2027,9 +2557,14 @@ async function testProvider(key) {
 }
 
 function renderProviderFlow(providers) {
+  const privateReadingAvailable = Boolean(state.overview?.private_reading?.available);
   const main = providers.LLM_PROVIDER_ID || "AstrBot 默认模型";
   const mai = providers.MAI_STYLE_PROVIDER_ID || main;
-  const tasks = Object.entries(providerLabels).filter(([key]) => key !== "LLM_PROVIDER_ID" && key !== "MAI_STYLE_PROVIDER_ID");
+  const tasks = Object.entries(providerLabels).filter(([key]) => (
+    key !== "LLM_PROVIDER_ID"
+    && key !== "MAI_STYLE_PROVIDER_ID"
+    && (privateReadingAvailable || !privateReadingConfigKeys.has(key))
+  ));
   $("#providerFlow").innerHTML = `
     <div class="flow-lane">
       <span class="flow-node primary">主模型<br><b>${escapeHtml(main)}</b></span>
@@ -2065,39 +2600,126 @@ function scoreGauge(label, value, min, max) {
   `;
 }
 
-function relationshipGraphSvg(edges) {
+function relationshipGraphView(edges, groupMembers = {}) {
   const pairs = Object.entries(edges || {})
     .map(([key, value]) => {
       const parts = key.split(/[-|:>]+/).map((item) => item.trim()).filter(Boolean);
       const weight = Number(value?.count || value?.weight || value || 1);
-      return parts.length >= 2 ? { a: parts[0], b: parts[1], weight } : null;
+      return parts.length >= 2 ? {
+        a: parts[0],
+        b: parts[1],
+        weight,
+        kind: value?.kind || value?.type || value?.relation || "",
+        summary: value?.summary || value?.last_summary || value?.reason || "",
+      } : null;
     })
     .filter(Boolean)
     .sort((a, b) => b.weight - a.weight)
-    .slice(0, 16);
+    .slice(0, 24);
   if (!pairs.length) return `<div class="empty small">暂无关系边</div>`;
 
-  const names = [...new Set(pairs.flatMap((edge) => [edge.a, edge.b]))].slice(0, 12);
-  const center = 120;
-  const radius = 76;
-  const pos = Object.fromEntries(names.map((name, index) => {
-    const angle = (Math.PI * 2 * index) / Math.max(1, names.length) - Math.PI / 2;
-    return [name, { x: center + Math.cos(angle) * radius, y: center + Math.sin(angle) * radius }];
-  }));
+  const memberMap = relationshipMemberMap(groupMembers);
+  const scores = new Map();
+  pairs.forEach((edge) => {
+    [edge.a, edge.b].forEach((id) => {
+      const item = scores.get(id) || { id, degree: 0, weight: 0 };
+      item.degree += 1;
+      item.weight += edge.weight;
+      scores.set(id, item);
+    });
+  });
+  const topNodes = [...scores.values()]
+    .sort((a, b) => b.weight - a.weight || b.degree - a.degree)
+    .slice(0, 8);
+  const maxWeight = Math.max(1, ...pairs.map((edge) => edge.weight));
+  const strongest = pairs[0];
+  const hiddenCount = Math.max(0, Object.keys(edges || {}).length - pairs.length);
   return `
-    <svg class="relation-svg" viewBox="0 0 240 240">
-      ${pairs.map((edge) => {
-        if (!pos[edge.a] || !pos[edge.b]) return "";
-        const width = Math.min(6, 1 + edge.weight / 3);
-        return `<line x1="${pos[edge.a].x}" y1="${pos[edge.a].y}" x2="${pos[edge.b].x}" y2="${pos[edge.b].y}" stroke-width="${width}"></line>`;
-      }).join("")}
-      ${names.map((name) => `
-        <g>
-          <circle cx="${pos[name].x}" cy="${pos[name].y}" r="18"></circle>
-          <text x="${pos[name].x}" y="${pos[name].y + 4}" text-anchor="middle">${escapeHtml(shortName(name, 4))}</text>
-        </g>
-      `).join("")}
-    </svg>
+    <div class="relation-map">
+      <div class="relation-map-summary">
+        <article><span>涉及成员</span><b>${escapeHtml(scores.size)}</b></article>
+        <article><span>互动关系</span><b>${escapeHtml(Object.keys(edges || {}).length)}</b></article>
+        <article><span>最强连接</span><b>${escapeHtml(relationNodeName(strongest.a, memberMap))} ↔ ${escapeHtml(relationNodeName(strongest.b, memberMap))}</b></article>
+      </div>
+      <div class="relation-node-grid">
+        ${topNodes.map((node) => relationNodeCard(node, memberMap)).join("")}
+      </div>
+      <div class="relation-edge-list">
+        ${pairs.map((edge) => relationEdgeRow(edge, memberMap, maxWeight)).join("")}
+      </div>
+      ${hiddenCount ? `<p class="muted relation-map-note">还有 ${escapeHtml(hiddenCount)} 条较弱关系未展开，可在群聊观测继续积累后查看。</p>` : ""}
+    </div>
+  `;
+}
+
+function relationshipMemberMap(groupMembers = {}) {
+  const map = new Map();
+  const worldbookMembers = state.overview?.worldbook?.members || [];
+  worldbookMembers.forEach((item) => {
+    const id = String(item.user_id || "").trim();
+    if (!id) return;
+    map.set(id, {
+      name: item.name || id,
+      aliases: Array.isArray(item.aliases) ? item.aliases : [],
+      observed: Array.isArray(item.observed_names) ? item.observed_names : [],
+      source: "关系网",
+    });
+  });
+  Object.entries(groupMembers || {}).forEach(([id, raw]) => {
+    if (!id) return;
+    const item = raw && typeof raw === "object" ? raw : {};
+    const existing = map.get(String(id)) || {};
+    map.set(String(id), {
+      name: existing.name || item.name || item.nickname || item.card || id,
+      aliases: existing.aliases || [],
+      observed: existing.observed || [],
+      source: existing.source || "群聊",
+    });
+  });
+  return map;
+}
+
+function relationNodeName(id, memberMap) {
+  const item = memberMap.get(String(id));
+  return item?.name || String(id);
+}
+
+function relationNodeCard(node, memberMap) {
+  const member = memberMap.get(String(node.id)) || {};
+  const name = member.name || node.id;
+  const subNames = [...(member.aliases || []), ...(member.observed || [])].filter(Boolean).slice(0, 3);
+  return `
+    <article class="relation-node-card">
+      <div class="relation-avatar">${escapeHtml(shortName(name, 2))}</div>
+      <div>
+        <b>${escapeHtml(name)}</b>
+        <code>${escapeHtml(node.id)}</code>
+        ${subNames.length ? `<small>${subNames.map((item) => escapeHtml(item)).join(" / ")}</small>` : `<small>${escapeHtml(member.source || "群聊成员")}</small>`}
+      </div>
+      <span>${escapeHtml(node.degree)} 边</span>
+    </article>
+  `;
+}
+
+function relationEdgeRow(edge, memberMap, maxWeight) {
+  const pct = Math.max(4, Math.round((edge.weight / maxWeight) * 100));
+  const leftName = relationNodeName(edge.a, memberMap);
+  const rightName = relationNodeName(edge.b, memberMap);
+  return `
+    <article class="relation-edge-row">
+      <div class="relation-edge-main">
+        <b title="${escapeHtml(edge.a)}">${escapeHtml(leftName)}</b>
+        <span>↔</span>
+        <b title="${escapeHtml(edge.b)}">${escapeHtml(rightName)}</b>
+      </div>
+      <div class="relation-edge-meter"><i style="width:${pct}%"></i></div>
+      <div class="relation-edge-meta">
+        <code>${escapeHtml(edge.a)}</code>
+        <code>${escapeHtml(edge.b)}</code>
+        <span>${escapeHtml(edge.kind || "互动")} · ${escapeHtml(edge.weight)}</span>
+      </div>
+      ${edge.summary ? `<p>${escapeHtml(edge.summary)}</p>` : ""}
+    </article>
   `;
 }
 
@@ -2213,7 +2835,133 @@ document.addEventListener("click", (event) => {
   switchTab(target.dataset.jumpTab);
 });
 
+document.addEventListener("click", (event) => {
+  const element = event.target instanceof Element ? event.target : null;
+  const bookButton = element?.closest("[data-book-id]");
+  if (bookButton) {
+    selectBookshelfBook(bookButton.dataset.bookId);
+    return;
+  }
+  if (element?.closest("[data-book-read]")) {
+    state.bookshelfPage = "reader";
+    state.selectedBookSpreadIndex = 0;
+    renderBookDetailPanel();
+    return;
+  }
+  if (element?.closest("[data-book-prev]")) {
+    state.selectedBookSpreadIndex = Math.max(0, Number(state.selectedBookSpreadIndex || 0) - 2);
+    renderBookDetailPanel();
+    return;
+  }
+  if (element?.closest("[data-book-next]")) {
+    const pages = Array.isArray(state.selectedBook?.pages) ? state.selectedBook.pages : [];
+    state.selectedBookSpreadIndex = Math.min(Math.max(0, pages.length - 1), Number(state.selectedBookSpreadIndex || 0) + 2);
+    renderBookDetailPanel();
+    return;
+  }
+  const deleteButton = element?.closest("[data-book-delete]");
+  if (deleteButton) {
+    deleteSelectedBookshelfItem(deleteButton);
+    return;
+  }
+  if (element?.closest("[data-book-back]")) {
+    state.bookshelfPage = "detail";
+    renderBookDetailPanel();
+    return;
+  }
+  if (element?.closest("[data-book-close]")) {
+    state.selectedBook = null;
+    state.bookshelfPage = "shelf";
+    renderBookshelf();
+  }
+});
+
+async function deleteSelectedBookshelfItem(button = null) {
+  const book = state.selectedBook || {};
+  const dataset = button?.dataset || {};
+  const kind = dataset.bookKind || book.kind || "";
+  const itemId = dataset.bookId || book.id || "";
+  const albumId = dataset.bookAlbumId || book.album_id || "";
+  const title = dataset.bookTitle || book.title || "";
+  const diaryDate = kind === "diary" ? (dataset.bookDate || state.selectedDiaryDate || "") : "";
+  if (!kind) {
+    alert("没有找到当前书籍，请刷新拓展页后再试。");
+    return;
+  }
+  const label = kind === "diary" && diaryDate ? `${diaryDate} 的日记` : (title || "这本书");
+  if (kind !== "jm_album" && typeof window.confirm === "function" && !window.confirm(`确定删除「${label}」吗？`)) return;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "移除中...";
+  }
+  try {
+    const result = await postJson("/bookshelf/delete", {
+      kind,
+      id: itemId,
+      album_id: albumId,
+      title,
+      date: diaryDate,
+    });
+    if (!result.changed) {
+      alert("没有找到要移除的书柜条目，请刷新拓展页后再试。");
+      if (button) {
+        button.disabled = false;
+        button.textContent = kind === "diary" ? "删除当前日记" : "从书柜移除";
+      }
+      return;
+    }
+    state.bookshelfUnlocked = result.bookshelf || null;
+    state.selectedBook = null;
+    state.bookshelfPage = "shelf";
+    state.selectedBookSpreadIndex = 0;
+    renderBookshelf();
+  } catch (error) {
+    alert(error.message);
+    if (button) {
+      button.disabled = false;
+      button.textContent = kind === "diary" ? "删除当前日记" : "从书柜移除";
+    }
+  }
+}
+
+document.addEventListener("change", (event) => {
+  const target = event.target instanceof HTMLSelectElement ? event.target : null;
+  if (!target || !target.matches("[data-diary-date]")) return;
+  state.selectedDiaryDate = target.value;
+  renderBookDetailPanel();
+});
+
 $("#refreshBtn").addEventListener("click", loadAll);
+$("#bookshelfUnlockForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const password = $("#bookshelfPassword").value.trim();
+  if (!password) {
+    setBookshelfUnlockMessage("请输入密码", "error");
+    return;
+  }
+  const button = event.currentTarget.querySelector("button[type='submit']");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "验证中...";
+  }
+  setBookshelfUnlockMessage("正在验证...", "");
+  try {
+    const result = await postJson("/bookshelf/unlock", { password });
+    state.bookshelfUnlocked = result.bookshelf || null;
+    state.selectedBook = null;
+    state.bookshelfPage = "shelf";
+    renderBookshelf();
+    $("#bookshelfPassword").value = "";
+    setBookshelfUnlockMessage("密码正确，已打开", "ok");
+  } catch (error) {
+    setBookshelfUnlockMessage(error.message || "密码不对", "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "打开抽屉";
+    }
+  }
+});
 $("#userFilter").addEventListener("input", renderUsers);
 $("#groupFilter").addEventListener("input", renderGroups);
 $("#worldbookMemberFilter").addEventListener("input", renderWorldbook);
@@ -2255,7 +3003,7 @@ $("#resetTokenStatsBtn").addEventListener("click", async () => {
   await runAction(() => postJson("/token/reset", {}));
 });
 
-["quickModuleForm", "privateModuleForm", "groupModuleForm", "worldbookModuleForm", "memoryModuleForm", "longTermModuleForm"].forEach((formId) => {
+["quickModuleForm", "environmentModuleForm", "privateModuleForm", "groupModuleForm", "worldbookModuleForm", "memoryModuleForm", "longTermModuleForm"].forEach((formId) => {
   const form = document.getElementById(formId);
   if (!form) return;
   form.addEventListener("input", () => markModuleFormDirty(form));

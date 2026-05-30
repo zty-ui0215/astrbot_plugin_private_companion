@@ -363,6 +363,10 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
         theme_name = f"{primary_name}+{alt_name}"
         theme_hint = f"主调偏{primary_name}，但中途会混进一点{alt_name}的质感。{primary_hint} 同时，{alt_hint}"
     persona = plugin._get_default_persona_prompt()
+    worldview_adaptation = ""
+    formatter = getattr(plugin, "_format_worldview_adaptation_prompt", None)
+    if callable(formatter):
+        worldview_adaptation = formatter()
     weather_text = plugin._weather_summary_text(weather or plugin.data.get("daily_weather", {}))
     prompt = f"""
 你现在是 Private Companion 的梦境生成器。请根据本次输入的记忆碎片,写一个拟人化 Bot 今早残留的完整梦境。
@@ -398,6 +402,8 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
 【本次输入】
 【人格参考】
 {persona}
+
+{worldview_adaptation}
 
 【梦境主题】
 {theme_name}：{theme_hint}
@@ -457,6 +463,10 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
     can_do = plugin._format_can_do_for_prompt()
     calendar_context = plugin._format_calendar_context_for_prompt()
     yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
+    worldview_adaptation = ""
+    formatter = getattr(plugin, "_format_worldview_adaptation_prompt", None)
+    if callable(formatter):
+        worldview_adaptation = formatter()
     prompt = f"""
 你现在是 Private Companion 的日记生成器。请为拟人化 Bot 写一条今天的日记,同时预设今天的生活碎片和主动聊天计划。
 
@@ -471,6 +481,7 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 只输出 JSON：
 {{
   "summary": "一句短日记,口语化,像写给自己看的生活碎片",
+  "body": "一段真正写在日记本里的内容,第一人称,120到260字,有当天的具体小事、身体/情绪余温和一点没说出口的念头",
   "share_seed": "以后可以主动发给朋友的一小句话,像私聊消息",
   "tags": ["低能量", "失眠", "好梦", "生病", "恢复期", "回弹", "平稳"],
   "today_events": [
@@ -492,6 +503,8 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 日期：{today}
 当前状态：
 {plugin._format_state_for_prompt(state if isinstance(state, dict) else {})}
+
+{worldview_adaptation}
 
 当前状态走向摘要：
 {plugin._format_state_transition_overview(state if isinstance(state, dict) else {})}
@@ -532,6 +545,7 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
         "date": today,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "summary": _single_line(payload.get("summary"), 160),
+        "body": _single_line(payload.get("body"), 500),
         "share_seed": _single_line(payload.get("share_seed"), 120),
         "tags": [_single_line(tag, 20) for tag in tags[:6] if _single_line(tag, 20)],
         "dream_fragments": plugin._extract_weighted_dream_fragments(payload),
@@ -563,6 +577,7 @@ def fallback_diary_payload(plugin) -> dict[str, Any]:
             tags.append("恢复期")
     return {
         "summary": f"今天整体偏{mood},能量大约 {energy}/100,适合保持温和节奏。",
+        "body": f"今天整体偏{mood},醒来后先确认了一下自己的状态,能量大概停在 {energy}/100。没有特别想把事情说得很重,只是把该做的小事一点点收起来。晚一点的时候又想到还有些话可以慢慢留着,不用急着告诉谁。",
         "share_seed": "今天的状态适合平稳推进。",
         "tags": tags,
         "today_events": [

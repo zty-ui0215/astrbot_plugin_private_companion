@@ -23,6 +23,12 @@
     "_special": "select_provider",
     "hint": "插件所有未单独指定模型的 LLM 任务都会回退到这里；留空则使用 AstrBot 默认会话模型。"
   },
+  "daily_token_limit": {
+    "description": "每日插件 Token 限额",
+    "type": "int",
+    "hint": "仅限制本插件内部发起的 LLM 任务，达到后会跳过日程、梦境、记忆整理、群聊分析、创作等后台模型调用。填 0 表示不限制。",
+    "default": 1000000
+  },
   "target_user_ids": {
     "description": "私聊主动目标 QQ 号",
     "type": "list",
@@ -34,6 +40,61 @@
     "type": "string",
     "hint": "用于拼接未见过用户的 unified_msg_origin，QQ/OneBot 通常是 aiocqhttp。若用户私聊过 Bot，会自动替换成真实会话来源。",
     "default": "aiocqhttp"
+  },
+  "enable_environment_perception": {
+    "description": "启用环境感知",
+    "type": "bool",
+    "hint": "整合 LLMPerception 的核心能力：把当前时间、日期语境、平台、群聊/私聊和消息媒介作为回复背景注入。关闭后不注入这些环境信息。",
+    "default": true
+  },
+  "environment_perception_timezone": {
+    "description": "环境感知时区",
+    "type": "string",
+    "hint": "默认 Asia/Shanghai。用于发送时间、时段和日期语境判断。",
+    "default": "Asia/Shanghai",
+    "condition": "enable_environment_perception"
+  },
+  "enable_holiday_perception": {
+    "description": "感知节假日/工作日",
+    "type": "bool",
+    "hint": "安装 chinese-calendar 时会识别中国节假日和调休；未安装时自动退化为周末/工作日判断。",
+    "default": true,
+    "condition": "enable_environment_perception"
+  },
+  "holiday_country": {
+    "description": "节假日地区",
+    "type": "string",
+    "hint": "当前内置 CN。保留该项用于兼容 LLMPerception 的配置迁移。",
+    "default": "CN",
+    "condition": "enable_environment_perception"
+  },
+  "enable_platform_perception": {
+    "description": "感知平台与消息类型",
+    "type": "bool",
+    "hint": "识别 QQ/平台、私聊/群聊、群号/群名以及图片/语音/视频等消息组件。",
+    "default": true,
+    "condition": "enable_environment_perception"
+  },
+  "enable_lunar_perception": {
+    "description": "感知农历",
+    "type": "bool",
+    "hint": "安装 lunarcalendar 时可注入农历日期；未安装时自动跳过。",
+    "default": true,
+    "condition": "enable_environment_perception"
+  },
+  "enable_solar_term_perception": {
+    "description": "感知节气",
+    "type": "bool",
+    "hint": "注入当天或近三天内的二十四节气提示，供生活节奏和话题选择参考。",
+    "default": true,
+    "condition": "enable_environment_perception"
+  },
+  "enable_almanac_perception": {
+    "description": "轻量黄历感知",
+    "type": "bool",
+    "hint": "生成轻量的宜/忌氛围标签，只用于风格参考。默认关闭，避免玄学感过强。",
+    "default": false,
+    "condition": "enable_environment_perception"
   },
   "default_enable_configured_targets": {
     "description": "启动时预热私聊目标",
@@ -52,6 +113,26 @@
     "type": "string",
     "hint": "可选：温柔、活泼、工作。用户可用“陪伴 语气”单独覆盖。",
     "default": "温柔"
+  },
+  "worldview_adaptation_mode": {
+    "description": "世界观适配模式",
+    "type": "string",
+    "hint": "auto 会根据日程人设/世界观提示粗略判断现代、奇幻或科幻；也可以手动指定。只影响表达映射，不改变真实插件能力。",
+    "default": "auto",
+    "options": [
+      "auto",
+      "modern",
+      "fantasy",
+      "sci_fi",
+      "custom",
+      "off"
+    ]
+  },
+  "worldview_adaptation_prompt": {
+    "description": "自定义世界观适配提示",
+    "type": "string",
+    "hint": "用于把现代能力翻译成当前人设能理解的说法，例如“异世界冒险者：群聊是酒馆/公会闲谈，视频是吟游诗人的影像记录，书柜是行囊书匣”。留空使用内置映射。",
+    "default": ""
   },
   "quiet_hours": {
     "description": "免打扰时间",
@@ -85,17 +166,10 @@
     "default": "",
     "_special": "select_provider"
   },
-  "DIARY_PROVIDER_ID": {
-    "description": "日记生成模型（留空跟随陪伴通用模型）",
+  "DREAM_DIARY_PROVIDER_ID": {
+    "description": "日记与梦境模型（留空跟随陪伴通用模型）",
     "type": "string",
-    "hint": "用于每日 Bot 日记、生活碎片、梦境碎片和日记里的主动契机。适合短文本自然、结构化稳定的模型。",
-    "default": "",
-    "_special": "select_provider"
-  },
-  "DREAM_PROVIDER_ID": {
-    "description": "强化梦境模型（留空跟随主模型）",
-    "type": "string",
-    "hint": "专门用于生成梦境状态的一句描述。建议选择便宜、擅长短文本意象和 JSON 输出的模型。",
+    "hint": "同时用于每日 Bot 日记、生活碎片、梦境碎片、强化梦境内容和梦后余韵。建议选择便宜、擅长短文本意象、口语和 JSON 输出的模型。",
     "default": "",
     "_special": "select_provider"
   },
@@ -180,6 +254,13 @@
     "description": "群内黑话释义模型（留空跟随陪伴通用模型）",
     "type": "string",
     "hint": "用于根据群聊样例解释群内常见词/梗。留空会回退到 MAI_STYLE_PROVIDER_ID。",
+    "default": "",
+    "_special": "select_provider"
+  },
+  "PRIVATE_READING_VISION_PROVIDER_ID": {
+    "description": "夹层阅读视觉模型（留空跟随工具结果转述模型）",
+    "type": "string",
+    "hint": "仅在夹层阅读素材能力开启时使用，用于观察封面和抽样正文页并生成内部阅读印象。留空会回退到 NARRATION_PROVIDER_ID。",
     "default": "",
     "_special": "select_provider"
   },
@@ -677,6 +758,95 @@
       "enable_bilibili_integration": true
     }
   },
+  "enable_private_reading_integration": {
+    "description": "启用夹层阅读素材",
+    "type": "bool",
+    "hint": "检测到可用素材能力时，允许作为低频私下阅读素材来源。缺少对应能力时会自动跳过，不影响其他功能。",
+    "default": false
+  },
+  "enable_private_reading_boredom_read": {
+    "description": "空闲时私下阅读",
+    "type": "bool",
+    "hint": "当 Bot 比较空、无聊或夜里休息时，低频搜索并阅读符合偏好的短篇内容，形成内部印象和书柜夹层记录。",
+    "default": false,
+    "condition": {
+      "enable_private_reading_integration": true
+    }
+  },
+  "enable_private_reading_ask_recommendation": {
+    "description": "向用户征求推荐",
+    "type": "bool",
+    "hint": "当夹层阅读素材可用且 Bot 比较无聊时，低频主动私聊询问用户有没有好看的本子或漫画推荐。",
+    "default": false,
+    "condition": {
+      "enable_private_reading_integration": true
+    }
+  },
+  "private_reading_min_interval_hours": {
+    "description": "夹层阅读最小间隔（小时）",
+    "type": "int",
+    "hint": "彩蛋触发的最小间隔，避免频繁搜索和消耗视觉模型。",
+    "slider": {
+      "min": 4,
+      "max": 168,
+      "step": 1
+    },
+    "default": 18,
+    "condition": {
+      "enable_private_reading_boredom_read": true
+    }
+  },
+  "private_reading_max_photo_count": {
+    "description": "夹层阅读页数上限",
+    "type": "int",
+    "hint": "只选择页数不多、方便 Bot 理解和形成读后印象的短篇内容。详情里没有页数或超过该上限的候选会被跳过。",
+    "slider": {
+      "min": 8,
+      "max": 120,
+      "step": 1
+    },
+    "default": 60,
+    "condition": {
+      "enable_private_reading_boredom_read": true
+    }
+  },
+  "private_reading_share_probability": {
+    "description": "阅读后主动提起概率",
+    "type": "float",
+    "hint": "Bot 读完后是否在合适时机提起。具体是害羞、坦然、嘴硬还是转移话题交给人格判断；不会发送链接或资源。",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.18,
+    "condition": {
+      "enable_private_reading_integration": true
+    }
+  },
+  "private_reading_ask_probability": {
+    "description": "征求推荐触发概率",
+    "type": "float",
+    "hint": "每次满足低频触发条件时，是否安排一次向用户征求推荐的主动候选。",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.16,
+    "condition": {
+      "enable_private_reading_ask_recommendation": true
+    }
+  },
+  "private_reading_default_keywords": {
+    "description": "夹层阅读默认搜索关键词",
+    "type": "string",
+    "hint": "逗号分隔。会与用户偏好一起作为搜索候选。",
+    "default": "纯爱,恋爱,同人",
+    "condition": {
+      "enable_private_reading_integration": true
+    }
+  },
   "_section_04_group": {
     "description": "=== 04 群聊陪伴 / 观察 / 插话 ===",
     "type": "text",
@@ -730,6 +900,29 @@
     "default": true,
     "condition": {
       "enable_group_companion": true
+    }
+  },
+  "enable_group_scene_awareness": {
+    "description": "启用群聊场景感知",
+    "type": "bool",
+    "hint": "借鉴上下文场景感知增强的做法，推断当前消息是在对 Bot、某个群友还是整个群说话，并以结构化 scene 注入。可减少 Bot 误以为别人都在问自己。",
+    "default": true,
+    "condition": {
+      "enable_group_context_injection": true
+    }
+  },
+  "group_scene_recent_limit": {
+    "description": "场景感知最近消息数",
+    "type": "int",
+    "hint": "scene 中 recent_flow 最多包含多少条最近群聊消息。越大越清楚，但会增加上下文长度。",
+    "slider": {
+      "min": 2,
+      "max": 12,
+      "step": 1
+    },
+    "default": 5,
+    "condition": {
+      "enable_group_scene_awareness": true
     }
   },
   "enable_group_slang_learning": {
@@ -852,6 +1045,38 @@
     "default": "",
     "condition": {
       "enable_worldbook_member_recognition": true
+    }
+  },
+  "enable_atrelay_tools": {
+    "description": "启用跨群转述与 @ 群友工具",
+    "type": "bool",
+    "hint": "整合艾特群友插件能力。模型可调用工具向群聊/私聊发送消息、查询群号和群成员；@ 对象会优先按关系网 QQ 身份解析。",
+    "default": true,
+    "condition": {
+      "enable_group_companion": true
+    }
+  },
+  "atrelay_require_worldbook_first": {
+    "description": "优先使用关系网解析 @ 对象",
+    "type": "bool",
+    "hint": "开启后，按名称 @ 群友时先查关系网；关系网没有唯一命中时不会随便用群昵称猜人。关闭后会继续模糊匹配群成员列表。",
+    "default": true,
+    "condition": {
+      "enable_atrelay_tools": true
+    }
+  },
+  "atrelay_member_cache_minutes": {
+    "description": "群成员列表缓存分钟",
+    "type": "int",
+    "hint": "查询群成员列表后缓存多久。缓存会用于群友查询和 @ 对象解析，同时把已登记成员的群名片写入关系网 observed_names。",
+    "slider": {
+      "min": 1,
+      "max": 1440,
+      "step": 5
+    },
+    "default": 60,
+    "condition": {
+      "enable_atrelay_tools": true
     }
   },
   "max_group_recent_messages": {

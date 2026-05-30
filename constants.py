@@ -111,6 +111,7 @@ _REASON_TEXT = {
     "group_share": "跟你分享群里的有趣片段",
     "bili_video_share": "跟你分享刚刷到的 B 站视频",
     "creative_share": "跟你分享刚写到的小说片段",
+    "jm_cosmos_share": "跟你提起刚翻到的漫画本子",
 }
 
 # 动作描述 - 生活化
@@ -120,6 +121,7 @@ _ACTION_TEXT = {
     "photo_text": "拍了张照片发给你",
     "poke": "轻轻戳了戳你",
     "voice": "发了段语音跟你说",
+    "jm_cosmos_read": "偷偷翻了会儿漫画本子",
 }
 
 # 主动能力注册表 - 给提示词和调试输出共用
@@ -163,6 +165,14 @@ PROACTIVE_ABILITY_REGISTRY = [
         "when": "很熟、很短、偏玩笑的触碰感,通常只做前置动作",
         "use_for": "轻提醒、半撒娇的试探、名字开场后的补一下",
         "avoid": "连续戳、报数、解释为什么戳",
+    },
+    {
+        "module": "主动行为",
+        "name": "jm_cosmos_read",
+        "label": "私下翻本子",
+        "when": "检测到 JM-Cosmos II,且 Bot 空闲、无聊或夜里自己找点东西看",
+        "use_for": "内部阅读、低频形成读后印象,必要时很含蓄地提一句",
+        "avoid": "主动发送文件、露骨复述内容、把搜索/插件/视觉模型过程说出来",
     },
 ]
 

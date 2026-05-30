@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import time
 import re
+import shutil
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
-from quart import request
+from astrbot.core import file_token_service
+from quart import request, send_file
 
-from .helpers import _strip_internal_message_blocks
+from .helpers import _strip_internal_message_blocks, _today_key
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
@@ -35,6 +38,9 @@ class PrivateCompanionPageApi:
             ("/diagnostics", self.get_diagnostics, ["GET"], "Private Companion Page diagnostics"),
             ("/token/stats", self.get_token_stats, ["GET"], "Private Companion Page token stats"),
             ("/token/reset", self.reset_token_stats, ["POST"], "Private Companion Page reset token stats"),
+            ("/bookshelf/unlock", self.unlock_bookshelf, ["POST"], "Private Companion Page unlock bookshelf"),
+            ("/bookshelf/image", self.get_bookshelf_image, ["GET"], "Private Companion Page bookshelf image"),
+            ("/bookshelf/delete", self.delete_bookshelf_item, ["POST"], "Private Companion Page delete bookshelf item"),
             ("/worldbook/import", self.import_worldbook, ["POST"], "Private Companion Page import worldbook"),
             ("/worldbook/member/update", self.update_worldbook_member, ["POST"], "Private Companion Page update worldbook member"),
             ("/worldbook/group/update", self.update_worldbook_group, ["POST"], "Private Companion Page update worldbook group"),
@@ -86,7 +92,9 @@ class PrivateCompanionPageApi:
                     "worldbook": self._worldbook_summary(data),
                     "proactive_candidates": self._proactive_candidate_summary(data),
                     "bilibili": self._bilibili_summary(data),
+                    "private_reading": self._jm_cosmos_summary(data),
                     "creative": self._creative_summary(data),
+                    "bookshelf": await self._bookshelf_summary(data, unlocked=False),
                     "life_observation": self._life_observation_summary(data),
                     "daily_state": self._daily_state_summary(data.get("daily_state")),
                     "daily_timeline": self._daily_timeline_summary(data),
@@ -169,7 +177,22 @@ class PrivateCompanionPageApi:
             async with self.plugin._data_lock:
                 user = self.plugin._get_user(user_id)
                 if "enabled" in payload:
-                    user["enabled"] = bool(payload.get("enabled"))
+                    enabled = bool(payload.get("enabled"))
+                    user["enabled"] = enabled
+                    user["manual_enabled"] = enabled
+                    if not enabled:
+                        for key in (
+                            "next_proactive_at",
+                            "planned_proactive_reason",
+                            "planned_proactive_action",
+                            "planned_proactive_motive",
+                            "planned_proactive_topic",
+                            "planned_proactive_source",
+                            "planned_event_chain",
+                            "planned_opener_mode",
+                            "planned_followup_kind",
+                        ):
+                            user[key] = [] if key == "planned_event_chain" else "" if key != "next_proactive_at" else 0
                 if "nickname" in payload:
                     user["nickname"] = self._single_line(payload.get("nickname"), 24)
                 if "style" in payload:
@@ -382,6 +405,235 @@ class PrivateCompanionPageApi:
             logger.error(f"[PrivateCompanionPage] 重置 Token 统计失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    async def unlock_bookshelf(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        password = str(payload.get("password", "")).strip()
+        try:
+            expected = await self.plugin._ensure_bookshelf_password_async()
+            async with self.plugin._data_lock:
+                if not self._bookshelf_password_matches(password, expected):
+                    return self._error("密码不对。需要在聊天里自然向 Bot 询问。")
+                data = deepcopy(self.plugin.data)
+            return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 解锁书柜夹层失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    @staticmethod
+    def _normalize_bookshelf_password(value: Any) -> str:
+        text = _strip_internal_message_blocks(value)
+        text = re.sub(r"\s+", "", text)
+        text = text.strip("「」『』“”\"'` 。，,.;；:：!！?？、~～（）()[]【】")
+        return text.lower()
+
+    def _bookshelf_password_matches(self, provided: Any, expected: Any) -> bool:
+        normalized_expected = self._normalize_bookshelf_password(expected)
+        normalized_provided = self._normalize_bookshelf_password(provided)
+        if not normalized_expected or not normalized_provided:
+            return False
+        if normalized_provided == normalized_expected:
+            return True
+        return len(normalized_expected) >= 2 and normalized_expected in normalized_provided
+
+    async def get_bookshelf_image(self):
+        album_id = self._single_line(request.args.get("album_id"), 40)
+        page_index = self._int(request.args.get("page"))
+        cover_requested = str(request.args.get("cover") or "").lower() in {"1", "true", "yes"}
+        if not album_id or (page_index < 1 and not cover_requested):
+            return self._error("缺少图片参数")
+        try:
+            async with self.plugin._data_lock:
+                data = deepcopy(self.plugin.data)
+            shelf_items = data.get("bookshelf_items") if isinstance(data.get("bookshelf_items"), list) else []
+            target = None
+            for item in shelf_items:
+                if not isinstance(item, dict) or item.get("type") != "jm_album":
+                    continue
+                if self._single_line(item.get("album_id") or item.get("id"), 40) == album_id:
+                    target = item
+                    break
+            pages = target.get("pages") if isinstance(target, dict) and isinstance(target.get("pages"), list) else []
+            data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
+            path: Path | None = None
+            if cover_requested and isinstance(target, dict):
+                cover_path = self._single_line(target.get("cover_path"), 300)
+                if cover_path:
+                    path = Path(cover_path).resolve()
+            if path is None:
+                page = next((item for item in pages if isinstance(item, dict) and self._int(item.get("index")) == page_index), None)
+                if cover_requested and not isinstance(page, dict):
+                    page = next((item for item in pages if isinstance(item, dict) and self._int(item.get("index")) > 0), None)
+                if not isinstance(page, dict):
+                    return self._error("图片不存在")
+                path = Path(str(page.get("path") or "")).resolve()
+            try:
+                path.relative_to(data_root)
+            except ValueError:
+                return self._error("图片路径不在书柜目录内")
+            if not path.exists() or not path.is_file():
+                return self._error("图片文件不存在")
+            return await send_file(path)
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 读取书柜图片失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def delete_bookshelf_item(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        kind = self._single_line(payload.get("kind"), 32)
+        item_id = self._single_line(payload.get("id"), 80)
+        album_payload_id = self._single_line(payload.get("album_id"), 80)
+        title_payload = self._single_line(payload.get("title"), 120)
+        date_key = self._single_line(payload.get("date"), 32)
+        try:
+            async with self.plugin._data_lock:
+                changed = False
+                if kind == "creative":
+                    projects = self.plugin.data.setdefault("creative_projects", [])
+                    if not isinstance(projects, list):
+                        projects = []
+                    before = len(projects)
+                    self.plugin.data["creative_projects"] = [
+                        item
+                        for item in projects
+                        if not (isinstance(item, dict) and self._single_line(item.get("id"), 80) == item_id)
+                    ]
+                    changed = len(self.plugin.data["creative_projects"]) != before
+                elif kind == "diary":
+                    diaries = self.plugin.data.setdefault("bot_diaries", [])
+                    if not isinstance(diaries, list):
+                        diaries = []
+                    before = len(diaries)
+                    self.plugin.data["bot_diaries"] = [
+                        item
+                        for item in diaries
+                        if not (isinstance(item, dict) and self._single_line(item.get("date"), 32) == date_key)
+                    ]
+                    changed = len(self.plugin.data["bot_diaries"]) != before
+                elif kind == "jm_album":
+                    album_id = album_payload_id or item_id.removeprefix("jm-")
+                    album_id = album_id.removeprefix("jm-").removeprefix("jm_album:")
+                    match_keys = {
+                        value
+                        for value in {
+                            album_id,
+                            item_id,
+                            item_id.removeprefix("jm-"),
+                            f"jm-{album_id}" if album_id else "",
+                            f"jm_album:{album_id}" if album_id else "",
+                        }
+                        if value
+                    }
+                    items = self.plugin.data.setdefault("bookshelf_items", [])
+                    if not isinstance(items, list):
+                        items = []
+                    removed_pages: list[dict[str, Any]] = []
+                    removed_album_ids: set[str] = set()
+                    kept = []
+                    for item in items:
+                        if not isinstance(item, dict) or item.get("type") != "jm_album":
+                            kept.append(item)
+                            continue
+                        item_values = {
+                            self._single_line(item.get("album_id"), 80),
+                            self._single_line(item.get("id"), 80),
+                            self._single_line(item.get("key"), 100),
+                        }
+                        title_matched = bool(title_payload and self._single_line(item.get("title"), 120) == title_payload)
+                        if match_keys.intersection(value for value in item_values if value) or title_matched:
+                            removed_album_id = self._single_line(item.get("album_id") or item.get("id"), 80)
+                            if removed_album_id:
+                                removed_album_ids.add(removed_album_id)
+                            if isinstance(item.get("pages"), list):
+                                removed_pages.extend(page for page in item.get("pages", []) if isinstance(page, dict))
+                            changed = True
+                            continue
+                        kept.append(item)
+                    self.plugin.data["bookshelf_items"] = kept
+                    state = self.plugin.data.get("jm_cosmos_integration")
+                    if isinstance(state, dict):
+                        last_album = state.get("last_album")
+                        last_values = {
+                            self._single_line(last_album.get("id"), 80),
+                            self._single_line(last_album.get("album_id"), 80),
+                            self._single_line(last_album.get("key"), 100),
+                        } if isinstance(last_album, dict) else set()
+                        last_title_matched = bool(
+                            isinstance(last_album, dict)
+                            and title_payload
+                            and self._single_line(last_album.get("title"), 120) == title_payload
+                        )
+                        if isinstance(last_album, dict) and (match_keys.intersection(value for value in last_values if value) or last_title_matched):
+                            removed_album_id = self._single_line(last_album.get("id") or last_album.get("album_id"), 80)
+                            if removed_album_id:
+                                removed_album_ids.add(removed_album_id)
+                            state["last_album"] = {}
+                            changed = True
+                    self._cleanup_bookshelf_page_files(removed_pages)
+                    self._cleanup_bookshelf_album_dirs(removed_album_ids)
+                    logger.info(
+                        "[PrivateCompanionPage] 书柜夹层移除: changed=%s id=%s album_id=%s title=%s removed=%s",
+                        changed,
+                        item_id,
+                        album_id,
+                        title_payload,
+                        sorted(removed_album_ids),
+                    )
+                else:
+                    return self._error("不支持的书柜项目类型")
+                if changed:
+                    self.plugin._save_data_sync()
+                data = deepcopy(self.plugin.data)
+            return self._ok({"changed": changed, "bookshelf": await self._bookshelf_summary(data, unlocked=True)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 删除书柜项目失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    def _cleanup_bookshelf_page_files(self, pages: list[dict[str, Any]]) -> None:
+        data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
+        touched_dirs: set[Path] = set()
+        for page in pages:
+            path = Path(str(page.get("path") or "")).resolve()
+            try:
+                path.relative_to(data_root)
+            except ValueError:
+                continue
+            if not path.exists() or not path.is_file():
+                continue
+            touched_dirs.add(path.parent)
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        for folder in touched_dirs:
+            try:
+                folder.relative_to(data_root / "bookshelf_pages")
+            except ValueError:
+                continue
+            try:
+                if folder.exists() and not any(folder.iterdir()):
+                    shutil.rmtree(folder, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _cleanup_bookshelf_album_dirs(self, album_ids: set[str]) -> None:
+        if not album_ids:
+            return
+        data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
+        page_root = data_root / "bookshelf_pages"
+        for album_id in album_ids:
+            safe_id = re.sub(r"[^0-9A-Za-z_.-]+", "_", str(album_id or ""))
+            if not safe_id:
+                continue
+            folder = (page_root / safe_id).resolve()
+            try:
+                folder.relative_to(page_root.resolve())
+            except ValueError:
+                continue
+            try:
+                shutil.rmtree(folder, ignore_errors=True)
+            except Exception:
+                pass
+
     async def import_worldbook(self) -> dict[str, Any]:
         try:
             async with self.plugin._data_lock:
@@ -569,8 +821,21 @@ class PrivateCompanionPageApi:
     def _user_summary(self, user_id: str, user: dict[str, Any]) -> dict[str, Any]:
         last_seen = user.get("last_seen", 0)
         last_sent = user.get("last_sent", 0)
+        user_id_text = str(user_id)
+        is_qq_user = user_id_text.isdigit()
+        umo = str(user.get("umo", "") or "")
+        source = self._single_line(umo.split(":", 1)[0], 40) if ":" in umo else ""
+        nickname = self._single_line(user.get("nickname"), 40)
+        generic_names = {"用户", "主人", "默认用户"}
+        if is_qq_user:
+            display_name = nickname if nickname and nickname not in generic_names else user_id_text
+        else:
+            display_name = f"临时会话 · {user_id_text[:8]}"
         return {
-            "user_id": str(user_id),
+            "user_id": user_id_text,
+            "display_name": display_name,
+            "is_qq_user": is_qq_user,
+            "source": source,
             "enabled": bool(user.get("enabled", True)),
             "nickname": user.get("nickname", ""),
             "style": user.get("style", ""),
@@ -639,10 +904,17 @@ class PrivateCompanionPageApi:
             "enable_relationship_state_machine",
             "enable_dialogue_episode_memory",
             "enable_open_loop_tracking",
+            "enable_environment_perception",
+            "enable_holiday_perception",
+            "enable_platform_perception",
+            "enable_lunar_perception",
+            "enable_solar_term_perception",
+            "enable_almanac_perception",
             "enable_group_companion",
             "enable_group_slang_learning",
             "enable_group_member_profiles",
             "enable_group_context_injection",
+            "enable_group_scene_awareness",
             "enable_group_interjection",
             "enable_group_topic_threads",
             "enable_group_episode_memory",
@@ -651,14 +923,22 @@ class PrivateCompanionPageApi:
             "enable_group_relationship_graph",
             "enable_group_privacy_guard",
             "enable_worldbook_member_recognition",
+            "enable_atrelay_tools",
             "enable_livingmemory_integration",
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
+            "enable_private_reading_integration",
+            "enable_private_reading_boredom_read",
+            "enable_private_reading_ask_recommendation",
             "enable_unanswered_screen_peek_followup",
             "enable_creative_writing",
             "creative_hidden_mode",
         ]
-        return {key: bool(getattr(self.plugin, key, False)) for key in keys}
+        values = {key: bool(getattr(self.plugin, key, False)) for key in keys}
+        values["enable_private_reading_integration"] = bool(getattr(self.plugin, "enable_jm_cosmos_integration", False))
+        values["enable_private_reading_boredom_read"] = bool(getattr(self.plugin, "enable_jm_cosmos_boredom_read", False))
+        values["enable_private_reading_ask_recommendation"] = bool(getattr(self.plugin, "enable_private_reading_ask_recommendation", False))
+        return values
 
     def _provider_settings(self) -> dict[str, str]:
         keys = [
@@ -666,8 +946,7 @@ class PrivateCompanionPageApi:
             "MAI_STYLE_PROVIDER_ID",
             "DAILY_PLAN_PROVIDER_ID",
             "DETAIL_ENHANCEMENT_PROVIDER_ID",
-            "DIARY_PROVIDER_ID",
-            "DREAM_PROVIDER_ID",
+            "DREAM_DIARY_PROVIDER_ID",
             "CREATIVE_PROVIDER_ID",
             "VOICE_PROMPT_PROVIDER_ID",
             "PHOTO_PROMPT_PROVIDER_ID",
@@ -680,8 +959,12 @@ class PrivateCompanionPageApi:
             "GROUP_INTERJECT_PROVIDER_ID",
             "GROUP_EPISODE_PROVIDER_ID",
             "GROUP_SLANG_PROVIDER_ID",
+            "PRIVATE_READING_VISION_PROVIDER_ID",
         ]
-        return {key: self._config_get(key) for key in keys}
+        values = {key: self._config_get(key) for key in keys}
+        if not values.get("DREAM_DIARY_PROVIDER_ID"):
+            values["DREAM_DIARY_PROVIDER_ID"] = str(getattr(self.plugin, "dream_diary_provider_id", "") or "")
+        return values
 
     def _available_provider_items(self) -> list[dict[str, Any]]:
         providers: list[Any] = []
@@ -776,15 +1059,27 @@ class PrivateCompanionPageApi:
             "bot_name",
             "target_user_ids",
             "target_platform",
+            "environment_perception_timezone",
+            "holiday_country",
+            "enable_environment_perception",
+            "enable_holiday_perception",
+            "enable_platform_perception",
+            "enable_lunar_perception",
+            "enable_solar_term_perception",
+            "enable_almanac_perception",
             "default_nickname",
             "default_style",
+            "worldview_adaptation_mode",
+            "worldview_adaptation_prompt",
             "quiet_hours",
+            "daily_token_limit",
             "check_interval_seconds",
             "idle_minutes",
             "min_interval_minutes",
             "max_daily_messages",
             "group_interject_min_interval_minutes",
             "group_interject_max_daily",
+            "group_scene_recent_limit",
             "max_group_recent_messages",
             "max_group_slang_terms",
             "memory_refresh_interval_minutes",
@@ -798,6 +1093,14 @@ class PrivateCompanionPageApi:
             "bilibili_boredom_min_interval_hours",
             "bilibili_share_probability",
             "bilibili_share_min_score",
+            "enable_private_reading_integration",
+            "enable_private_reading_boredom_read",
+            "enable_private_reading_ask_recommendation",
+            "private_reading_min_interval_hours",
+            "private_reading_max_photo_count",
+            "private_reading_share_probability",
+            "private_reading_ask_probability",
+            "private_reading_default_keywords",
             "enable_unanswered_screen_peek_followup",
             "unanswered_screen_peek_after_minutes",
             "unanswered_screen_peek_cooldown_minutes",
@@ -813,8 +1116,24 @@ class PrivateCompanionPageApi:
             "worldbook_self_registration",
             "worldbook_member_inject_limit",
             "worldbook_config_paths",
+            "enable_atrelay_tools",
+            "atrelay_require_worldbook_first",
+            "atrelay_member_cache_minutes",
         ]
-        return {key: getattr(self.plugin, key, self._config_get(key)) for key in keys}
+        values = {key: getattr(self.plugin, key, self._config_get(key)) for key in keys}
+        values.update(
+            {
+                "enable_private_reading_integration": bool(getattr(self.plugin, "enable_jm_cosmos_integration", False)),
+                "enable_private_reading_boredom_read": bool(getattr(self.plugin, "enable_jm_cosmos_boredom_read", False)),
+                "enable_private_reading_ask_recommendation": bool(getattr(self.plugin, "enable_private_reading_ask_recommendation", False)),
+                "private_reading_min_interval_hours": getattr(self.plugin, "jm_cosmos_min_interval_hours", 18),
+                "private_reading_max_photo_count": getattr(self.plugin, "jm_cosmos_max_photo_count", 60),
+                "private_reading_share_probability": getattr(self.plugin, "jm_cosmos_share_probability", 0.18),
+                "private_reading_ask_probability": getattr(self.plugin, "private_reading_ask_probability", 0.16),
+                "private_reading_default_keywords": getattr(self.plugin, "jm_cosmos_default_keywords", ""),
+            }
+        )
+        return values
 
     def _build_diagnostics(self, users: dict[str, Any], groups: dict[str, Any]) -> list[dict[str, str]]:
         items: list[dict[str, str]] = []
@@ -869,6 +1188,26 @@ class PrivateCompanionPageApi:
                 "已检测到 B 站插件或观看日志" if bili_available else "联动开关已开，但暂未检测到 B 站插件实例或日志",
             )
 
+        if features.get("enable_private_reading_integration"):
+            jm_available = bool(getattr(self.plugin, "_jm_cosmos_available", lambda: False)())
+            add(
+                "ok" if jm_available else "info",
+                "夹层阅读素材",
+                "已检测到可用素材能力" if jm_available else "开关已开，但暂未检测到可用素材能力",
+            )
+
+        llm_perception_available = bool(getattr(self.plugin, "_llmperception_available", lambda: False)())
+        if llm_perception_available:
+            if features.get("enable_environment_perception"):
+                add(
+                    "warn",
+                    "检测到 LLMPerception 插件",
+                    "本插件已内置时间、节假日、农历节气和平台环境感知；两者同时启用会重复注入并增加 Token 消耗",
+                    "重启插件会自动关闭 enable_environment_perception，或手动二选一",
+                )
+            else:
+                add("ok", "环境感知由外部插件接管", "检测到 LLMPerception，本插件内置环境感知已关闭")
+
         if features.get("enable_creative_writing"):
             projects = self._creative_summary({"creative_projects": getattr(self.plugin, "data", {}).get("creative_projects", [])})
             active = projects.get("active_projects", 0)
@@ -901,6 +1240,30 @@ class PrivateCompanionPageApi:
                 add("warn", "群聊插话开关已开但额度为 0", "功能不会真正触发", "在模块配置里调高每群每日插话上限")
         elif getattr(self.plugin, "enable_group_companion", False):
             add("info", "群聊以观察为主", "当前只积累群上下文，不主动插话")
+
+        context_aware_installed = bool(getattr(self.plugin, "_context_aware_available", lambda: False)())
+        if context_aware_installed:
+            if features.get("enable_group_scene_awareness"):
+                add(
+                    "warn",
+                    "检测到上下文场景感知增强插件",
+                    "不会造成代码级冲突，但若两个插件同时注入群聊场景，会增加重复上下文和 Token 消耗",
+                    "重启插件会自动关闭 enable_group_scene_awareness，或手动二选一",
+                )
+            else:
+                add("ok", "群聊场景感知由外部插件接管", "检测到 context_aware，本插件对应内置功能已关闭")
+
+        atrelay_installed = bool(getattr(self.plugin, "_atrelay_plugin_available", lambda: False)())
+        if atrelay_installed:
+            if features.get("enable_atrelay_tools"):
+                add(
+                    "warn",
+                    "检测到艾特群友插件",
+                    "本插件已内置跨群转述与 @ 群友工具；两者同时启用可能让模型看到重复工具",
+                    "重启插件会自动关闭 enable_atrelay_tools，或手动二选一",
+                )
+            else:
+                add("ok", "跨群转述由外部插件接管", "检测到 atrelay，本插件对应内置工具已关闭")
 
         if not features.get("enable_group_privacy_guard"):
             add("warn", "群聊隐私保护未开启", "私聊记忆注入群聊时缺少额外防护", "建议打开 enable_group_privacy_guard")
@@ -1018,8 +1381,7 @@ class PrivateCompanionPageApi:
             "MAI_STYLE_PROVIDER_ID": "mai_style_provider_id",
             "DAILY_PLAN_PROVIDER_ID": "daily_plan_provider_id",
             "DETAIL_ENHANCEMENT_PROVIDER_ID": "detail_enhancement_provider_id",
-            "DIARY_PROVIDER_ID": "diary_provider_id",
-            "DREAM_PROVIDER_ID": "dream_provider_id",
+            "DREAM_DIARY_PROVIDER_ID": "dream_diary_provider_id",
             "CREATIVE_PROVIDER_ID": "creative_provider_id",
             "VOICE_PROMPT_PROVIDER_ID": "voice_prompt_provider_id",
             "PHOTO_PROMPT_PROVIDER_ID": "photo_prompt_provider_id",
@@ -1032,9 +1394,14 @@ class PrivateCompanionPageApi:
             "GROUP_INTERJECT_PROVIDER_ID": "group_interject_provider_id",
             "GROUP_EPISODE_PROVIDER_ID": "group_episode_provider_id",
             "GROUP_SLANG_PROVIDER_ID": "group_slang_provider_id",
+            "PRIVATE_READING_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",
         }
         if key in attr_map:
             setattr(self.plugin, attr_map[key], str(value or "").strip())
+            if key == "DREAM_DIARY_PROVIDER_ID":
+                shared = str(value or "").strip()
+                self.plugin.dream_provider_id = shared
+                self.plugin.diary_provider_id = shared
             return
         if key == "group_access_mode":
             self.plugin.group_access_mode = str(value or "whitelist").lower()
@@ -1044,6 +1411,19 @@ class PrivateCompanionPageApi:
             return
         if key == "group_blacklist_ids":
             self.plugin.group_blacklist_ids = list(value or [])
+            return
+        private_reading_attr_map = {
+            "enable_private_reading_integration": "enable_jm_cosmos_integration",
+            "enable_private_reading_boredom_read": "enable_jm_cosmos_boredom_read",
+            "enable_private_reading_ask_recommendation": "enable_private_reading_ask_recommendation",
+            "private_reading_min_interval_hours": "jm_cosmos_min_interval_hours",
+            "private_reading_max_photo_count": "jm_cosmos_max_photo_count",
+            "private_reading_share_probability": "jm_cosmos_share_probability",
+            "private_reading_ask_probability": "private_reading_ask_probability",
+            "private_reading_default_keywords": "jm_cosmos_default_keywords",
+        }
+        if key in private_reading_attr_map:
+            setattr(self.plugin, private_reading_attr_map[key], value)
             return
         if key in self._allowed_feature_keys():
             setattr(self.plugin, key, bool(value))
@@ -1079,6 +1459,12 @@ class PrivateCompanionPageApi:
             "enable_relationship_state_machine",
             "enable_dialogue_episode_memory",
             "enable_open_loop_tracking",
+            "enable_environment_perception",
+            "enable_holiday_perception",
+            "enable_platform_perception",
+            "enable_lunar_perception",
+            "enable_solar_term_perception",
+            "enable_almanac_perception",
             "enable_group_companion",
             "enable_group_slang_learning",
             "enable_group_member_profiles",
@@ -1091,9 +1477,14 @@ class PrivateCompanionPageApi:
             "enable_group_relationship_graph",
             "enable_group_privacy_guard",
             "enable_worldbook_member_recognition",
+            "enable_group_scene_awareness",
+            "enable_atrelay_tools",
             "enable_livingmemory_integration",
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
+            "enable_private_reading_integration",
+            "enable_private_reading_boredom_read",
+            "enable_private_reading_ask_recommendation",
             "enable_unanswered_screen_peek_followup",
             "enable_creative_writing",
             "creative_hidden_mode",
@@ -1106,8 +1497,7 @@ class PrivateCompanionPageApi:
             "MAI_STYLE_PROVIDER_ID",
             "DAILY_PLAN_PROVIDER_ID",
             "DETAIL_ENHANCEMENT_PROVIDER_ID",
-            "DIARY_PROVIDER_ID",
-            "DREAM_PROVIDER_ID",
+            "DREAM_DIARY_PROVIDER_ID",
             "CREATIVE_PROVIDER_ID",
             "VOICE_PROMPT_PROVIDER_ID",
             "PHOTO_PROMPT_PROVIDER_ID",
@@ -1120,6 +1510,7 @@ class PrivateCompanionPageApi:
             "GROUP_INTERJECT_PROVIDER_ID",
             "GROUP_EPISODE_PROVIDER_ID",
             "GROUP_SLANG_PROVIDER_ID",
+            "PRIVATE_READING_VISION_PROVIDER_ID",
         }
 
     @staticmethod
@@ -1128,15 +1519,27 @@ class PrivateCompanionPageApi:
             "bot_name",
             "target_user_ids",
             "target_platform",
+            "environment_perception_timezone",
+            "holiday_country",
+            "enable_environment_perception",
+            "enable_holiday_perception",
+            "enable_platform_perception",
+            "enable_lunar_perception",
+            "enable_solar_term_perception",
+            "enable_almanac_perception",
             "default_nickname",
             "default_style",
+            "worldview_adaptation_mode",
+            "worldview_adaptation_prompt",
             "quiet_hours",
+            "daily_token_limit",
             "check_interval_seconds",
             "idle_minutes",
             "min_interval_minutes",
             "max_daily_messages",
             "group_interject_min_interval_minutes",
             "group_interject_max_daily",
+            "group_scene_recent_limit",
             "max_group_recent_messages",
             "max_group_slang_terms",
             "memory_refresh_interval_minutes",
@@ -1150,6 +1553,14 @@ class PrivateCompanionPageApi:
             "bilibili_boredom_min_interval_hours",
             "bilibili_share_probability",
             "bilibili_share_min_score",
+            "enable_private_reading_integration",
+            "enable_private_reading_boredom_read",
+            "enable_private_reading_ask_recommendation",
+            "private_reading_min_interval_hours",
+            "private_reading_max_photo_count",
+            "private_reading_share_probability",
+            "private_reading_ask_probability",
+            "private_reading_default_keywords",
             "enable_creative_writing",
             "creative_inspiration_probability",
             "creative_share_probability",
@@ -1162,6 +1573,9 @@ class PrivateCompanionPageApi:
             "worldbook_self_registration",
             "worldbook_member_inject_limit",
             "worldbook_config_paths",
+            "enable_atrelay_tools",
+            "atrelay_require_worldbook_first",
+            "atrelay_member_cache_minutes",
         }
 
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
@@ -1169,13 +1583,20 @@ class PrivateCompanionPageApi:
             return self._normalize_id_list(value)
         if key == "worldbook_config_paths":
             return str(value or "").strip()[:1000]
+        if key == "worldview_adaptation_mode":
+            mode = str(value or "auto").strip()
+            return mode if mode in {"auto", "modern", "fantasy", "sci_fi", "custom", "off"} else "auto"
+        if key == "worldview_adaptation_prompt":
+            return str(value or "").strip()[:1200]
         if key in {
             "check_interval_seconds",
+            "daily_token_limit",
             "idle_minutes",
             "min_interval_minutes",
             "max_daily_messages",
             "group_interject_min_interval_minutes",
             "group_interject_max_daily",
+            "group_scene_recent_limit",
             "max_group_recent_messages",
             "max_group_slang_terms",
             "memory_refresh_interval_minutes",
@@ -1186,11 +1607,14 @@ class PrivateCompanionPageApi:
             "max_dialogue_episodes",
             "bilibili_boredom_min_interval_hours",
             "bilibili_share_min_score",
+            "private_reading_min_interval_hours",
+            "private_reading_max_photo_count",
             "unanswered_screen_peek_after_minutes",
             "unanswered_screen_peek_cooldown_minutes",
             "creative_base_chars_per_hour",
             "creative_max_active_projects",
             "worldbook_member_inject_limit",
+            "atrelay_member_cache_minutes",
         }:
             try:
                 return max(0, int(value))
@@ -1198,6 +1622,8 @@ class PrivateCompanionPageApi:
                 return 0
         if key in {
             "bilibili_share_probability",
+            "private_reading_share_probability",
+            "private_reading_ask_probability",
             "creative_inspiration_probability",
             "creative_share_probability",
         }:
@@ -1208,13 +1634,25 @@ class PrivateCompanionPageApi:
         if key in {
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
+            "enable_private_reading_integration",
+            "enable_private_reading_boredom_read",
+            "enable_private_reading_ask_recommendation",
             "enable_unanswered_screen_peek_followup",
             "enable_creative_writing",
             "creative_hidden_mode",
+            "enable_environment_perception",
+            "enable_holiday_perception",
+            "enable_platform_perception",
+            "enable_lunar_perception",
+            "enable_solar_term_perception",
+            "enable_almanac_perception",
             "enable_worldbook_member_recognition",
+            "enable_group_scene_awareness",
             "worldbook_auto_import",
             "worldbook_member_match_aliases",
             "worldbook_self_registration",
+            "enable_atrelay_tools",
+            "atrelay_require_worldbook_first",
         }:
             return bool(value)
         return self._single_line(value, 240)
@@ -1348,6 +1786,187 @@ class PrivateCompanionPageApi:
             "latest_video": latest if isinstance(latest, dict) else {},
         }
 
+    def _jm_cosmos_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        state = data.get("jm_cosmos_integration") if isinstance(data.get("jm_cosmos_integration"), dict) else {}
+        try:
+            available = bool(getattr(self.plugin, "_jm_cosmos_available", lambda: False)())
+        except Exception:
+            available = False
+        album = state.get("last_album") if isinstance(state.get("last_album"), dict) else {}
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_jm_cosmos_integration", False)),
+            "boredom_read_enabled": bool(getattr(self.plugin, "enable_jm_cosmos_boredom_read", False)),
+            "ask_recommendation_enabled": bool(getattr(self.plugin, "enable_private_reading_ask_recommendation", False)),
+            "available": available,
+            "last_read_at": self.plugin._format_timestamp_elapsed(state.get("last_read_at", 0)),
+            "last_status": state.get("last_status", ""),
+            "last_keyword": state.get("last_keyword", ""),
+            "last_album": {
+                "id": self._single_line(album.get("id"), 32),
+                "title": self._single_line(album.get("title"), 100),
+                "impression": self._single_line(album.get("impression"), 160),
+            },
+        }
+
+    async def _bookshelf_file_url(self, value: Any, data_root: Path) -> str:
+        raw_path = self._single_line(value, 500)
+        if not raw_path:
+            return ""
+        try:
+            path = Path(raw_path).resolve()
+            path.relative_to(data_root)
+        except Exception:
+            return ""
+        if not path.exists() or not path.is_file():
+            return ""
+        try:
+            token = await file_token_service.register_file(str(path))
+            return f"/api/file/{token}"
+        except Exception as exc:
+            logger.warning(f"[PrivateCompanionPage] 注册书柜图片失败: {exc}")
+            return ""
+
+    async def _bookshelf_summary(self, data: dict[str, Any], *, unlocked: bool) -> dict[str, Any]:
+        projects = data.get("creative_projects") if isinstance(data.get("creative_projects"), list) else []
+        diaries = data.get("bot_diaries") if isinstance(data.get("bot_diaries"), list) else []
+        shelf_items = data.get("bookshelf_items") if isinstance(data.get("bookshelf_items"), list) else []
+        jm_items = [item for item in shelf_items if isinstance(item, dict) and item.get("type") == "jm_album"]
+        jm_state = data.get("jm_cosmos_integration") if isinstance(data.get("jm_cosmos_integration"), dict) else {}
+        last_album = jm_state.get("last_album") if isinstance(jm_state.get("last_album"), dict) else {}
+        if last_album and not any(str(item.get("album_id") or item.get("id") or "") == str(last_album.get("id") or "") for item in jm_items):
+            jm_items.append(
+                {
+                    "type": "jm_album",
+                    "title": last_album.get("title"),
+                    "album_id": last_album.get("id"),
+                    "keyword": last_album.get("keyword"),
+                    "author": last_album.get("author"),
+                    "tags": last_album.get("tags"),
+                    "photo_count": last_album.get("photo_count"),
+                    "impression": last_album.get("impression"),
+                    "vision": last_album.get("vision"),
+                    "image_count": last_album.get("image_count"),
+                    "pages": last_album.get("pages") if isinstance(last_album.get("pages"), list) else [],
+                    "created_ts": last_album.get("created_ts"),
+                }
+            )
+        public_books = []
+        for item in [project for project in projects if isinstance(project, dict)][-12:]:
+            chunks = item.get("draft_chunks") if isinstance(item.get("draft_chunks"), list) else []
+            full_text = "\n\n".join(
+                self._single_line(chunk.get("text"), 2000)
+                for chunk in chunks
+                if isinstance(chunk, dict) and self._single_line(chunk.get("text"), 2000)
+            )
+            status = self._single_line(item.get("status"), 24)
+            progress = f"{self._int(item.get('current_chars'))}/{self._int(item.get('target_chars')) or '-'} 字"
+            public_books.append(
+                {
+                    "id": self._single_line(item.get("id"), 32) or f"creative-{len(public_books)}",
+                    "kind": "creative",
+                    "title": self._single_line(item.get("title"), 60) or "未定标题",
+                    "intro": self._single_line(item.get("premise"), 240) or "这本书还没整理出简介。",
+                    "status": status,
+                    "tone": self._single_line(item.get("tone"), 40),
+                    "progress": progress,
+                    "content": full_text or self._single_line(chunks[-1].get("text") if chunks else "", 2000) or "这本书还没有正文。",
+                    "created": self.plugin._format_timestamp_elapsed(item.get("created_at", 0)),
+                }
+            )
+        locked_count = (1 if diaries else 0) + len(jm_items)
+        secret_books: list[dict[str, Any]] = []
+        if unlocked:
+            diary_entries = []
+            for item in [entry for entry in diaries if isinstance(entry, dict)][-60:]:
+                body = self._single_line(item.get("body"), 1600)
+                summary = self._single_line(item.get("summary"), 1000)
+                share_seed = self._single_line(item.get("share_seed"), 1000)
+                content = body or "\n\n".join(part for part in (summary, share_seed) if part)
+                diary_entries.append(
+                    {
+                        "date": self._single_line(item.get("date"), 24) or "某天",
+                        "generated_at": self._single_line(item.get("generated_at"), 32),
+                        "title": f"{self._single_line(item.get('date'), 24) or '某天'}",
+                        "intro": summary or "这一天没有留下摘要。",
+                        "content": content or "这一天的日记暂时没有写出正文。",
+                        "tags": [self._single_line(tag, 24) for tag in item.get("tags", [])[:8] if self._single_line(tag, 24)]
+                        if isinstance(item.get("tags"), list)
+                        else [],
+                    }
+                )
+            if diary_entries:
+                secret_books.append(
+                    {
+                        "id": "diary-main",
+                        "kind": "diary",
+                        "title": "日记本",
+                        "intro": f"这里收着 {len(diary_entries)} 天的日记。打开后可以选择日期。",
+                        "content": diary_entries[-1].get("content") or "这本日记暂时没有可读内容。",
+                        "entries": diary_entries,
+                        "created": diary_entries[-1].get("generated_at", ""),
+                    }
+            )
+            for item in jm_items[-18:]:
+                album_id = self._single_line(item.get("album_id") or item.get("id"), 32)
+                pages = item.get("pages") if isinstance(item.get("pages"), list) else []
+                page_items = []
+                data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
+                for page in pages:
+                    if not isinstance(page, dict):
+                        continue
+                    index = self._int(page.get("index"))
+                    if index <= 0:
+                        continue
+                    page_src = await self._bookshelf_file_url(page.get("path"), data_root)
+                    if not page_src:
+                        page_src = f"{PAGE_API_PREFIX}/bookshelf/image?album_id={album_id}&page={index}"
+                    page_items.append(
+                        {
+                            "index": index,
+                            "src": page_src,
+                        }
+                    )
+                cover_src = ""
+                if album_id:
+                    cover_src = await self._bookshelf_file_url(item.get("cover_path"), data_root)
+                    if not cover_src and page_items:
+                        cover_src = page_items[0].get("src", "")
+                secret_books.append(
+                    {
+                        "id": f"jm-{album_id or len(secret_books)}",
+                        "kind": "jm_album",
+                        "album_id": album_id,
+                        "title": self._single_line(item.get("title"), 100) or "未命名藏书",
+                        "intro": self._single_line(item.get("impression") or item.get("vision"), 240) or "只留下了一点模糊的阅读印象。",
+                        "author": self._single_line(item.get("author"), 40),
+                        "progress": f"{len(page_items) or self._int(item.get('image_count')) or self._int(item.get('photo_count'))} 页",
+                        "created": self.plugin._format_timestamp_elapsed(item.get("created_ts", 0)),
+                        "content": "\n\n".join(
+                            part
+                            for part in (
+                                self._single_line(item.get("impression"), 1000),
+                                self._single_line(item.get("vision"), 1000),
+                                f"关键词：{self._single_line(item.get('keyword'), 80)}" if self._single_line(item.get("keyword"), 80) else "",
+                            )
+                            if part
+                        ) or "这本只留下了一点很含糊的阅读印象。",
+                        "tags": [self._single_line(tag, 24) for tag in item.get("tags", [])[:8] if self._single_line(tag, 24)]
+                        if isinstance(item.get("tags"), list)
+                        else [],
+                        "cover_src": cover_src,
+                        "pages": page_items,
+                    }
+                )
+        return {
+            "unlocked": unlocked,
+            "public_count": len(public_books),
+            "secret_count": locked_count,
+            "diary_count": 1 if diaries else 0,
+            "jm_album_count": len(jm_items),
+            "public_books": public_books,
+            "secret_books": secret_books,
+        }
+
     def _proactive_candidate_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         raw = data.get("proactive_candidate_pool") if isinstance(data.get("proactive_candidate_pool"), list) else []
         now = time.time()
@@ -1359,17 +1978,26 @@ class PrivateCompanionPageApi:
                 continue
             status = self._single_line(item.get("status"), 24) or "unknown"
             source = self._single_line(item.get("source"), 40) or "unknown"
+            display_source = "bookshelf_reading" if source == "jm_cosmos" else source
             counts[status] = counts.get(status, 0) + 1
-            source_counts[source] = source_counts.get(source, 0) + 1
+            source_counts[display_source] = source_counts.get(display_source, 0) + 1
             scheduled = self._float(item.get("scheduled_ts"))
             created = self._float(item.get("created_ts"))
+            reason = self._single_line(item.get("reason"), 40)
+            action = self._single_line(item.get("action"), 40)
+            if reason == "jm_cosmos_share":
+                reason = "bookshelf_reading_share"
+            if reason == "jm_cosmos_recommendation_request":
+                reason = "bookshelf_recommendation_request"
+            if action == "jm_cosmos_read":
+                action = "bookshelf_reading"
             items.append(
                 {
                     "id": self._single_line(item.get("id"), 20),
                     "user_id": self._single_line(item.get("user_id"), 32),
-                    "source": source,
-                    "reason": self._single_line(item.get("reason"), 40),
-                    "action": self._single_line(item.get("action"), 40),
+                    "source": display_source,
+                    "reason": reason,
+                    "action": action,
                     "topic": self._single_line(item.get("topic"), 100),
                     "motive": self._single_line(item.get("motive"), 180),
                     "score": self._int(item.get("score")),
@@ -1467,6 +2095,7 @@ class PrivateCompanionPageApi:
                 {
                     "date": self._single_line(item.get("date"), 24),
                     "summary": self._single_line(item.get("summary"), 180),
+                    "body": self._single_line(item.get("body"), 500),
                     "share_seed": self._single_line(item.get("share_seed"), 140),
                     "tags": [self._single_line(tag, 20) for tag in item.get("tags", [])[:6] if self._single_line(tag, 20)]
                     if isinstance(item.get("tags"), list)
@@ -1479,9 +2108,9 @@ class PrivateCompanionPageApi:
             "dream_fragments": self._limited_dream_fragments(fragments),
             "current_plan": {
                 "time": self._single_line(current_item.get("time"), 12),
-                "activity": self._single_line(current_item.get("activity"), 180),
+                "activity": self._single_line(current_item.get("activity"), 600),
                 "mood": self._single_line(current_item.get("mood"), 40),
-                "message_seed": self._single_line(current_item.get("message_seed"), 160),
+                "message_seed": self._single_line(current_item.get("message_seed"), 500),
             },
             "story": {
                 "date": self._single_line(story.get("date"), 24),
@@ -1569,7 +2198,44 @@ class PrivateCompanionPageApi:
         by_provider = self._token_ranked_map(usage.get("by_provider"))
         by_task = self._token_ranked_map(usage.get("by_task"))
         by_day = self._token_series_map(usage.get("by_day"), limit=30)
+        by_day_provider_raw = usage.get("by_day_provider") if isinstance(usage.get("by_day_provider"), dict) else {}
+        by_day_task_raw = usage.get("by_day_task") if isinstance(usage.get("by_day_task"), dict) else {}
+        by_day_detail = []
+        for item in by_day:
+            day_key = item.get("key", "")
+            providers = self._token_ranked_map(by_day_provider_raw.get(day_key))[:5]
+            tasks = self._token_ranked_map(by_day_task_raw.get(day_key))[:6]
+            by_day_detail.append({**item, "providers": providers, "tasks": tasks})
         by_hour = self._token_series_map(usage.get("by_hour"), limit=48)
+        today_key = _today_key()
+        today_bucket = usage.get("by_day", {}).get(today_key, {}) if isinstance(usage.get("by_day"), dict) else {}
+        today_total_tokens = self._int(today_bucket.get("total_tokens")) if isinstance(today_bucket, dict) else 0
+        exempt_by_day = usage.get("budget_exempt_by_day") if isinstance(usage.get("budget_exempt_by_day"), dict) else {}
+        today_exempt_bucket = exempt_by_day.get(today_key, {}) if isinstance(exempt_by_day, dict) else {}
+        today_exempt_tokens = self._int(today_exempt_bucket.get("total_tokens")) if isinstance(today_exempt_bucket, dict) else 0
+        if today_exempt_tokens <= 0:
+            today_tasks = by_day_task_raw.get(today_key, {}) if isinstance(by_day_task_raw, dict) else {}
+            if isinstance(today_tasks, dict):
+                today_exempt_tokens = sum(
+                    self._int(bucket.get("total_tokens"))
+                    for task, bucket in today_tasks.items()
+                    if str(task) in {"proactive_framework", "voice_framework"} and isinstance(bucket, dict)
+                )
+        today_tokens = max(0, today_total_tokens - today_exempt_tokens)
+        daily_limit = self._int(getattr(self.plugin, "daily_token_limit", 0))
+        budget_skips = usage.get("budget_skips", {})
+        today_skips = budget_skips.get(today_key, {}) if isinstance(budget_skips, dict) else {}
+        budget = {
+            "day": today_key,
+            "limit": daily_limit,
+            "used": today_tokens,
+            "total_used": today_total_tokens,
+            "exempt_used": today_exempt_tokens,
+            "remaining": max(0, daily_limit - today_tokens) if daily_limit > 0 else None,
+            "ratio": round(today_tokens / daily_limit, 4) if daily_limit > 0 else 0,
+            "exceeded": bool(daily_limit > 0 and today_tokens >= daily_limit),
+            "skipped_calls": self._int(today_skips.get("count")) if isinstance(today_skips, dict) else 0,
+        }
         recent_raw = usage.get("recent")
         recent = []
         if isinstance(recent_raw, list):
@@ -1591,6 +2257,7 @@ class PrivateCompanionPageApi:
                         "prompt_chars": self._int(item.get("prompt_chars")),
                         "completion_chars": self._int(item.get("completion_chars")),
                         "error": self._single_line(item.get("error"), 160),
+                        "budget_exempt": bool(item.get("budget_exempt", False)),
                     }
                 )
         return {
@@ -1599,7 +2266,9 @@ class PrivateCompanionPageApi:
             "by_provider": by_provider,
             "by_task": by_task,
             "by_day": by_day,
+            "by_day_detail": by_day_detail,
             "by_hour": by_hour,
+            "budget": budget,
             "recent": recent,
         }
 

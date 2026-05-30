@@ -26,7 +26,7 @@
         <button class="tab" data-tab="worldbook">关系网</button>
         <button class="tab" data-tab="memory">观察</button>
         <button class="tab" data-tab="proactive">主动</button>
-        <button class="tab" data-tab="creative">创作</button>
+        <button class="tab" data-tab="bookshelf">书柜</button>
         <button class="tab" data-tab="tokens">Token</button>
         <button class="tab" data-tab="modules">模块配置</button>
         <button class="tab" data-tab="config">配置</button>
@@ -93,6 +93,7 @@
                 <th>互动</th>
                 <th>主动</th>
                 <th>最近</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody id="userRows"></tbody>
@@ -272,40 +273,59 @@
         </div>
       </section>
 
-      <section class="panel" id="panel-creative">
+      <section class="panel" id="panel-bookshelf">
         <div class="section-head">
-          <h2>私下创作</h2>
-          <span class="muted">Bot 自己慢慢写的长线项目，只在节点或被问到时自然提起</span>
+          <h2>书柜</h2>
+          <span class="muted">上层放正在写的书，下层抽屉收着日记本和夹层藏书</span>
         </div>
-        <div class="creative-hero">
-          <article>
-            <span>进行中</span>
-            <b id="creativeActiveCount">0</b>
-          </article>
-          <article>
-            <span>项目总数</span>
-            <b id="creativeProjectCount">0</b>
-          </article>
-          <article>
-            <span>提起方式</span>
-            <b id="creativeRevealMode">-</b>
-          </article>
-          <article>
-            <span>最新项目</span>
-            <b id="creativeLatestTitle">暂无</b>
-          </article>
+        <div id="bookcaseHome" class="bookcase-home">
+          <div class="bookcase-hero">
+            <article>
+              <span>书架藏书</span>
+              <b id="bookshelfPublicCount">0</b>
+            </article>
+            <article>
+              <span>抽屉夹层</span>
+              <b id="bookshelfSecretCount">0</b>
+            </article>
+            <article>
+              <span>日记本</span>
+              <b id="bookshelfDiaryCount">0</b>
+            </article>
+            <article>
+              <span>藏书</span>
+              <b id="bookshelfJmCount">0</b>
+            </article>
+          </div>
+          <div class="bookcase-layout">
+            <article class="bookcase-shell">
+              <div class="bookcase-top">
+                <div>
+                  <h2>上层书架</h2>
+                  <p id="bookshelfIntro" class="section-desc"></p>
+                </div>
+                <dl id="creativeSettings"></dl>
+              </div>
+              <div id="bookshelfPublicBooks" class="book-row"></div>
+            </article>
+            <article class="drawer-cabinet">
+              <div class="drawer-head">
+                <div>
+                  <h2>抽屉夹层</h2>
+                  <p class="section-desc">密码由 Bot 自己记着，需要在聊天里自然询问。</p>
+                </div>
+                <span id="bookshelfLockState" class="module-badge">未解锁</span>
+              </div>
+              <form id="bookshelfUnlockForm" class="drawer-unlock">
+                <input id="bookshelfPassword" type="password" placeholder="输入夹层密码" autocomplete="off" />
+                <button type="submit">打开抽屉</button>
+                <span id="bookshelfUnlockMessage" class="drawer-unlock-message" aria-live="polite"></span>
+              </form>
+              <div id="bookshelfSecretBooks" class="drawer-books"></div>
+            </article>
+          </div>
         </div>
-        <div class="creative-layout">
-          <article>
-            <h2>创作节奏</h2>
-            <dl id="creativeSettings"></dl>
-          </article>
-          <article>
-            <h2>状态说明</h2>
-            <p id="creativeIntro" class="section-desc"></p>
-          </article>
-        </div>
-        <div id="creativeProjects" class="creative-projects"></div>
+        <div id="bookDetailPanel" class="book-detail-panel" hidden></div>
       </section>
 
       <section class="panel" id="panel-tokens">
@@ -330,6 +350,14 @@
             <div id="tokenHourlyChart" class="token-bars"></div>
           </article>
           <article class="wide">
+            <h2>每日统计</h2>
+            <div id="tokenDailyChart" class="token-bars"></div>
+          </article>
+          <article class="wide">
+            <h2>每日明细</h2>
+            <div id="tokenDailyTable" class="table-wrap compact-table"></div>
+          </article>
+          <article class="wide">
             <h2>Provider 明细</h2>
             <div id="tokenProviderTable" class="table-wrap compact-table"></div>
           </article>
@@ -347,22 +375,13 @@
       <section class="panel" id="panel-modules">
         <div class="section-head">
           <h2>模块化配置</h2>
-          <span class="muted">这里保存常用配置；更细的高级项仍可在 AstrBot 原配置页调整</span>
-        </div>
-        <div class="notice-grid">
-          <section class="notice">
-            <b>保存范围</b>
-            <p>本页会写入插件运行配置，并尽量调用 AstrBot 的配置保存能力；如果当前 AstrBot 版本不支持热保存，重启后仍以原配置页为准。</p>
-          </section>
-          <section class="notice">
-            <b>推荐顺序</b>
-            <p>先选择配置预设，再补私聊目标和群聊名单，最后按需要调整模型与功能开关。</p>
-          </section>
+          <span class="muted">常用配置</span>
         </div>
         <div id="moduleSummary" class="module-summary"></div>
         <nav class="module-nav" aria-label="模块配置分组">
           <a href="#module-presets">预设</a>
           <a href="#module-quick">快速启动</a>
+          <a href="#module-environment">环境感知</a>
           <a href="#module-private">私聊主动</a>
           <a href="#module-group">群聊观察</a>
           <a href="#module-worldbook">关系网</a>
@@ -374,9 +393,8 @@
             <div class="module-card-head">
               <div>
                 <h2>配置预设</h2>
-                <p class="section-desc">预设只改常用频率和功能开关，不会覆盖你的名单、Provider、人格或历史记忆。</p>
               </div>
-              <span class="module-badge">建议先选</span>
+              <span class="module-badge">预设</span>
             </div>
             <div id="presetCards" class="preset-grid"></div>
           </article>
@@ -384,7 +402,6 @@
             <div class="module-card-head">
               <div>
                 <h2>快速启动</h2>
-                <p class="section-desc">决定插件身份、私聊目标和免打扰窗口。私聊目标可以留空，然后在“私聊”页手动添加。</p>
               </div>
               <span class="module-badge">基础</span>
             </div>
@@ -394,15 +411,44 @@
               <label>私聊目标 QQ <textarea name="target_user_ids" rows="4" placeholder="一行一个或逗号分隔"></textarea></label>
               <label>默认称呼 <input name="default_nickname" /></label>
               <label>默认语气 <input name="default_style" /></label>
+              <label>世界观适配
+                <select name="worldview_adaptation_mode">
+                  <option value="auto">auto</option>
+                  <option value="modern">modern</option>
+                  <option value="fantasy">fantasy</option>
+                  <option value="sci_fi">sci_fi</option>
+                  <option value="custom">custom</option>
+                  <option value="off">off</option>
+                </select>
+              </label>
+              <label class="wide-field">自定义适配提示 <textarea name="worldview_adaptation_prompt" rows="3" placeholder="例如：群聊=冒险者公会闲谈；书柜=行囊书匣；识屏=水晶映像。"></textarea></label>
               <label>免打扰时间 <input name="quiet_hours" placeholder="23:00-08:30" /></label>
               <button type="submit">保存快速启动</button>
+            </form>
+          </article>
+          <article class="module-card" id="module-environment">
+            <div class="module-card-head">
+              <div>
+                <h2>环境感知</h2>
+              </div>
+              <span class="module-badge">语境</span>
+            </div>
+            <form id="environmentModuleForm" class="module-form">
+              <label>环境时区 <input name="environment_perception_timezone" placeholder="Asia/Shanghai" /></label>
+              <label>节假日地区 <input name="holiday_country" placeholder="CN" /></label>
+              <label class="toggle-row"><input name="enable_environment_perception" type="checkbox" /> <span>启用环境感知</span></label>
+              <label class="toggle-row"><input name="enable_holiday_perception" type="checkbox" /> <span>节假日/工作日</span></label>
+              <label class="toggle-row"><input name="enable_platform_perception" type="checkbox" /> <span>平台与消息类型</span></label>
+              <label class="toggle-row"><input name="enable_lunar_perception" type="checkbox" /> <span>农历</span></label>
+              <label class="toggle-row"><input name="enable_solar_term_perception" type="checkbox" /> <span>节气</span></label>
+              <label class="toggle-row"><input name="enable_almanac_perception" type="checkbox" /> <span>轻量黄历</span></label>
+              <button type="submit">保存环境感知</button>
             </form>
           </article>
           <article class="module-card" id="module-private">
             <div class="module-card-head">
               <div>
                 <h2>私聊主动</h2>
-                <p class="section-desc">控制主动找你的频率。每日上限为 0 时，私聊主动消息等同关闭，但被动聊天和记忆仍可工作。</p>
               </div>
               <span class="module-badge">频率</span>
             </div>
@@ -421,13 +467,13 @@
             <div class="module-card-head">
               <div>
                 <h2>群聊观察</h2>
-                <p class="section-desc">控制群聊上下文、黑话和插话频率。若只想学习群氛围，把每日插话上限设为 0。</p>
               </div>
               <span class="module-badge">群聊</span>
             </div>
             <form id="groupModuleForm" class="module-form">
               <label>插话最小间隔分钟 <input name="group_interject_min_interval_minutes" type="number" min="0" /></label>
               <label>每群每日插话上限 <input name="group_interject_max_daily" type="number" min="0" /></label>
+              <label>场景感知最近消息数 <input name="group_scene_recent_limit" type="number" min="2" max="12" /></label>
               <label>最近消息保留数 <input name="max_group_recent_messages" type="number" min="20" /></label>
               <label>黑话保留数 <input name="max_group_slang_terms" type="number" min="8" /></label>
               <button type="submit">保存群聊观察</button>
@@ -445,7 +491,10 @@
               <label class="toggle-row"><input name="worldbook_auto_import" type="checkbox" /> <span>启动时自动刷新关系网</span></label>
               <label class="toggle-row"><input name="worldbook_member_match_aliases" type="checkbox" /> <span>允许称呼辅助匹配</span></label>
               <label class="toggle-row"><input name="worldbook_self_registration" type="checkbox" /> <span>允许群聊自登记节点</span></label>
+              <label class="toggle-row"><input name="enable_atrelay_tools" type="checkbox" /> <span>启用跨群转述与 @ 群友</span></label>
+              <label class="toggle-row"><input name="atrelay_require_worldbook_first" type="checkbox" /> <span>@ 对象优先按关系网解析</span></label>
               <label>单次最多注入节点数 <input name="worldbook_member_inject_limit" type="number" min="1" max="20" /></label>
+              <label>群成员缓存分钟 <input name="atrelay_member_cache_minutes" type="number" min="1" max="1440" /></label>
               <label class="wide-field">关系网配置路径 <textarea name="worldbook_config_paths" rows="3" placeholder="留空自动查找；也可一行一个 JSON 配置路径"></textarea></label>
               <button type="submit">保存关系网</button>
             </form>
@@ -454,11 +503,11 @@
             <div class="module-card-head">
               <div>
                 <h2>记忆学习</h2>
-                <p class="section-desc">控制画像、表达样本和对话片段的整理频率。间隔越短，模型调用量越高。</p>
               </div>
               <span class="module-badge">成本</span>
             </div>
             <form id="memoryModuleForm" class="module-form">
+              <label>每日插件 Token 限额 <input name="daily_token_limit" type="number" min="0" step="10000" /></label>
               <label>长期画像整理间隔分钟 <input name="memory_refresh_interval_minutes" type="number" min="30" /></label>
               <label>片段整理消息阈值 <input name="episode_memory_refresh_messages" type="number" min="1" /></label>
               <label>片段整理时间阈值分钟 <input name="episode_memory_refresh_minutes" type="number" min="1" /></label>
@@ -472,7 +521,6 @@
             <div class="module-card-head">
               <div>
                 <h2>长线主动与联动</h2>
-                <p class="section-desc">控制 B 站 Bot 联动、私下创作等“Bot 自己做事”的长线能力。它们默认只在节点进入主动候选。</p>
               </div>
               <span class="module-badge">高级</span>
             </div>
@@ -484,6 +532,17 @@
                 <label>B 站触发最小间隔小时 <input name="bilibili_boredom_min_interval_hours" type="number" min="2" max="72" /></label>
                 <label>视频分享概率 <input name="bilibili_share_probability" type="number" min="0" max="1" step="0.05" /></label>
                 <label>视频分享最低评分 <input name="bilibili_share_min_score" type="number" min="0" max="10" /></label>
+              </div>
+              <div class="module-subgroup" id="privateReadingModuleGroup">
+                <h3>夹层阅读素材</h3>
+                <label class="toggle-row"><input name="enable_private_reading_integration" type="checkbox" /> <span>启用夹层阅读素材</span></label>
+                <label class="toggle-row"><input name="enable_private_reading_boredom_read" type="checkbox" /> <span>空闲时私下阅读</span></label>
+                <label class="toggle-row"><input name="enable_private_reading_ask_recommendation" type="checkbox" /> <span>向用户征求推荐</span></label>
+                <label>阅读最小间隔小时 <input name="private_reading_min_interval_hours" type="number" min="4" max="168" /></label>
+                <label>页数上限 <input name="private_reading_max_photo_count" type="number" min="8" max="120" /></label>
+                <label>主动提起概率 <input name="private_reading_share_probability" type="number" min="0" max="1" step="0.05" /></label>
+                <label>征求推荐概率 <input name="private_reading_ask_probability" type="number" min="0" max="1" step="0.05" /></label>
+                <label>默认搜索关键词 <input name="private_reading_default_keywords" type="text" maxlength="120" /></label>
               </div>
               <div class="module-subgroup">
                 <h3>私下创作</h3>
@@ -501,16 +560,6 @@
       </section>
 
       <section class="panel" id="panel-config">
-        <div class="notice-grid">
-          <section class="notice">
-            <b>名单模式</b>
-            <p>白名单模式只观察列出的群；黑名单模式观察除黑名单外的群。想逐步试用，建议先用白名单。</p>
-          </section>
-          <section class="notice">
-            <b>功能开关</b>
-            <p>关闭功能不会删除已学习数据，只是不再注入或更新对应能力。清空数据请到私聊/群聊详情里操作。</p>
-          </section>
-        </div>
         <div class="memory-grid">
           <article>
             <h2>私聊策略</h2>
@@ -526,7 +575,6 @@
           </article>
           <article class="wide">
             <h2>群聊名单覆盖</h2>
-            <p class="section-desc">按当前名单模式预览已记录群的处理结果。</p>
             <div id="listCoverage" class="coverage-grid"></div>
           </article>
           <article class="wide">
@@ -580,17 +628,7 @@
       <section class="panel" id="panel-models">
         <div class="section-head">
           <h2>分项能力模型</h2>
-          <span class="muted">留空时按“单项模型 → 陪伴通用模型 → 主模型/默认模型”回退</span>
-        </div>
-        <div class="notice-grid">
-          <section class="notice">
-            <b>模型回退</b>
-            <p>单项模型留空时先用陪伴通用模型；陪伴通用也为空时用主模型；主模型为空则交给 AstrBot 默认会话模型。</p>
-          </section>
-          <section class="notice">
-            <b>成本建议</b>
-            <p>回复自检、关系分析和记忆整理会额外调用模型。可把快模型用于整理，把强模型留给主回复或群聊插话。</p>
-          </section>
+          <span class="muted">模型分流</span>
         </div>
         <div id="providerFlow" class="provider-flow"></div>
         <div class="actions compact">
