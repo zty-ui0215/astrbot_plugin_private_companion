@@ -3,7 +3,7 @@
 `astrbot_plugin_private_companion` 是面向 AstrBot 的人格连续性、关系识别与主动行为编排插件。它把 Bot 从“收到消息后临时回复”的聊天对象，扩展成拥有生活状态、日程节奏、记忆沉淀、群聊观察、长期创作、可选外部动作和可视化管理页的持续存在体。
 
 - 插件名：`astrbot_plugin_private_companion`
-- 版本：`2.3.0`
+- 版本：`2.4.0`
 - 适配平台：`aiocqhttp`
 - AstrBot 版本：`>=4.22.0`
 - 编码要求：UTF-8
@@ -26,6 +26,7 @@
 - 群聊自登记：未登记成员 @Bot 说“我是 XX / 你可以叫我 XX”时，可自动建立关系节点并生成简短人物印象。
 - 跨群转述与 @ 群友：整合艾特群友能力，可按群名查群号、按关系网名称/别名/群名片解析 QQ，并向群聊发送带 @ 的消息。
 - 群聊到私聊分享：当群聊里出现有趣或值得提醒的公开片段，且用户长时间未活跃时，可低频私聊转述。
+- QQ 空间动态：整合说说查看、点赞、评论、发布和低频生活说说编排，让公开动态成为 Bot 生活连续性的一部分。
 - 梦境与日记：生成完整梦境、梦境碎片和日记，让第二天有自然残留。
 - 书柜与私下创作：可能因生活小事、日记或梦境灵感开小说坑，并按人格速度慢慢写；扩展页会以书柜形式收纳创作、日记本等文本。安装某些特殊插件后，Bot 也许还会往书柜夹层里放些奇怪的东西。
 - 重要日期：记录生日、纪念日、考试、约定等日期，并影响日程、主动话题和长期准备。
@@ -124,6 +125,7 @@ C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_private_companion
 - `enable_worldbook_member_recognition`：启用群聊关系网。
 - `worldbook_self_registration`：允许群聊自登记关系节点。
 - `enable_atrelay_tools`：启用跨群转述与 @ 群友工具。
+- `enable_qzone_integration`：启用 QQ 空间动态层。
 
 `target_user_ids` 中的用户会在插件启动时自动初始化私聊陪伴。群聊默认建议使用白名单，避免误观察不该启用的群。
 
@@ -214,6 +216,14 @@ C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_private_companion
 - 本插件内置配置：`enable_atrelay_tools`、`atrelay_require_worldbook_first`、`atrelay_member_cache_minutes`
 - 自动避让：检测到 `astrbot_plugin_atrelay` 时，会自动关闭 `enable_atrelay_tools`。
 
+### QQ 空间动态
+
+- 参考插件：`astrbot_plugin_qzone`
+- 仓库：<https://github.com/Zhalslar/astrbot_plugin_qzone>
+- 本插件内置配置：`enable_qzone_integration`、`enable_qzone_life_publish`、`qzone_life_publish_min_interval_hours`、`qzone_life_publish_probability`
+- 能力范围：在用户明确要求时查看说说、点赞、评论或发布说说；也可以把当天状态、日程和日记余味低频写成公开生活说说。
+- 默认边界：`enable_qzone_life_publish` 默认关闭，避免未经确认公开发布；开启后仍会遵守最小间隔和概率。
+
 如果你想统一使用本插件的内置能力，可以卸载或停用上述旧插件，再重新打开对应开关。
 
 ## 扩展页介绍
@@ -239,6 +249,7 @@ pages/陪伴面板/
 - 管理群聊关系网：QQ 身份节点、别名、曾见群名片、资料正文、身份说明、互动边界和重要记忆。
 - 查看关系网识别结果：群详情会显示已识别成员数量；关系节点命中时日志会显示注入了哪些用户资料。
 - 管理跨群转述与 @ 群友能力：可在模块配置中开关工具、设置是否优先关系网解析和群成员缓存时间。
+- 管理 QQ 空间动态层：可开关说说工具入口，设置是否允许低频生活说说、最小间隔和触发概率。
 - 管理环境感知：可开关时间日期、节假日、农历节气、平台和消息媒介注入，并设置时区与节假日地区。
 - 管理世界观适配：可选择自动、现代、奇幻、科幻、自定义或关闭，并填写自定义转译提示。
 - 查看书柜：创作中的文本以书本形式展示，日记本和夹层内容需要向 Bot 询问密码后再打开。
@@ -399,6 +410,12 @@ pages/陪伴面板/
 你是小猪
 ```
 
+### 9. QQ 空间动态层
+
+QQ 空间动态被视为公开生活札记，不等同于私聊记忆。用户明确要求“看说说、赞说说、评论说说、发说说”时，模型可以调用本插件提供的 QQ 空间工具完成动作。
+
+如果开启 `enable_qzone_life_publish`，Bot 也可以把当天状态、日程片段、天气或日记余味低频整理成一条生活说说。该能力默认关闭；开启后也会遵守 `qzone_life_publish_min_interval_hours` 和 `qzone_life_publish_probability`。生成说说时不会公开私聊隐私、关系网内部备注或状态数值。
+
 ## 常见问题
 
 ### 为什么没有主动发消息？
@@ -473,7 +490,7 @@ pages/陪伴面板/
 
 注意：`photo_action_max_daily = 0` 表示不限制，不是禁用。
 
-### 为什么识屏、语音或戳一戳没有触发？
+### 为什么识屏、语音、戳一戳或 QQ 空间动作没有触发？
 
 检查：
 
@@ -481,6 +498,7 @@ pages/陪伴面板/
 - 对应联动插件是否安装并启用。
 - 当前平台是否支持目标动作。
 - 每日额度或冷却时间是否已经触发。
+- QQ 空间生活说说默认关闭，需要开启 `enable_qzone_life_publish`，并确认当前空间服务可用。
 
 ### 小说创作会不会变成用户指定剧情？
 
@@ -494,7 +512,7 @@ pages/陪伴面板/
 
 - 开发者：`menglimi`
 - 插件仓库：<https://github.com/menglimi/astrbot_plugin_private_companion>
-- 插件版本：`2.3.0`
+- 插件版本：`2.4.0`
 - 主要文件：
   - `main.py`：插件主体、主动判定、回复注入、群聊观察、能力执行。
   - `planning.py`：日程与规划相关逻辑。
@@ -504,7 +522,7 @@ pages/陪伴面板/
   - `_conf_schema.json`：AstrBot 配置项。
   - `metadata.yaml`：插件元数据。
 
-本插件面向长期陪伴体验。建议先以较低主动频率运行，确认文字、日程、状态、记忆和群聊边界符合预期后，再逐步开启图片、语音、识屏、戳一戳、B 站联动等真实外部动作。
+本插件面向长期陪伴体验。建议先以较低主动频率运行，确认文字、日程、状态、记忆和群聊边界符合预期后，再逐步开启图片、语音、识屏、戳一戳、B 站联动、QQ 空间生活说说等真实外部动作。
 
 ## 致谢
 
@@ -513,4 +531,5 @@ pages/陪伴面板/
 - `astrbot_plugin_LLMPerception`：<https://github.com/miaoxutao123/astrbot_plugin_LLMPerception>，参考了时间、节假日、农历节气、平台和消息媒介的环境感知思路。
 - `astrbot_plugin_context_aware`：<https://github.com/muyouzhi6/astrbot_plugin_context_aware>，参考了群聊中“谁在和谁说话”、当前消息是否面向 Bot 的场景判断思路。
 - `astrbot_plugin_atrelay`：<https://github.com/Alien-Star/astrbot_plugin_atrelay>，参考了查询群成员、跨群发送消息和 @ 群友的工具化交互思路。
+- `astrbot_plugin_qzone`：<https://github.com/Zhalslar/astrbot_plugin_qzone>，参考了 QQ 空间说说查看、点赞、评论、发布、AI 写说说和页面管理的实现思路。
 - `MaiBot`：<https://github.com/MaiM-with-u/MaiBot>，参考了群聊自然接话、长期人格连续性、表达学习和数字生命感的产品方向。

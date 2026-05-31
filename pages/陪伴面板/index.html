@@ -473,6 +473,12 @@
             <form id="groupModuleForm" class="module-form">
               <label>插话最小间隔分钟 <input name="group_interject_min_interval_minutes" type="number" min="0" /></label>
               <label>每群每日插话上限 <input name="group_interject_max_daily" type="number" min="0" /></label>
+              <label>跟读初始概率 <input name="group_repeat_follow_probability" type="number" min="0" max="100" /></label>
+              <label>打断初始概率 <input name="group_repeat_interrupt_probability" type="number" min="0" max="100" /></label>
+              <label>概率共同递增 <input name="group_repeat_interrupt_probability_step" type="number" min="0" max="50" /></label>
+              <label>打断文本 <input name="group_repeat_interrupt_text" placeholder="禁止复读" /></label>
+              <label class="wide-field">打断表情包路径 <input name="group_repeat_interrupt_image_path" placeholder="C:\\path\\to\\meme.png" /></label>
+              <label class="toggle-row"><input name="enable_group_repeat_follow" type="checkbox" /> <span>启用复读跟读</span></label>
               <label>场景感知最近消息数 <input name="group_scene_recent_limit" type="number" min="2" max="12" /></label>
               <label>最近消息保留数 <input name="max_group_recent_messages" type="number" min="20" /></label>
               <label>黑话保留数 <input name="max_group_slang_terms" type="number" min="8" /></label>
@@ -532,6 +538,13 @@
                 <label>B 站触发最小间隔小时 <input name="bilibili_boredom_min_interval_hours" type="number" min="2" max="72" /></label>
                 <label>视频分享概率 <input name="bilibili_share_probability" type="number" min="0" max="1" step="0.05" /></label>
                 <label>视频分享最低评分 <input name="bilibili_share_min_score" type="number" min="0" max="10" /></label>
+              </div>
+              <div class="module-subgroup">
+                <h3>QQ 空间动态</h3>
+                <label class="toggle-row"><input name="enable_qzone_integration" type="checkbox" /> <span>启用 QQ 空间动态层</span></label>
+                <label class="toggle-row"><input name="enable_qzone_life_publish" type="checkbox" /> <span>低频发布生活说说</span></label>
+                <label>生活说说最小间隔小时 <input name="qzone_life_publish_min_interval_hours" type="number" min="4" max="168" /></label>
+                <label>生活说说触发概率 <input name="qzone_life_publish_probability" type="number" min="0" max="1" step="0.05" /></label>
               </div>
               <div class="module-subgroup" id="privateReadingModuleGroup">
                 <h3>夹层阅读素材</h3>

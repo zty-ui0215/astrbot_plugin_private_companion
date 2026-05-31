@@ -14,6 +14,7 @@ import sys
 import time
 import uuid
 import zoneinfo
+from copy import deepcopy
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -231,7 +232,7 @@ class _CapturedSendMessageCall:
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "2.3.0",
+    "2.4.0",
 )
 class PrivateCompanionPlugin(Star):
     @staticmethod
@@ -448,6 +449,12 @@ class PrivateCompanionPlugin(Star):
         self.enable_group_scene_awareness = self._cfg_bool(c, "enable_group_scene_awareness", True)
         self.group_scene_recent_limit = self._cfg_int(c, "group_scene_recent_limit", 5, 2, 12)
         self.enable_group_interjection = self._cfg_bool(c, "enable_group_interjection", False)
+        self.enable_group_repeat_follow = self._cfg_bool(c, "enable_group_repeat_follow", True)
+        self.group_repeat_follow_probability = self._cfg_int(c, "group_repeat_follow_probability", 18, 0, 100) / 100
+        self.group_repeat_interrupt_probability = self._cfg_int(c, "group_repeat_interrupt_probability", 10, 0, 100) / 100
+        self.group_repeat_interrupt_probability_step = self._cfg_int(c, "group_repeat_interrupt_probability_step", 12, 0, 100) / 100
+        self.group_repeat_interrupt_text = self._cfg_str(c, "group_repeat_interrupt_text", "禁止复读", "禁止复读")
+        self.group_repeat_interrupt_image_path = self._cfg_str(c, "group_repeat_interrupt_image_path", "")
         self.group_interject_min_interval_minutes = self._cfg_int(c, "group_interject_min_interval_minutes", 180, 10, 1440)
         self.group_interject_max_daily = self._cfg_int(c, "group_interject_max_daily", 2, 0, 12)
         self.max_group_recent_messages = self._cfg_int(c, "max_group_recent_messages", 80, 20, 300)
@@ -477,6 +484,10 @@ class PrivateCompanionPlugin(Star):
         self.bilibili_boredom_min_interval_hours = self._cfg_int(c, "bilibili_boredom_min_interval_hours", 8, 2, 72)
         self.bilibili_share_probability = min(1.0, self._cfg_float(c, "bilibili_share_probability", 0.35, 0.0))
         self.bilibili_share_min_score = self._cfg_int(c, "bilibili_share_min_score", 7, 0, 10)
+        self.enable_qzone_integration = self._cfg_bool(c, "enable_qzone_integration", True)
+        self.enable_qzone_life_publish = self._cfg_bool(c, "enable_qzone_life_publish", False)
+        self.qzone_life_publish_min_interval_hours = self._cfg_int(c, "qzone_life_publish_min_interval_hours", 24, 4, 168)
+        self.qzone_life_publish_probability = min(1.0, self._cfg_float(c, "qzone_life_publish_probability", 0.18, 0.0))
         self.enable_jm_cosmos_integration = self._cfg_bool(
             c,
             "enable_private_reading_integration",
@@ -703,6 +714,7 @@ class PrivateCompanionPlugin(Star):
             "daily_state": {},
             "state_conditions": [],
             "state_generated_day": "",
+            "body_cycle_state": {},
             "bot_diaries": [],
             "dream_fragments": [],
             "daily_dream": {},
@@ -717,6 +729,7 @@ class PrivateCompanionPlugin(Star):
             "qq_presence_state": {},
             "token_usage": {},
             "bilibili_integration": {},
+            "qzone_integration": {},
             "jm_cosmos_integration": {},
             "bookshelf_items": [],
             "bookshelf_secret": {},
@@ -738,6 +751,7 @@ class PrivateCompanionPlugin(Star):
         data.setdefault("daily_state", {})
         data.setdefault("state_conditions", [])
         data.setdefault("state_generated_day", "")
+        data.setdefault("body_cycle_state", {})
         data.setdefault("bot_diaries", [])
         data.setdefault("dream_fragments", [])
         data.setdefault("daily_dream", {})
@@ -752,6 +766,7 @@ class PrivateCompanionPlugin(Star):
         data.setdefault("qq_presence_state", {})
         data.setdefault("token_usage", {})
         data.setdefault("bilibili_integration", {})
+        data.setdefault("qzone_integration", {})
         data.setdefault("jm_cosmos_integration", {})
         data.setdefault("bookshelf_items", [])
         data.setdefault("bookshelf_secret", {})
@@ -760,6 +775,8 @@ class PrivateCompanionPlugin(Star):
         data.setdefault("worldbook_entries", [])
         data.setdefault("worldbook_member_profiles", {})
         data.setdefault("worldbook_group_profiles", {})
+        data.setdefault("worldbook_deleted_member_ids", [])
+        data.setdefault("worldbook_deleted_group_ids", [])
         data.setdefault("worldbook_import_state", {})
         return data
 
@@ -988,6 +1005,16 @@ class PrivateCompanionPlugin(Star):
     def _import_worldbook_entries_from_sources(self) -> bool:
         entries: list[dict[str, Any]] = []
         source_files: list[str] = []
+        deleted_member_ids = {
+            str(item).strip()
+            for item in self.data.get("worldbook_deleted_member_ids", [])
+            if str(item).strip()
+        } if isinstance(self.data.get("worldbook_deleted_member_ids"), list) else set()
+        deleted_group_ids = {
+            str(item).strip()
+            for item in self.data.get("worldbook_deleted_group_ids", [])
+            if str(item).strip()
+        } if isinstance(self.data.get("worldbook_deleted_group_ids"), list) else set()
         for path in self._worldbook_config_path_candidates():
             if not path.exists() or not path.is_file():
                 continue
@@ -1014,6 +1041,8 @@ class PrivateCompanionPlugin(Star):
             digit_scopes = [str(scope).strip() for scope in item.get("scope", []) if str(scope).strip().isdigit()]
             if template == "user":
                 for user_id in digit_scopes:
+                    if user_id in deleted_member_ids:
+                        continue
                     profile = profiles.setdefault(
                         user_id,
                         {
@@ -1045,6 +1074,8 @@ class PrivateCompanionPlugin(Star):
                     profile["source_entries"].append(item.get("name") or user_id)
             elif template == "group":
                 for group_id in digit_scopes:
+                    if group_id in deleted_group_ids:
+                        continue
                     groups[group_id] = {
                         "group_id": group_id,
                         "name": item.get("name") or group_id,
@@ -1306,6 +1337,22 @@ class PrivateCompanionPlugin(Star):
                     return True
         return False
 
+    def _group_message_explicitly_ats_bot(self, event: AstrMessageEvent) -> bool:
+        signals = self._event_scene_signals(event)
+        at_targets = signals.get("at_targets") if isinstance(signals.get("at_targets"), list) else []
+        if any(isinstance(item, dict) and item.get("is_bot") for item in at_targets):
+            return True
+        self_id = str(signals.get("self_id") or "").strip()
+        raw_text = str(getattr(event, "message_str", "") or "")
+        if self_id and re.search(rf"\[CQ:at,qq={re.escape(self_id)}(?:,|\])", raw_text):
+            return True
+        if self_id:
+            return False
+        has_at = any(isinstance(item, dict) and str(item.get("user_id") or "").strip() for item in at_targets)
+        if not has_at and re.search(r"\[CQ:at,qq=\d+", raw_text):
+            has_at = True
+        return bool(has_at and getattr(event, "is_at_or_wake_command", False))
+
     @staticmethod
     def _worldbook_name_skeleton(value: Any) -> str:
         text = _single_line(value, 40).lower()
@@ -1404,6 +1451,85 @@ class PrivateCompanionPlugin(Star):
                         return f"{other_id}:{_single_line(profile.get('name'), 40) or token}"
         return ""
 
+    def _worldbook_registration_pending_map(self, group: dict[str, Any]) -> dict[str, Any]:
+        pending = group.setdefault("worldbook_registration_confirmations", {})
+        if not isinstance(pending, dict):
+            pending = {}
+            group["worldbook_registration_confirmations"] = pending
+        now = _now_ts()
+        for user_id in list(pending.keys()):
+            item = pending.get(user_id)
+            if not isinstance(item, dict) or now - _safe_float(item.get("created_ts"), 0) > 6 * 60:
+                pending.pop(user_id, None)
+        return pending
+
+    @staticmethod
+    def _worldbook_registration_confirmation_intent(text: str) -> str:
+        cleaned = _single_line(text, 80)
+        cleaned = re.sub(r"\[CQ:at,[^\]]+\]", " ", cleaned)
+        cleaned = re.sub(r"@\S+", " ", cleaned).strip()
+        if not cleaned:
+            return ""
+        if re.search(r"(不行|不是|别|不要|算了|错了|不对|改一下|等等|拒绝)", cleaned):
+            return "reject"
+        if re.search(r"^(可以|可|行|好|好的|嗯|嗯嗯|对|对的|是|是的|没错|叫吧|就这样|可以呀|可以啊)[。！？!?\s]*$", cleaned):
+            return "accept"
+        return ""
+
+    def _create_worldbook_self_registration_profile(
+        self,
+        *,
+        group_id: str,
+        sender_id: str,
+        sender_name: str,
+        text: str,
+        name: str,
+        aliases: list[str],
+        group: dict[str, Any],
+    ) -> dict[str, Any]:
+        profiles = self.data.setdefault("worldbook_member_profiles", {})
+        if not isinstance(profiles, dict):
+            profiles = {}
+            self.data["worldbook_member_profiles"] = profiles
+        deleted = self.data.get("worldbook_deleted_member_ids")
+        if isinstance(deleted, list) and sender_id in deleted:
+            self.data["worldbook_deleted_member_ids"] = [item for item in deleted if str(item) != sender_id]
+        content = f"{name}在群 {group_id} 主动向 Bot 自我介绍。"
+        profile = {
+            "user_id": sender_id,
+            "name": name,
+            "aliases": aliases,
+            "content": content,
+            "identity_note": f"QQ {sender_id}，自称{name}。",
+            "boundary_note": "",
+            "important_memories": [],
+            "enabled": True,
+            "priority": 120,
+            "source_entries": ["群聊自登记"],
+            "observed_names": [item for item in [_single_line(sender_name, 40)] if item and item not in aliases],
+            "auto_registered_ts": _now_ts(),
+            "auto_registration_pending": True,
+            "self_intro_text": _single_line(text, 260),
+        }
+        profiles[sender_id] = profile
+        recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
+        logger.info(
+            "[PrivateCompanion] 群聊关系网自登记节点: group=%s user=%s name=%s aliases=%s",
+            group_id or "-",
+            sender_id,
+            name,
+            "、".join(aliases) or "-",
+        )
+        return {
+            "group_id": str(group_id),
+            "user_id": sender_id,
+            "name": name,
+            "aliases": aliases,
+            "text": _single_line(text, 260),
+            "sender_name": _single_line(sender_name, 40),
+            "recent": [dict(item) for item in recent[-6:] if isinstance(item, dict)],
+        }
+
     def _extract_worldbook_self_intro(self, text: str) -> dict[str, Any] | None:
         cleaned = str(text or "")
         cleaned = re.sub(r"\[CQ:at,[^\]]+\]", " ", cleaned)
@@ -1450,10 +1576,47 @@ class PrivateCompanionPlugin(Star):
         sender_id = str(sender_id or "").strip()
         if not sender_id:
             return None
+        pending = self._worldbook_registration_pending_map(group)
+        pending_item = pending.get(sender_id)
+        if isinstance(pending_item, dict):
+            intent = self._worldbook_registration_confirmation_intent(text)
+            if intent == "reject":
+                pending.pop(sender_id, None)
+                return {"confirm_reply": "好，那我先不记。"}
+            if intent == "accept":
+                name = _single_line(pending_item.get("name"), 40) or sender_id
+                aliases = [
+                    _single_line(item, 40)
+                    for item in (pending_item.get("aliases") if isinstance(pending_item.get("aliases"), list) else [])
+                    if _single_line(item, 40) and _single_line(item, 40) != sender_id
+                ]
+                conflict = self._worldbook_self_registration_conflict(sender_id, [name, *aliases])
+                if conflict:
+                    pending.pop(sender_id, None)
+                    logger.info(
+                        "[PrivateCompanion] 群聊关系网自登记确认时拒绝: group=%s user=%s name=%s reason=名称疑似冒领已有节点 %s",
+                        group_id or "-",
+                        sender_id,
+                        name,
+                        conflict,
+                    )
+                    return {"blocked_reply": "你是小猪"}
+                pending.pop(sender_id, None)
+                payload = self._create_worldbook_self_registration_profile(
+                    group_id=group_id,
+                    sender_id=sender_id,
+                    sender_name=_single_line(pending_item.get("sender_name"), 40) or sender_name,
+                    text=_single_line(pending_item.get("text"), 260) or text,
+                    name=name,
+                    aliases=aliases,
+                    group=group,
+                )
+                payload["confirm_reply"] = f"好，那我记住你是{name}。"
+                return payload
         existing_profiles = self.data.get("worldbook_member_profiles")
         if isinstance(existing_profiles, dict) and isinstance(existing_profiles.get(sender_id), dict):
             return None
-        if not self._group_message_addresses_bot(event, text):
+        if not self._group_message_explicitly_ats_bot(event):
             return None
         intro = self._extract_worldbook_self_intro(text)
         if not intro:
@@ -1485,41 +1648,21 @@ class PrivateCompanionPlugin(Star):
         if not isinstance(profiles, dict):
             profiles = {}
             self.data["worldbook_member_profiles"] = profiles
-        content = f"{name}在群 {group_id} 主动向 Bot 自我介绍。"
-        profile = {
-            "user_id": sender_id,
+        pending[sender_id] = {
             "name": name,
             "aliases": aliases,
-            "content": content,
-            "identity_note": f"QQ {sender_id}，自称{name}。",
-            "boundary_note": "",
-            "important_memories": [],
-            "enabled": True,
-            "priority": 120,
-            "source_entries": ["群聊自登记"],
-            "observed_names": [item for item in [_single_line(sender_name, 40)] if item and item not in aliases],
-            "auto_registered_ts": _now_ts(),
-            "auto_registration_pending": True,
-            "self_intro_text": _single_line(text, 260),
+            "text": _single_line(text, 260),
+            "sender_name": _single_line(sender_name, 40),
+            "created_ts": _now_ts(),
         }
-        profiles[sender_id] = profile
-        recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []
         logger.info(
-            "[PrivateCompanion] 群聊关系网自登记节点: group=%s user=%s name=%s aliases=%s",
+            "[PrivateCompanion] 群聊关系网自登记待确认: group=%s user=%s name=%s aliases=%s",
             group_id or "-",
             sender_id,
             name,
             "、".join(aliases) or "-",
         )
-        return {
-            "group_id": str(group_id),
-            "user_id": sender_id,
-            "name": name,
-            "aliases": aliases,
-            "text": _single_line(text, 260),
-            "sender_name": _single_line(sender_name, 40),
-            "recent": [dict(item) for item in recent[-6:] if isinstance(item, dict)],
-        }
+        return {"confirm_reply": f"那我以后叫你{name}可以吗？"}
 
     async def _refresh_worldbook_self_registration_impression(self, payload: dict[str, Any]) -> None:
         user_id = str(payload.get("user_id") or "").strip()
@@ -1868,7 +2011,7 @@ class PrivateCompanionPlugin(Star):
             f"当前适配模式：{mode}。",
             "插件功能名称只代表现实实现；最终表达必须服从当前人格、身份和世界观。",
             f"可把日程理解为：{terms['schedule']}；书柜理解为：{terms['bookshelf']}；隐藏夹层理解为：{terms['secret_drawer']}；群聊理解为：{terms['group_chat']}；私聊理解为：{terms['private_chat']}。",
-            f"外部联动可转译为世界内等价行为：看视频≈{terms['bored_watch']}；识屏≈观察{terms['screen']}；夹层阅读≈{terms['private_reading']}。",
+            f"外部或整合动作可转译为世界内等价行为：看视频≈{terms['bored_watch']}；识屏≈观察{terms['screen']}；夹层阅读≈{terms['private_reading']}；空间动态≈公开生活札记/状态栏。",
             "如果人格/世界观与现代词冲突，优先使用世界内说法；但不要编造会改变功能结果的事实，也不要向用户解释后台实现。",
         ]
         if custom:
@@ -2009,6 +2152,35 @@ class PrivateCompanionPlugin(Star):
             return self._bilibili_plugin_dir().exists() or self._bilibili_watch_log_file().exists()
         except Exception:
             return False
+
+    def _qzone_plugin_dir(self) -> Path:
+        candidates = [
+            Path(__file__).resolve().parent.parent / "astrbot_plugin_qzone",
+            Path(self.data_dir).parent.parent / "plugins" / "astrbot_plugin_qzone",
+        ]
+        for path in candidates:
+            if (path / "main.py").exists():
+                return path
+        return candidates[0]
+
+    def _find_qzone_instance(self) -> Any | None:
+        for obj in gc.get_objects():
+            try:
+                module = str(getattr(obj.__class__, "__module__", ""))
+                if "astrbot_plugin_qzone" not in module:
+                    continue
+                if hasattr(obj, "service") and hasattr(obj, "session"):
+                    return obj
+            except Exception:
+                continue
+        return None
+
+    def _qzone_available(self) -> bool:
+        if not self.enable_qzone_integration:
+            return False
+        if self._find_qzone_instance() is not None:
+            return True
+        return (self._qzone_plugin_dir() / "main.py").exists()
 
     def _jm_cosmos_plugin_dir(self) -> Path:
         candidates = [
@@ -2786,6 +2958,79 @@ class PrivateCompanionPlugin(Star):
             changed = True
         return changed
 
+    async def _publish_qzone_text(self, text: str) -> dict[str, Any]:
+        if not self.enable_qzone_integration:
+            return {"success": False, "message": "QQ 空间动态层未启用"}
+        content = _single_line(text, 300)
+        if not content:
+            return {"success": False, "message": "说说内容为空"}
+        plugin = self._find_qzone_instance()
+        service = getattr(plugin, "service", None) if plugin is not None else None
+        publish_post = getattr(service, "publish_post", None)
+        if not callable(publish_post):
+            return {"success": False, "message": "未检测到可用 QQ 空间发布服务"}
+        try:
+            post = await publish_post(text=content, images=[])
+            return {
+                "success": True,
+                "text": _single_line(getattr(post, "text", content), 300) or content,
+                "tid": str(getattr(post, "tid", "") or ""),
+                "uin": str(getattr(post, "uin", "") or ""),
+            }
+        except Exception as exc:
+            return {"success": False, "message": _single_line(exc, 160)}
+
+    async def _maybe_publish_qzone_life_post(self) -> None:
+        if not (self.enable_qzone_integration and self.enable_qzone_life_publish):
+            return
+        if self._find_qzone_instance() is None:
+            return
+        now = _now_ts()
+        state = self.data.setdefault("qzone_integration", {})
+        if not isinstance(state, dict):
+            self.data["qzone_integration"] = {}
+            state = self.data["qzone_integration"]
+        if now - _safe_float(state.get("last_life_publish_at"), 0) < max(4, self.qzone_life_publish_min_interval_hours) * 3600:
+            return
+        if random.random() > self.qzone_life_publish_probability:
+            return
+        daily_state = self.data.get("daily_state", {})
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        diary_context = self._recent_diary_context(count=2)
+        prompt = f"""
+请以当前 Bot 人格写一条 QQ 空间说说。
+只输出说说正文,不要解释,不要加标题。
+
+要求：
+- 30 到 120 字。
+- 像自然生活动态,不是公告、不是任务汇报。
+- 可以带一点当前状态、日程、天气或日记余味,但不要暴露插件、模型、内部状态数值。
+- 不要 @ 用户,不要泄露私聊内容,不要写得像营销文。
+
+【当前状态】
+{self._format_state_for_prompt(daily_state if isinstance(daily_state, dict) else {})}
+
+【当前/附近日程】
+{self._format_plan_item_for_prompt(current_item) or "无明确日程"}
+
+【近日私密日记余味】
+{diary_context or "暂无"}
+
+{self._format_worldview_adaptation_prompt()}
+""".strip()
+        text = await self._llm_call(
+            prompt,
+            max_tokens=180,
+            provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
+            task="qzone_publish",
+        )
+        text = _single_line(text, 180)
+        result = await self._publish_qzone_text(text)
+        state["last_life_publish_at"] = now
+        state["last_life_publish_status"] = "published" if result.get("success") else f"failed:{_single_line(result.get('message'), 80)}"
+        state["last_life_publish_text"] = _single_line(result.get("text") or text, 180)
+        self._save_data_sync()
+
     def _proactive_candidate_pool(self) -> list[dict[str, Any]]:
         raw = self.data.setdefault("proactive_candidate_pool", [])
         if not isinstance(raw, list):
@@ -2913,7 +3158,24 @@ class PrivateCompanionPlugin(Star):
         if not isinstance(projects, list):
             projects = []
             self.data["creative_projects"] = projects
-        return [item for item in projects if isinstance(item, dict)]
+        valid_projects = [item for item in projects if isinstance(item, dict)]
+        for project in valid_projects:
+            point_of_view = _single_line(project.get("point_of_view"), 40)
+            if not point_of_view:
+                project["point_of_view"] = "第三人称有限视角"
+                project.setdefault("point_of_view_policy_version", 2)
+                continue
+            if (
+                "第一人称" in point_of_view
+                and not project.get("point_of_view_policy_version")
+                and "书信" not in point_of_view
+                and "日记" not in point_of_view
+                and "手记" not in point_of_view
+            ):
+                project["point_of_view"] = "第三人称有限视角"
+                project["point_of_view_note"] = "legacy_first_person_rebalanced"
+                project["point_of_view_policy_version"] = 2
+        return valid_projects
 
     def _creative_speed_chars_per_hour(self) -> int:
         style = str(self.default_style or "")
@@ -2950,6 +3212,30 @@ class PrivateCompanionPlugin(Star):
                 "文风边界：不要套用通用网文腔、营销文案腔或过度华丽散文腔；不要为了梦境感牺牲可读性。",
             )
             if part
+        )
+
+    def _creative_point_of_view(self, project: dict[str, Any] | None = None) -> str:
+        if isinstance(project, dict):
+            point_of_view = _single_line(project.get("point_of_view"), 40)
+        else:
+            point_of_view = ""
+        return point_of_view or "第三人称有限视角"
+
+    def _creative_point_of_view_rule(self, point_of_view: str) -> str:
+        pov = _single_line(point_of_view, 40) or "第三人称有限视角"
+        if "第一人称" in pov:
+            return (
+                "本项目允许第一人称叙述,但叙述者应是小说角色,不是 Bot 本人在写日记；"
+                "除非设定明确,不要把作者身份直接塞进正文。"
+            )
+        if "书信" in pov or "日记" in pov or "手记" in pov:
+            return (
+                f"按“{pov}”写作,可以出现文本载体中的自称,但要保持它属于故事内部角色；"
+                "不要写成 Bot 对用户的日常汇报。"
+            )
+        return (
+            f"严格按“{pov}”写作。正文不要用“我”作为叙述者,角色台词里的“我”可以保留；"
+            "不要写成日记、自述或作者独白。"
         )
 
     def _creative_inspiration_source(self) -> dict[str, str] | None:
@@ -2994,14 +3280,16 @@ class PrivateCompanionPlugin(Star):
 4. 小说应是短篇或中篇开头,目标 1200-5200 字,不能一次写完。
 5. 题材可以日常、轻奇幻、悬疑、校园、都市、梦境感,但不要色情、血腥或攻击性。
 6. 不要为了题材方便凭空改变 Bot 身份,也不要写出和人格不相称的成熟度、职业经验或生活经验。
-7. 输出 JSON。
+7. 作者人格只决定选题、审美、句子节奏和观察方式,不等于正文必须用第一人称。
+8. 叙事视角优先选择“第三人称有限视角”或“第三人称全知视角”；只有当题材确实需要角色自述、书信、手记时才选第一人称或书信体。
+9. 输出 JSON。
 
 格式：
 {{
   "title": "临时标题,不要超过18字",
   "premise": "一句话核心设定",
   "tone": "行文气质,2到5个词",
-  "point_of_view": "叙事视角",
+  "point_of_view": "第三人称有限视角/第三人称全知视角/多视角/第一人称角色视角/书信体之一",
   "target_chars": 目标字数数字,
   "next_hint": "第一段准备写什么"
 }}
@@ -3024,6 +3312,7 @@ class PrivateCompanionPlugin(Star):
             "premise": _single_line(payload.get("premise"), 140) or f"从{source_label}里长出来的一个短篇念头",
             "tone": _single_line(payload.get("tone"), 40) or self.default_style,
             "point_of_view": _single_line(payload.get("point_of_view"), 30) or "第三人称有限视角",
+            "point_of_view_policy_version": 2,
             "source": source.get("source") or "life",
             "source_text": source_text,
             "target_chars": target_chars,
@@ -3045,6 +3334,8 @@ class PrivateCompanionPlugin(Star):
         remaining = _safe_int(project.get("target_chars"), 2400, 1200, 5200) - _safe_int(project.get("current_chars"), 0, 0)
         finish_hint = "可以自然收束到一个小段落结尾,但不要完结全篇。" if remaining <= budget + 120 else "不要完结全篇,只推进一个很小的片段。"
         persona_context = self._creative_persona_style_context()
+        point_of_view = self._creative_point_of_view(project)
+        pov_rule = self._creative_point_of_view_rule(point_of_view)
         prompt = f"""
 你正在模拟拟人化 Bot 慢慢写小说。请只续写本次能写出来的一小段正文。
 
@@ -3054,7 +3345,7 @@ class PrivateCompanionPlugin(Star):
 小说标题：{_single_line(project.get("title"), 40)}
 核心设定：{_single_line(project.get("premise"), 180)}
 行文气质：{_single_line(project.get("tone"), 60)}
-叙事视角：{_single_line(project.get("point_of_view"), 40)}
+叙事视角：{point_of_view}
 灵感来源：{_single_line(project.get("source_text"), 180)}
 上一段：{recent or "还没有正文。"}
 下一步念头：{_single_line(project.get("next_hint"), 140)}
@@ -3064,8 +3355,10 @@ class PrivateCompanionPlugin(Star):
 1. 只输出小说正文,不要标题、说明、引号外旁白或 JSON。
 2. 模拟真实写作速度,只写一个片段,不要一口气写完整故事。
 3. 正文文风要像这个人格与身份自然写出的作品：用词、观察角度、人物成熟度、知识范围都不能越过人设。
-4. 细节要具体,但不要堆辞藻；可以有一点梦境感或生活感。
-5. {finish_hint}
+4. 作者人格影响文风,但作者不等于叙述者；不要把小说写成 Bot 的日记或对用户的自白。
+5. 叙事视角规则：{pov_rule}
+6. 细节要具体,但不要堆辞藻；可以有一点梦境感或生活感。
+7. {finish_hint}
 """.strip()
         text = await self._llm_call(
             prompt,
@@ -4829,7 +5122,87 @@ class PrivateCompanionPlugin(Star):
             return random.random() < 0.045, "求助气氛"
         return False, "没有自然插话口"
 
+    def _group_repeat_signature(self, text: str) -> str:
+        cleaned = self._compact_repeat_text(text)
+        cleaned = re.sub(r"[!！?？。.,，~～…]+$", "", cleaned).strip()
+        return cleaned
+
+    def _update_group_repeat_follow_state(self, group: dict[str, Any], text: str) -> dict[str, str]:
+        if not self.enable_group_repeat_follow:
+            return {}
+        cleaned = _single_line(text, 80)
+        signature = self._group_repeat_signature(cleaned)
+        if len(signature) < 1 or len(signature) > 30:
+            group["repeat_follow_state"] = {}
+            return {}
+        now = _now_ts()
+        state = group.get("repeat_follow_state")
+        if not isinstance(state, dict):
+            state = {}
+        if signature and signature == str(state.get("signature") or "") and now - _safe_float(state.get("last_ts"), 0) <= 120:
+            state["count"] = _safe_int(state.get("count"), 1, 1) + 1
+            state["last_ts"] = now
+            state["text"] = cleaned
+        else:
+            state = {
+                "signature": signature,
+                "text": cleaned,
+                "count": 1,
+                "first_ts": now,
+                "last_ts": now,
+                "acted": False,
+                "follow_probability": max(0.0, self.group_repeat_follow_probability),
+                "interrupt_probability": max(0.0, self.group_repeat_interrupt_probability),
+            }
+        group["repeat_follow_state"] = state
+        count = _safe_int(state.get("count"), 1, 1)
+        if count <= 3 or bool(state.get("acted")) or bool(state.get("followed")):
+            return {}
+        today = _today_key()
+        if group.get("interject_day") != today:
+            group["interject_day"] = today
+            group["interject_today"] = 0
+        if self.group_interject_max_daily <= 0:
+            return {}
+        if _safe_int(group.get("interject_today"), 0, 0) >= self.group_interject_max_daily:
+            return {}
+        follow_probability = min(0.85, _safe_float(state.get("follow_probability"), self.group_repeat_follow_probability))
+        interrupt_probability = min(0.85, _safe_float(state.get("interrupt_probability"), self.group_repeat_interrupt_probability))
+        total_probability = min(0.95, follow_probability + interrupt_probability)
+        roll = random.random()
+        if roll >= total_probability:
+            step = max(0.0, self.group_repeat_interrupt_probability_step)
+            state["follow_probability"] = min(0.85, follow_probability + step)
+            state["interrupt_probability"] = min(0.85, interrupt_probability + step)
+            return {}
+        state["acted"] = True
+        state["acted_ts"] = now
+        action = "interrupt" if roll < interrupt_probability else "follow"
+        if action == "interrupt":
+            image_path = str(self.group_repeat_interrupt_image_path or "").strip()
+            if image_path and not os.path.exists(image_path):
+                image_path = ""
+            text_reply = _single_line(self.group_repeat_interrupt_text, 80) or "禁止复读"
+            return {"action": "interrupt", "text": "" if image_path else text_reply, "image_path": image_path}
+        return {"action": "follow", "text": cleaned, "image_path": ""}
+
     async def _maybe_group_interject(self, event: AstrMessageEvent, group: dict[str, Any], text: str) -> None:
+        repeat_action = self._update_group_repeat_follow_state(group, text)
+        if repeat_action:
+            repeat_reply = _single_line(repeat_action.get("text"), 80)
+            image_path = str(repeat_action.get("image_path") or "")
+            await self._reply_with_optional_media(event, repeat_reply, image_path=image_path)
+            now = _now_ts()
+            group["last_interject_at"] = now
+            group["interject_today"] = _safe_int(group.get("interject_today"), 0, 0) + 1
+            group["last_bot_interjection"] = {
+                "ts": now,
+                "text": repeat_reply,
+                "reason": "群聊复读打断" if repeat_action.get("action") == "interrupt" else "群聊复读跟读",
+                "has_image": bool(image_path),
+                "topic_signature": self._group_topic_signature(text),
+            }
+            return
         allowed, reason = self._group_interjection_allowed(group, text)
         if not allowed:
             return
@@ -12863,9 +13236,8 @@ Bot 主动后用户回复次数：{reply_count}
         ]
         cycle_pool = [
             ("无明显周期影响", "平稳", 0, 24),
-            ("生理期前的模拟状态,情绪更敏感,耐心更薄", "敏感", -18, 72),
-            ("生理期模拟状态,能量偏低,想少说重话", "疲惫", -24, 96),
-            ("周期恢复期,慢慢回到稳定状态", "松弛", -6, 48),
+            ("生理期前的模拟状态,情绪更敏感,耐心更薄", "敏感", -18, 24),
+            ("生理期模拟状态,能量偏低,想少说重话", "疲惫", -24, 72),
         ]
 
         def pick(pool: list[tuple[str, str, int, int]], special_chance: float = 0.35) -> tuple[str, str, int, int]:
@@ -12884,7 +13256,7 @@ Bot 主动后用户回复次数：{reply_count}
         if persona_profile.get("allow_hunger", True):
             specs.append(("hunger", "饥饿", *hunger_pick))
         if persona_profile.get("allow_cycle", False):
-            specs.append(("body_cycle", "周期", *pick(cycle_pool, 0.28)))
+            specs.append(("body_cycle", "周期", *self._pick_body_cycle_spec(cycle_pool, intensity)))
         else:
             specs.append(("body_cycle", "周期", *cycle_pool[0]))
 
@@ -12924,24 +13296,32 @@ Bot 主动后用户回复次数：{reply_count}
             if kind == "sleep" and energy_delta <= -16:
                 extras["on_end_transition"] = "sleep_rebound"
                 extras["phase"] = "sleep_debt"
+            if kind == "body_cycle" and energy_delta != 0:
+                extras["phase"] = self._infer_body_cycle_phase(label)
+                extras["episode_key"] = f"body-cycle-{_today_key()}"
+                if extras["phase"] == "pre":
+                    extras["transition_options"] = [{"to": "body_period", "base_weight": 0.72}, {"to": "stable", "base_weight": 0.28}]
+                elif extras["phase"] == "period":
+                    extras["transition_options"] = [{"to": "body_recovery", "base_weight": 0.65}, {"to": "stable", "base_weight": 0.35}]
             extras["transition_options"] = self._build_transition_options(
                 kind=kind,
                 energy_delta=int(energy_delta * max(0.4, intensity)),
                 cause=str(extras.get("cause") or ""),
                 on_end_transition=str(extras.get("on_end_transition") or ""),
+            ) or extras.get("transition_options", [])
+            condition = self._make_condition(
+                kind=kind,
+                title=title,
+                label=label,
+                mood=mood,
+                energy_delta=int(energy_delta * max(0.4, intensity)),
+                duration_hours=duration_hours,
+                intensity=random.randint(35, 90),
+                **extras,
             )
-            conditions.append(
-                self._make_condition(
-                    kind=kind,
-                    title=title,
-                    label=label,
-                    mood=mood,
-                    energy_delta=int(energy_delta * max(0.4, intensity)),
-                    duration_hours=duration_hours,
-                    intensity=random.randint(35, 90),
-                    **extras,
-                )
-            )
+            if kind == "body_cycle" and energy_delta != 0:
+                self._record_body_cycle_episode(condition)
+            conditions.append(condition)
         dream_aftertaste = self._build_dream_aftertaste_condition(dream_pick)
         if dream_aftertaste is not None:
             conditions.append(dream_aftertaste)
@@ -12970,6 +13350,81 @@ Bot 主动后用户回复次数：{reply_count}
                 )
             )
         return conditions
+
+    def _infer_body_cycle_phase(self, label: str) -> str:
+        text = str(label or "")
+        if "前" in text:
+            return "pre"
+        if "恢复" in text:
+            return "recovery"
+        if "生理期" in text:
+            return "period"
+        return "cycle"
+
+    def _body_cycle_max_hours(self, phase: str, label: str = "") -> int:
+        phase = str(phase or self._infer_body_cycle_phase(label))
+        if phase == "period":
+            return 72
+        if phase in {"pre", "recovery"}:
+            return 24
+        return 48
+
+    def _body_cycle_interval_seconds(self) -> int:
+        return random.randint(25, 34) * 86400
+
+    def _body_cycle_generation_blocked(self, now: float | None = None) -> bool:
+        now = _now_ts() if now is None else now
+        meta = self.data.get("body_cycle_state", {})
+        if isinstance(meta, dict):
+            expected_ts = _safe_float(meta.get("next_expected_start_ts"), 0)
+            if expected_ts > 0 and now < expected_ts - 2 * 86400:
+                return True
+            if expected_ts <= 0 and _safe_float(meta.get("last_end_ts"), 0) + 18 * 86400 > now:
+                return True
+        conditions = self.data.get("state_conditions", [])
+        if not isinstance(conditions, list):
+            return False
+        recent_floor = now - 14 * 86400
+        for cond in conditions:
+            if not isinstance(cond, dict) or str(cond.get("kind") or "") != "body_cycle":
+                continue
+            start_ts = _safe_float(cond.get("start_ts"), 0)
+            end_ts = _safe_float(cond.get("end_ts"), 0)
+            if end_ts > now or max(start_ts, end_ts) >= recent_floor:
+                return True
+        return False
+
+    def _pick_body_cycle_spec(
+        self,
+        cycle_pool: list[tuple[str, str, int, int]],
+        intensity: float,
+    ) -> tuple[str, str, int, int]:
+        neutral = cycle_pool[0]
+        if self._body_cycle_generation_blocked():
+            return neutral
+        now = _now_ts()
+        meta = self.data.get("body_cycle_state", {})
+        expected_ts = _safe_float(meta.get("next_expected_start_ts"), 0) if isinstance(meta, dict) else 0
+        if expected_ts > 0:
+            days_late = max(0.0, (now - expected_ts) / 86400)
+            chance = min(0.65, 0.18 + days_late * 0.12) * max(0.35, min(1.15, intensity))
+        else:
+            chance = 0.045 * max(0.25, min(1.2, intensity))
+        if random.random() > chance:
+            return neutral
+        return random.choices(cycle_pool[1:], weights=[0.45, 0.55], k=1)[0]
+
+    def _record_body_cycle_episode(self, cond: dict[str, Any]) -> None:
+        start_ts = _safe_float(cond.get("start_ts"), _now_ts())
+        end_ts = _safe_float(cond.get("end_ts"), start_ts)
+        phase = str(cond.get("phase") or self._infer_body_cycle_phase(str(cond.get("label") or "")))
+        self.data["body_cycle_state"] = {
+            "last_start_ts": start_ts,
+            "last_end_ts": end_ts,
+            "next_expected_start_ts": start_ts + self._body_cycle_interval_seconds(),
+            "last_phase": phase,
+            "last_label": _single_line(cond.get("label"), 80),
+        }
 
     def _remember_daily_dream_pick(self, dream_pick: tuple[str, str, int, int] | None) -> None:
         if not dream_pick:
@@ -13170,6 +13625,7 @@ Bot 主动后用户回复次数：{reply_count}
         cause: str = "",
         on_end_transition: str = "",
         phase: str = "",
+        episode_key: str = "",
         transition_options: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         start_ts = _now_ts()
@@ -13187,6 +13643,7 @@ Bot 主动后用户回复次数：{reply_count}
             "cause": cause,
             "on_end_transition": on_end_transition,
             "phase": phase,
+            "episode_key": episode_key,
             "transition_options": list(transition_options or []),
         }
 
@@ -14048,6 +14505,7 @@ Bot 主动后用户回复次数：{reply_count}
         if not isinstance(conditions, list):
             self.data["state_conditions"] = []
             return
+        conditions = self._repair_body_cycle_conditions(conditions, now)
         active = []
         expired = []
         for cond in conditions:
@@ -14060,6 +14518,69 @@ Bot 主动后用户回复次数：{reply_count}
         for cond in expired:
             active.extend(self._spawn_followup_conditions(cond))
         self.data["state_conditions"] = active
+
+    def _repair_body_cycle_conditions(self, conditions: list[Any], now: float) -> list[dict[str, Any]]:
+        repaired: list[dict[str, Any]] = []
+        active_cycles: list[dict[str, Any]] = []
+        last_cycle_end = 0.0
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if str(cond.get("kind") or "") != "body_cycle":
+                repaired.append(cond)
+                continue
+            label = _single_line(cond.get("label"), 80)
+            phase = str(cond.get("phase") or self._infer_body_cycle_phase(label))
+            cond["phase"] = phase
+            start_ts = _safe_float(cond.get("start_ts"), now)
+            if start_ts <= 0:
+                start_ts = now
+                cond["start_ts"] = start_ts
+            max_hours = self._body_cycle_max_hours(phase, label)
+            max_end_ts = start_ts + max_hours * 3600
+            end_ts = _safe_float(cond.get("end_ts"), max_end_ts)
+            if end_ts <= 0:
+                end_ts = max_end_ts
+            if end_ts > max_end_ts:
+                end_ts = max_end_ts
+                cond["end_ts"] = end_ts
+                cond["duration_hours"] = max_hours
+            if not cond.get("episode_key"):
+                cond["episode_key"] = f"body-cycle-{datetime.fromtimestamp(start_ts).strftime('%Y-%m-%d')}"
+            last_cycle_end = max(last_cycle_end, end_ts)
+            if start_ts <= now < end_ts:
+                active_cycles.append(cond)
+            repaired.append(cond)
+
+        if len(active_cycles) > 1:
+            active_cycles.sort(key=lambda item: _safe_float(item.get("start_ts"), 0), reverse=True)
+            keep_id = active_cycles[0].get("id")
+            filtered: list[dict[str, Any]] = []
+            for cond in repaired:
+                if str(cond.get("kind") or "") == "body_cycle" and cond.get("id") != keep_id:
+                    cond["end_ts"] = min(_safe_float(cond.get("end_ts"), now), now - 1)
+                filtered.append(cond)
+            repaired = filtered
+
+        if last_cycle_end > 0:
+            meta = self.data.get("body_cycle_state")
+            if not isinstance(meta, dict):
+                meta = {}
+            expected_ts = _safe_float(meta.get("next_expected_start_ts"), 0)
+            if expected_ts <= 0 or expected_ts <= last_cycle_end:
+                base_start = _safe_float(meta.get("last_start_ts"), 0)
+                if base_start <= 0:
+                    base_start = max(0.0, last_cycle_end - 4 * 86400)
+                expected_ts = base_start + 28 * 86400
+            expected_ts = max(expected_ts, last_cycle_end + 18 * 86400)
+            meta.update(
+                {
+                    "last_end_ts": max(_safe_float(meta.get("last_end_ts"), 0), last_cycle_end),
+                    "next_expected_start_ts": expected_ts,
+                }
+            )
+            self.data["body_cycle_state"] = meta
+        return repaired
 
     def _spawn_followup_conditions(self, cond: dict[str, Any]) -> list[dict[str, Any]]:
         choice = self._pick_condition_transition(cond)
@@ -14180,6 +14701,37 @@ Bot 主动后用户回复次数：{reply_count}
                 intensity=48,
                 cause="用户关心反馈仍有轻度影响",
                 phase="afterglow",
+            )
+        if target == "body_period":
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label="生理期模拟状态,能量偏低,想少说重话",
+                mood="疲惫",
+                energy_delta=-18,
+                duration_hours=72,
+                intensity=64,
+                cause="周期阶段自然推进",
+                phase="period",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[
+                    {"to": "body_recovery", "base_weight": 0.65},
+                    {"to": "stable", "base_weight": 0.35},
+                ],
+            )
+        if target == "body_recovery":
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label="周期恢复期,慢慢回到稳定状态",
+                mood="松弛",
+                energy_delta=-5,
+                duration_hours=24,
+                intensity=48,
+                cause="周期阶段自然推进",
+                phase="recovery",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[{"to": "stable", "base_weight": 1.0}],
             )
         return None
 
@@ -15161,6 +15713,7 @@ Bot 主动后用户回复次数：{reply_count}
                     f"- {cond.get('title', cond.get('kind', '状态'))}："
                     f"{cond.get('label', '')}；情绪={cond.get('mood', '平稳')}；"
                     f"{('阶段=' + str(cond.get('phase')) + '；') if cond.get('phase') else ''}"
+                    f"开始={self._format_condition_started(cond.get('start_ts'))}；"
                     f"能量影响={cond.get('energy_delta', 0)}；"
                     f"{('原因=' + str(cond.get('cause')) + '；') if cond.get('cause') else ''}"
                     f"{self._format_transition_hint(cond)}"
@@ -15194,6 +15747,8 @@ Bot 主动后用户回复次数：{reply_count}
                 "sleep_afterglow": "更可能补回来一点精神",
                 "sleep_tail": "也可能还残一点迟钝",
                 "soft_afterglow": "可能留一点被关心后的余温",
+                "body_period": "可能自然进入生理期阶段",
+                "body_recovery": "可能自然进入恢复期",
                 "stable": "也可能直接回稳",
             }.get(target, target)
             labels.append(mapped)
@@ -15715,6 +16270,14 @@ Bot 主动后用户回复次数：{reply_count}
         if seconds < 86400:
             return f"{int(seconds // 3600)} 小时"
         return f"{int(seconds // 86400)} 天"
+
+    def _format_condition_started(self, start_ts: Any) -> str:
+        ts = _safe_float(start_ts, 0)
+        if ts <= 0:
+            return "未知"
+        dt = datetime.fromtimestamp(ts)
+        elapsed = max(0.0, _now_ts() - ts)
+        return f"{dt.strftime('%m-%d %H:%M')}（已持续 {self._format_duration_brief(elapsed)}）"
 
     def _format_duration_brief(self, seconds: float) -> str:
         seconds = max(0.0, float(seconds))
@@ -16520,6 +17083,7 @@ Bot 主动后用户回复次数：{reply_count}
     async def _tick(self):
         await self._maybe_trigger_bilibili_boredom_watch()
         await self._maybe_trigger_jm_cosmos_boredom_read()
+        await self._maybe_publish_qzone_life_post()
         await self._maybe_schedule_private_reading_recommendation_request()
         async with self._data_lock:
             if self._maybe_schedule_bilibili_video_share():
@@ -16878,6 +17442,66 @@ Bot 主动后用户回复次数：{reply_count}
 - 禁止泄露私聊记忆、关系网内部备注或工具参数。工具成功后只给一句简短结果。
 """.strip()
 
+    def _qzone_tool_instruction(self) -> str:
+        if not (self.enabled and self.enable_qzone_integration):
+            return ""
+        return """
+【QQ 空间动态工具】
+当用户明确要求你查看说说、QQ 空间动态、点赞/评论说说,或要求你发一条说说时,可以使用 Private Companion 的 QQ 空间工具。
+- 查看说说：使用 `pc_qzone_view_feed`。不知道目标 QQ 时默认当前用户。
+- 发布说说：使用 `pc_qzone_publish_feed`。只有用户明确要求发布时才调用；不要把草稿当作已发布。
+- 发布内容必须服从当前人格与世界观,但不要泄露私聊隐私、内部状态数值、关系网资料或插件实现。
+- 工具失败时简短说明失败原因,不要假装已经发布或点赞。
+""".strip()
+
+    @filter.llm_tool(name="pc_qzone_view_feed")
+    async def pc_qzone_view_feed(self, event: AstrMessageEvent, user_id: str = "", pos: int = 0, like: bool = False, reply: bool = False) -> str:
+        """查看某位用户 QQ 空间说说,可按需点赞或评论。"""
+        if not self.enable_qzone_integration:
+            return json.dumps({"status": "disabled", "message": "QQ 空间动态层未启用"}, ensure_ascii=False)
+        plugin = self._find_qzone_instance()
+        service = getattr(plugin, "service", None) if plugin is not None else None
+        query = getattr(service, "query_feeds", None)
+        if not callable(query):
+            return json.dumps({"status": "unavailable", "message": "未检测到可用 QQ 空间服务"}, ensure_ascii=False)
+        target = _single_line(user_id, 40)
+        if not target:
+            try:
+                target = str(event.get_sender_id())
+            except Exception:
+                target = ""
+        try:
+            posts = await query(target_id=target or None, pos=max(0, int(pos or 0)), num=1, with_detail=True)
+            if not posts:
+                return json.dumps({"status": "empty", "message": "查询结果为空"}, ensure_ascii=False)
+            post = posts[0]
+            action_msg = ""
+            if reply and callable(getattr(service, "comment_posts", None)):
+                await service.comment_posts(post, event=event)
+                action_msg = "已评论"
+            if like and callable(getattr(service, "like_posts", None)):
+                await service.like_posts(post)
+                action_msg = (action_msg + "并点赞") if action_msg else "已点赞"
+            return json.dumps(
+                {
+                    "status": "success",
+                    "action": action_msg,
+                    "author": _single_line(getattr(post, "name", ""), 60),
+                    "uin": str(getattr(post, "uin", "") or ""),
+                    "text": _single_line(getattr(post, "text", "") or getattr(post, "rt_con", ""), 300),
+                    "images": list(getattr(post, "images", []) or [])[:6],
+                },
+                ensure_ascii=False,
+            )
+        except Exception as exc:
+            return json.dumps({"status": "error", "message": _single_line(exc, 160)}, ensure_ascii=False)
+
+    @filter.llm_tool(name="pc_qzone_publish_feed")
+    async def pc_qzone_publish_feed(self, event: AstrMessageEvent, text: str) -> str:
+        """发布一条 QQ 空间说说。"""
+        result = await self._publish_qzone_text(text)
+        return json.dumps({"status": "success" if result.get("success") else "error", **result}, ensure_ascii=False)
+
     @filter.llm_tool(name="pc_get_group_id_by_name")
     async def pc_get_group_id_by_name(self, event: AstrMessageEvent, group_name: str) -> str:
         """按群名关键词查询机器人已加入的群号。"""
@@ -17006,6 +17630,13 @@ Bot 主动后用户回复次数：{reply_count}
             message_text = str(getattr(event, "message_str", "") or "")
             if any(token in message_text for token in ("发到", "发给", "告诉", "转告", "私聊", "@", "艾特", "群友", "群里", "群聊")):
                 current_prompt = f"{current_prompt}\n\n<!-- private_companion_atrelay_tools_v1 -->\n{atrelay_instruction}".strip()
+                req.system_prompt = current_prompt
+        qzone_instruction = self._qzone_tool_instruction()
+        current_prompt = req.system_prompt or ""
+        if qzone_instruction and "<!-- private_companion_qzone_tools_v1 -->" not in current_prompt:
+            message_text = str(getattr(event, "message_str", "") or "")
+            if any(token in message_text for token in ("说说", "空间", "QQ空间", "动态", "点赞", "评论")):
+                current_prompt = f"{current_prompt}\n\n<!-- private_companion_qzone_tools_v1 -->\n{qzone_instruction}".strip()
                 req.system_prompt = current_prompt
         environment_marker = "<!-- private_companion_environment_v1 -->"
         current_prompt = req.system_prompt or ""
@@ -17995,6 +18626,7 @@ Bot 主动后用户回复次数：{reply_count}
                     f"- {cond.get('title', cond.get('kind', '状态'))}："
                     f"{cond.get('label', '')}｜情绪 {cond.get('mood', '平稳')}｜"
                     f"{('阶段 ' + str(cond.get('phase')) + '｜') if cond.get('phase') else ''}"
+                    f"开始 {self._format_condition_started(cond.get('start_ts'))}｜"
                     f"{('原因 ' + str(cond.get('cause')) + '｜') if cond.get('cause') else ''}"
                     f"能量 {cond.get('energy_delta', 0)}｜"
                     f"{self._format_transition_hint(cond)}"
@@ -18220,12 +18852,17 @@ Bot 主动后用户回复次数：{reply_count}
             )
             share_scheduled = self._maybe_schedule_group_private_share(group_id, group, trigger_sender_id=sender_id)
             self._save_data_sync()
-            group_snapshot = dict(group)
+            group_snapshot = deepcopy(group)
         if isinstance(registration_payload, dict) and registration_payload.get("blocked_reply"):
             await self._reply(event, str(registration_payload.get("blocked_reply") or "你是小猪"))
             event.stop_event()
             return
-        if registration_payload:
+        if isinstance(registration_payload, dict) and registration_payload.get("confirm_reply"):
+            await self._reply(event, str(registration_payload.get("confirm_reply") or ""))
+            if not registration_payload.get("user_id"):
+                event.stop_event()
+                return
+        if registration_payload and registration_payload.get("user_id"):
             asyncio.create_task(self._refresh_worldbook_self_registration_impression(registration_payload))
         if share_scheduled:
             asyncio.create_task(self._kick_proactive_loop_once())
@@ -18233,12 +18870,17 @@ Bot 主动后用户回复次数：{reply_count}
         asyncio.create_task(self._maybe_refresh_group_slang_meanings(group_id, group_snapshot))
         await self._maybe_group_interject(event, group_snapshot, text)
         original_interject_at = _safe_float(group.get("last_interject_at"), 0) if isinstance(group, dict) else 0
-        if _safe_float(group_snapshot.get("last_interject_at"), 0) > original_interject_at:
+        repeat_state_changed = group_snapshot.get("repeat_follow_state") != (
+            group.get("repeat_follow_state") if isinstance(group, dict) else {}
+        )
+        if _safe_float(group_snapshot.get("last_interject_at"), 0) > original_interject_at or repeat_state_changed:
             async with self._data_lock:
                 current = self._get_group(group_id)
                 current["last_interject_at"] = group_snapshot.get("last_interject_at", current.get("last_interject_at", 0))
                 current["interject_day"] = group_snapshot.get("interject_day", current.get("interject_day", ""))
                 current["interject_today"] = group_snapshot.get("interject_today", current.get("interject_today", 0))
+                current["last_bot_interjection"] = group_snapshot.get("last_bot_interjection", current.get("last_bot_interjection", {}))
+                current["repeat_follow_state"] = group_snapshot.get("repeat_follow_state", current.get("repeat_follow_state", {}))
                 self._save_data_sync()
 
     def _format_timestamp_elapsed(self, timestamp: Any) -> str:

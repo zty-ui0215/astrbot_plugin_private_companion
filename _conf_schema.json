@@ -758,6 +758,49 @@
       "enable_bilibili_integration": true
     }
   },
+  "enable_qzone_integration": {
+    "description": "启用 QQ 空间动态层",
+    "type": "bool",
+    "hint": "整合 QQ 空间查看、点赞、评论和发布说说入口。用于让 Bot 理解空间动态是公开生活札记,并在用户明确要求时使用工具处理。",
+    "default": true
+  },
+  "enable_qzone_life_publish": {
+    "description": "低频发布生活说说",
+    "type": "bool",
+    "hint": "开启后, Bot 可根据当天状态、日程和日记余味低频写一条 QQ 空间说说。默认关闭,避免未经确认公开发布。",
+    "default": false,
+    "condition": {
+      "enable_qzone_integration": true
+    }
+  },
+  "qzone_life_publish_min_interval_hours": {
+    "description": "生活说说最小间隔（小时）",
+    "type": "int",
+    "hint": "两次自动生活说说之间的最小间隔。",
+    "slider": {
+      "min": 4,
+      "max": 168,
+      "step": 1
+    },
+    "default": 24,
+    "condition": {
+      "enable_qzone_life_publish": true
+    }
+  },
+  "qzone_life_publish_probability": {
+    "description": "生活说说触发概率",
+    "type": "float",
+    "hint": "满足间隔后每轮后台检查尝试发布生活说说的概率。",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.18,
+    "condition": {
+      "enable_qzone_life_publish": true
+    }
+  },
   "enable_private_reading_integration": {
     "description": "启用夹层阅读素材",
     "type": "bool",
@@ -1186,6 +1229,75 @@
       "enable_group_companion": true
     }
   },
+  "enable_group_repeat_follow": {
+    "description": "允许群聊复读跟读",
+    "type": "bool",
+    "hint": "当群里同一句话连续复读超过三次时，Bot 可低概率跟读一次；同一轮复读最多跟一次。",
+    "default": true,
+    "condition": {
+      "enable_group_companion": true
+    }
+  },
+  "group_repeat_follow_probability": {
+    "description": "复读跟读初始概率（%）",
+    "type": "int",
+    "hint": "同一句话第 4 次出现时的初始跟读概率。",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    },
+    "default": 18,
+    "condition": {
+      "enable_group_repeat_follow": true
+    }
+  },
+  "group_repeat_interrupt_probability": {
+    "description": "复读打断初始概率（%）",
+    "type": "int",
+    "hint": "同一句话第 4 次出现时的初始打断概率。打断默认发送“禁止复读”。",
+    "slider": {
+      "min": 0,
+      "max": 100,
+      "step": 1
+    },
+    "default": 10,
+    "condition": {
+      "enable_group_repeat_follow": true
+    }
+  },
+  "group_repeat_interrupt_probability_step": {
+    "description": "复读概率共同递增（%）",
+    "type": "int",
+    "hint": "每次继续复读但 Bot 没跟读/打断时，下一次跟读概率和打断概率都会增加多少。",
+    "slider": {
+      "min": 0,
+      "max": 50,
+      "step": 1
+    },
+    "default": 12,
+    "condition": {
+      "enable_group_repeat_follow": true
+    }
+  },
+  "group_repeat_interrupt_text": {
+    "description": "复读打断文本",
+    "type": "string",
+    "hint": "打断复读时发送的文字。留空会回退为“禁止复读”。",
+    "default": "禁止复读",
+    "condition": {
+      "enable_group_repeat_follow": true
+    }
+  },
+  "group_repeat_interrupt_image_path": {
+    "description": "复读打断表情包路径",
+    "type": "string",
+    "hint": "填写本地图片路径后，打断复读时优先发送这张表情包；路径不可用时回退到打断文本。",
+    "default": "",
+    "condition": {
+      "enable_group_repeat_follow": true
+    }
+  },
   "group_interject_min_interval_minutes": {
     "description": "群聊主动插话最小间隔（分钟）",
     "type": "int",
@@ -1362,7 +1474,7 @@
   "enable_cycle_state": {
     "description": "启用生理周期模拟",
     "type": "bool",
-    "hint": "开启后可能出现生理期前、生理期、恢复期等持续数天的拟人化周期影响。",
+    "hint": "开启后可能出现生理期前、生理期、恢复期等拟人化周期影响；周期事件带冷却，不会每天连续重抽。",
     "default": true,
     "condition": {
       "enable_humanized_states": true

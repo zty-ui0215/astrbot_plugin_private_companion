@@ -94,6 +94,7 @@ const featureMeta = {
   enable_group_context_injection: ["群上下文注入", "在群聊回复时加入群氛围、话题和成员信息。"],
   enable_group_scene_awareness: ["群聊场景感知", "推断当前消息是在对 Bot、某个群友还是整个群说话，减少误以为别人都在问自己。"],
   enable_group_interjection: ["群主动插话", "允许 Bot 在群聊里主动插一句。谨慎开启。"],
+  enable_group_repeat_follow: ["复读处理", "同一句话连续复读超过三次时，可跟读一次或打断一次。"],
   enable_group_topic_threads: ["群话题线", "维护当前群聊正在聊什么，以及话题如何变化。"],
   enable_group_episode_memory: ["群聊片段", "把群聊阶段性内容整理成摘要片段。"],
   enable_group_interjection_feedback: ["插话反馈", "记录群友对主动插话的反应，后续调整频率。"],
@@ -105,6 +106,8 @@ const featureMeta = {
   enable_livingmemory_integration: ["LivingMemory 协同", "引导模型按需调用长期记忆工具，避免重复造轮子。"],
   enable_bilibili_integration: ["B 站联动", "读取 B 站 Bot 观看日志，并在合适节点私聊分享。"],
   enable_bilibili_boredom_watch: ["无聊刷 B 站", "空档或无聊时低频触发 B 站 Bot 自己看视频。"],
+  enable_qzone_integration: ["QQ 空间动态", "整合查看、点赞、评论和发布说说入口。"],
+  enable_qzone_life_publish: ["生活说说", "根据状态、日程和日记余味低频发布公开生活动态。"],
   enable_private_reading_integration: ["夹层阅读素材", "检测到可用素材能力时，允许作为低频私下阅读来源。"],
   enable_private_reading_boredom_read: ["私下阅读", "空档、无聊或夜里低频自己搜索并阅读，形成内部印象。"],
   enable_private_reading_ask_recommendation: ["征求推荐", "空档或无聊时，低频私聊询问用户有没有好看的本子或漫画推荐。"],
@@ -156,6 +159,7 @@ const featureGroups = [
       "enable_group_episode_memory",
       "enable_group_relationship_graph",
       "enable_group_interjection",
+      "enable_group_repeat_follow",
       "enable_group_interjection_feedback",
       "enable_group_privacy_guard",
     ],
@@ -175,6 +179,8 @@ const featureGroups = [
     keys: [
       "enable_bilibili_integration",
       "enable_bilibili_boredom_watch",
+      "enable_qzone_integration",
+      "enable_qzone_life_publish",
       "enable_private_reading_integration",
       "enable_private_reading_boredom_read",
       "enable_private_reading_ask_recommendation",
@@ -218,6 +224,7 @@ const configLabels = {
   whitelist: "白名单",
   blacklist: "黑名单",
   interjection_enabled: "群主动插话",
+  repeat_follow_enabled: "复读跟读",
   active_projects: "进行中创作",
   project_count: "创作项目",
   boredom_watch_enabled: "无聊刷视频",
@@ -1013,7 +1020,7 @@ function renderUsers() {
       await runAction(() => postJson("/user/update", {
         user_id: user.user_id,
         enabled: !user.enabled,
-      }));
+      }), !user.enabled ? "已启用私聊对象" : "已停用私聊对象", button);
     });
   });
   document.querySelectorAll("[data-user-id]").forEach((row) => {
@@ -1077,7 +1084,7 @@ function bindUserActions(detail) {
       user_id: detail.user_id,
       nickname: form.get("nickname"),
       style: form.get("style"),
-    }));
+    }), "已保存私聊对象", event.submitter);
   });
   document.querySelectorAll("[data-user-action]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -1086,9 +1093,11 @@ function bindUserActions(detail) {
       if (action === "toggle") body.enabled = !detail.enabled;
       if (action === "reset_daily") body.reset_daily = true;
       if (action === "clear_schedule") body.clear_schedule = true;
-      if (action === "clear_learning" && !confirm("确定清空该用户的学习记忆、片段和未完话头吗？")) return;
-      if (action === "clear_learning") body.clear_learning = true;
-      await runAction(() => postJson("/user/update", body));
+      if (action === "clear_learning") {
+        if (!requireSecondClick(button, `user-clear:${detail.user_id}`, "再次点击清空该用户的学习记忆", "再次点击清空")) return;
+        body.clear_learning = true;
+      }
+      await runAction(() => postJson("/user/update", body), "已更新私聊对象", button);
     });
   });
 }
@@ -1167,9 +1176,11 @@ function bindGroupActions(detail) {
       const body = { group_id: detail.group_id };
       if (action === "toggle") body.enabled = !detail.enabled;
       if (action === "reset_interjection") body.reset_interjection = true;
-      if (action === "clear_observation" && !confirm("确定清空该群的观测数据、黑话、话题和关系网吗？")) return;
-      if (action === "clear_observation") body.clear_observation = true;
-      await runAction(() => postJson("/group/update", body));
+      if (action === "clear_observation") {
+        if (!requireSecondClick(button, `group-clear:${detail.group_id}`, "再次点击清空该群的观测数据", "再次点击清空")) return;
+        body.clear_observation = true;
+      }
+      await runAction(() => postJson("/group/update", body), "已更新群聊观测", button);
     });
   });
 }
@@ -1231,8 +1242,6 @@ function renderWorldbook() {
       </section>
     `).join("")
     : `<div class="empty small">暂无群资料</div>`;
-  bindWorldbookMemberActions();
-  bindWorldbookGroupActions();
 }
 
 function worldbookStat(label, value, note) {
@@ -1250,23 +1259,38 @@ function worldbookMemberCard(item) {
   const observed = Array.isArray(item.observed_names) ? item.observed_names : [];
   const memories = Array.isArray(item.important_memories) ? item.important_memories : [];
   const chips = [...aliases.map((name) => `别名：${name}`), ...observed.map((name) => `群名片：${name}`)].slice(0, 12);
+  const sourceEntries = Array.isArray(item.source_entries) ? item.source_entries : [];
+  const detailId = `worldbook-editor-${String(item.user_id || "").replace(/[^A-Za-z0-9_-]/g, "_")}`;
+  const previewItems = worldbookMemberPreviewItems(item, memories);
   return `
-    <section class="worldbook-member-card ${item.enabled ? "" : "off"}">
+    <section class="worldbook-member-card ${item.enabled ? "" : "off"}" data-worldbook-user-id="${escapeHtml(item.user_id || "")}">
       <div class="worldbook-member-head">
         <div>
           <b>${escapeHtml(item.name || item.user_id || "未命名成员")}</b>
           <span>身份 QQ ${escapeHtml(item.user_id || "-")} · 优先级 ${escapeHtml(item.priority ?? "-")}</span>
         </div>
-        <button type="button" data-worldbook-member="${escapeHtml(item.user_id || "")}" data-enabled="${item.enabled ? "0" : "1"}">
-          ${escapeHtml(item.enabled ? "停用" : "启用")}
-        </button>
+        <div class="worldbook-card-actions">
+          <button type="button" data-worldbook-edit="${escapeHtml(detailId)}">编辑</button>
+          <button type="button" data-worldbook-member="${escapeHtml(item.user_id || "")}" data-enabled="${item.enabled ? "0" : "1"}">
+            ${escapeHtml(item.enabled ? "停用" : "启用")}
+          </button>
+          <button type="button" data-worldbook-delete="${escapeHtml(item.user_id || "")}" class="danger-outline">删除</button>
+        </div>
       </div>
       <div class="worldbook-compact-meta">
         <span>${escapeHtml(aliases.length)} 个别名</span>
         <span>${escapeHtml(observed.length)} 个曾见群名片</span>
         <span>${escapeHtml((item.important_memories || []).length)} 条记忆</span>
+        ${sourceEntries.length ? `<span>${escapeHtml(sourceEntries.slice(0, 2).join(" / "))}</span>` : ""}
       </div>
-      <details class="worldbook-editor">
+      ${previewItems.length ? `
+        <div class="worldbook-member-preview-list">
+          ${previewItems.map(([label, value]) => `
+            <p><b>${escapeHtml(label)}</b><span>${escapeHtml(value)}</span></p>
+          `).join("")}
+        </div>
+      ` : ""}
+      <details class="worldbook-editor" id="${escapeHtml(detailId)}">
         <summary>编辑关系节点</summary>
         <div class="worldbook-chip-row">
           ${chips.length ? chips.map((chip) => `<span>${escapeHtml(chip)}</span>`).join("") : `<span>暂无别名记录</span>`}
@@ -1292,11 +1316,27 @@ function worldbookMemberCard(item) {
         <div class="worldbook-memory-list">
           ${memories.length ? memories.map((memory, index) => worldbookMemoryCard(item.user_id || "", memory, index)).join("") : `<div class="empty small">暂无重要记忆</div>`}
         </div>
-        <button type="button" data-worldbook-save="${escapeHtml(item.user_id || "")}">保存关系节点</button>
-        <button type="button" data-worldbook-delete="${escapeHtml(item.user_id || "")}" class="danger-outline">删除节点</button>
+        <div class="worldbook-editor-actions">
+          <button type="button" data-worldbook-save="${escapeHtml(item.user_id || "")}">保存关系节点</button>
+          <button type="button" data-worldbook-delete="${escapeHtml(item.user_id || "")}" class="danger-outline">删除节点</button>
+        </div>
       </details>
     </section>
   `;
+}
+
+function worldbookMemberPreviewItems(item, memories = []) {
+  const rows = [];
+  const add = (label, value, limit = 120) => {
+    const text = shortName(String(value || "").trim(), limit);
+    if (text && !rows.some(([, existing]) => existing === text)) rows.push([label, text]);
+  };
+  add("资料", item.content || item.note, 130);
+  add("身份", item.identity_note, 120);
+  add("边界", item.boundary_note, 110);
+  const memory = memories.find((entry) => entry && entry.enabled !== false && String(entry.content || "").trim());
+  if (memory) add("记忆", `${memory.title ? `${memory.title}：` : ""}${memory.content || ""}`, 120);
+  return rows.slice(0, 4);
 }
 
 function worldbookMemoryCard(userId, memory, index) {
@@ -1322,71 +1362,98 @@ function getWorldbookMember(userId) {
   return members.find((item) => item.user_id === userId);
 }
 
-function bindWorldbookMemberActions() {
-  document.querySelectorAll("[data-worldbook-member]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const userId = button.dataset.worldbookMember;
-      if (!userId) return;
-      await runAction(() => postJson("/worldbook/member/update", {
-        user_id: userId,
-        enabled: button.dataset.enabled === "1",
-      }));
-    });
-  });
-  document.querySelectorAll("[data-worldbook-save]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const userId = button.dataset.worldbookSave;
-      if (!userId) return;
-      const aliasBox = findWorldbookField("aliases", userId);
-      const identityInput = findWorldbookField("identity-note", userId);
-      const boundaryInput = findWorldbookField("boundary-note", userId);
-      const nameInput = findWorldbookField("name", userId);
-      const priorityInput = findWorldbookField("priority", userId);
-      const contentInput = findWorldbookField("content", userId);
-      const aliases = String(aliasBox?.value || "")
-        .split(/[\n,，;；]+/)
-        .map((item) => item.trim())
-        .filter(Boolean);
-      await runAction(() => postJson("/worldbook/member/update", {
-        user_id: userId,
-        name: nameInput?.value || "",
-        priority: Number(priorityInput?.value || 120),
-        content: contentInput?.value || "",
-        identity_note: identityInput?.value || "",
-        boundary_note: boundaryInput?.value || "",
-        aliases,
-      }));
-    });
-  });
-  document.querySelectorAll("[data-worldbook-memory-toggle]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const userId = button.dataset.worldbookMemoryToggle;
-      const index = Number(button.dataset.memoryIndex || -1);
-      const member = getWorldbookMember(userId);
-      const memories = Array.isArray(member?.important_memories) ? member.important_memories.map((item) => ({ ...item })) : [];
-      if (!userId || index < 0 || index >= memories.length) return;
-      memories[index].enabled = memories[index].enabled === false;
-      await runAction(() => postJson("/worldbook/member/update", { user_id: userId, important_memories: memories }));
-    });
-  });
-  document.querySelectorAll("[data-worldbook-memory-delete]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const userId = button.dataset.worldbookMemoryDelete;
-      const index = Number(button.dataset.memoryIndex || -1);
-      const member = getWorldbookMember(userId);
-      const memories = Array.isArray(member?.important_memories) ? member.important_memories.map((item) => ({ ...item })) : [];
-      if (!userId || index < 0 || index >= memories.length) return;
-      memories.splice(index, 1);
-      await runAction(() => postJson("/worldbook/member/update", { user_id: userId, important_memories: memories }));
-    });
-  });
-  document.querySelectorAll("[data-worldbook-delete]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const userId = button.dataset.worldbookDelete;
-      if (!userId || !confirm(`删除关系节点 ${userId}？`)) return;
-      await runAction(() => postJson("/worldbook/member/update", { user_id: userId, delete: true }));
-    });
-  });
+async function handleWorldbookMemberAction(button) {
+  const editTarget = button.dataset.worldbookEdit;
+  if (editTarget) {
+    const details = document.getElementById(editTarget);
+    if (details) {
+      details.open = true;
+      details.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    return;
+  }
+  if (button.dataset.worldbookMember !== undefined) {
+    const userId = button.dataset.worldbookMember;
+    if (!userId) return;
+    await runAction(() => postJson("/worldbook/member/update", {
+      user_id: userId,
+      enabled: button.dataset.enabled === "1",
+    }), button.dataset.enabled === "1" ? "已启用关系节点" : "已停用关系节点", button);
+    return;
+  }
+  if (button.dataset.worldbookSave !== undefined) {
+    const userId = button.dataset.worldbookSave;
+    if (!userId) return;
+    const aliasBox = findWorldbookField("aliases", userId);
+    const identityInput = findWorldbookField("identity-note", userId);
+    const boundaryInput = findWorldbookField("boundary-note", userId);
+    const nameInput = findWorldbookField("name", userId);
+    const priorityInput = findWorldbookField("priority", userId);
+    const contentInput = findWorldbookField("content", userId);
+    const aliases = String(aliasBox?.value || "")
+      .split(/[\n,，;；]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    await runAction(() => postJson("/worldbook/member/update", {
+      user_id: userId,
+      name: nameInput?.value || "",
+      priority: Number(priorityInput?.value || 120),
+      content: contentInput?.value || "",
+      identity_note: identityInput?.value || "",
+      boundary_note: boundaryInput?.value || "",
+      aliases,
+    }), "已保存关系节点", button);
+    return;
+  }
+  if (button.dataset.worldbookMemoryToggle !== undefined) {
+    const userId = button.dataset.worldbookMemoryToggle;
+    const index = Number(button.dataset.memoryIndex || -1);
+    const member = getWorldbookMember(userId);
+    const memories = Array.isArray(member?.important_memories) ? member.important_memories.map((item) => ({ ...item })) : [];
+    if (!userId || index < 0 || index >= memories.length) return;
+    memories[index].enabled = memories[index].enabled === false;
+    await runAction(() => postJson("/worldbook/member/update", { user_id: userId, important_memories: memories }), "已更新重要记忆", button);
+    return;
+  }
+  if (button.dataset.worldbookMemoryDelete !== undefined) {
+    const userId = button.dataset.worldbookMemoryDelete;
+    const index = Number(button.dataset.memoryIndex || -1);
+    const member = getWorldbookMember(userId);
+    const memories = Array.isArray(member?.important_memories) ? member.important_memories.map((item) => ({ ...item })) : [];
+    if (!userId || index < 0 || index >= memories.length) return;
+    memories.splice(index, 1);
+    await runAction(() => postJson("/worldbook/member/update", { user_id: userId, important_memories: memories }), "已删除重要记忆", button);
+    return;
+  }
+  if (button.dataset.worldbookDelete !== undefined) {
+    const userId = button.dataset.worldbookDelete || button.closest("[data-worldbook-user-id]")?.dataset.worldbookUserId || "";
+    if (!userId) {
+      showToast("没有找到要删除的关系节点 ID", "error");
+      return;
+    }
+    const now = Date.now();
+    const armed = button.dataset.deleteArmed === userId && now - Number(button.dataset.deleteArmedAt || 0) < 6000;
+    if (!armed) {
+      button.dataset.deleteArmed = userId;
+      button.dataset.deleteArmedAt = String(now);
+      button.dataset.originalText = button.textContent || "删除";
+      button.textContent = "再次点击删除";
+      showToast(`再次点击删除关系节点 ${userId}`);
+      window.clearTimeout(button._deleteArmedTimer);
+      button._deleteArmedTimer = window.setTimeout(() => {
+        if (button.dataset.deleteArmed === userId) {
+          delete button.dataset.deleteArmed;
+          delete button.dataset.deleteArmedAt;
+          button.textContent = button.dataset.originalText || "删除";
+          delete button.dataset.originalText;
+        }
+      }, 6000);
+      return;
+    }
+    delete button.dataset.deleteArmed;
+    delete button.dataset.deleteArmedAt;
+    await runAction(() => postJson("/worldbook/member/update", { user_id: userId, delete: true }), "已删除关系节点", button);
+  }
 }
 
 function findWorldbookField(field, id) {
@@ -1399,26 +1466,44 @@ function findWorldbookGroupField(field, id) {
     .find((item) => item.getAttribute(`data-worldbook-group-${field}`) === id);
 }
 
-function bindWorldbookGroupActions() {
-  document.querySelectorAll("[data-worldbook-group-save]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const groupId = button.dataset.worldbookGroupSave;
-      if (!groupId) return;
-      await runAction(() => postJson("/worldbook/group/update", {
-        group_id: groupId,
-        name: findWorldbookGroupField("name", groupId)?.value || "",
-        priority: Number(findWorldbookGroupField("priority", groupId)?.value || 110),
-        content: findWorldbookGroupField("content", groupId)?.value || "",
-      }));
-    });
-  });
-  document.querySelectorAll("[data-worldbook-group-delete]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const groupId = button.dataset.worldbookGroupDelete;
-      if (!groupId || !confirm(`删除群资料 ${groupId}？`)) return;
-      await runAction(() => postJson("/worldbook/group/update", { group_id: groupId, delete: true }));
-    });
-  });
+async function handleWorldbookGroupAction(button) {
+  if (button.dataset.worldbookGroupSave !== undefined) {
+    const groupId = button.dataset.worldbookGroupSave;
+    if (!groupId) return;
+    await runAction(() => postJson("/worldbook/group/update", {
+      group_id: groupId,
+      name: findWorldbookGroupField("name", groupId)?.value || "",
+      priority: Number(findWorldbookGroupField("priority", groupId)?.value || 110),
+      content: findWorldbookGroupField("content", groupId)?.value || "",
+    }), "已保存群资料", button);
+    return;
+  }
+  if (button.dataset.worldbookGroupDelete !== undefined) {
+    const groupId = button.dataset.worldbookGroupDelete;
+    if (!groupId) return;
+    const now = Date.now();
+    const armed = button.dataset.deleteArmed === groupId && now - Number(button.dataset.deleteArmedAt || 0) < 6000;
+    if (!armed) {
+      button.dataset.deleteArmed = groupId;
+      button.dataset.deleteArmedAt = String(now);
+      button.dataset.originalText = button.textContent || "删除";
+      button.textContent = "再次点击删除";
+      showToast(`再次点击删除群资料 ${groupId}`);
+      window.clearTimeout(button._deleteArmedTimer);
+      button._deleteArmedTimer = window.setTimeout(() => {
+        if (button.dataset.deleteArmed === groupId) {
+          delete button.dataset.deleteArmed;
+          delete button.dataset.deleteArmedAt;
+          button.textContent = button.dataset.originalText || "删除";
+          delete button.dataset.originalText;
+        }
+      }, 6000);
+      return;
+    }
+    delete button.dataset.deleteArmed;
+    delete button.dataset.deleteArmedAt;
+    await runAction(() => postJson("/worldbook/group/update", { group_id: groupId, delete: true }), "已删除群资料", button);
+  }
 }
 
 function renderMemory() {
@@ -1760,6 +1845,7 @@ function renderBookDetailPanel() {
             ${book.status ? `<div><dt>状态</dt><dd>${escapeHtml(book.status)}</dd></div>` : ""}
             ${book.author ? `<div><dt>作者</dt><dd>${escapeHtml(book.author)}</dd></div>` : ""}
             ${book.tone ? `<div><dt>气质</dt><dd>${escapeHtml(book.tone)}</dd></div>` : ""}
+            ${book.point_of_view ? `<div><dt>视角</dt><dd>${escapeHtml(book.point_of_view)}</dd></div>` : ""}
             ${book.progress ? `<div><dt>进度</dt><dd>${escapeHtml(book.progress)}</dd></div>` : ""}
             ${book.created ? `<div><dt>入柜</dt><dd>${escapeHtml(book.created)}</dd></div>` : ""}
           </dl>
@@ -1927,6 +2013,7 @@ function renderCreativeProjectCard(item) {
       </div>
       <div class="creative-meta">
         <span>气质：${escapeHtml(item.tone || "-")}</span>
+        <span>视角：${escapeHtml(item.point_of_view || "第三人称有限视角")}</span>
         <span>片段：${escapeHtml(item.chunk_count || 0)}</span>
         <span>创建：${escapeHtml(item.created_at || "-")}</span>
         <span>上次推进：${escapeHtml(item.last_advanced || "-")}</span>
@@ -2088,11 +2175,15 @@ function renderConfig() {
   const group = overview.group || {};
   const creative = overview.creative || {};
   const bili = overview.bilibili || {};
+  const qzone = overview.qzone || {};
   const privateReading = overview.private_reading || {};
   const longTermRows = {
     "B 站联动": bili.enabled ? "开启" : "关闭",
     "无聊刷视频": bili.boredom_watch_enabled ? "开启" : "关闭",
     "最新视频": bili.latest_video?.title || "暂无",
+    "QQ 空间": qzone.enabled ? (qzone.available ? "可用" : "待服务") : "关闭",
+    "生活说说": qzone.life_publish_enabled ? "开启" : "关闭",
+    "最近说说": qzone.last_text || "暂无",
     "私下创作": creative.enabled ? "开启" : "关闭",
     "创作项目": `${creative.active_projects || 0}/${creative.project_count || 0}`,
     "最新创作": creative.latest_title || "暂无",
@@ -2118,6 +2209,7 @@ function renderModuleSettings() {
   const privateReadingAvailable = Boolean(state.overview?.private_reading?.available);
   renderModuleSummary(settings);
   fillForm("#quickModuleForm", settings);
+  fillForm("#environmentModuleForm", settings);
   fillForm("#privateModuleForm", settings);
   fillForm("#groupModuleForm", settings);
   fillForm("#worldbookModuleForm", settings);
@@ -2170,10 +2262,11 @@ function renderModuleSummary(settings) {
       value: settings.enable_creative_writing ? "创作开启" : "创作关闭",
       note: [
         settings.enable_bilibili_boredom_watch ? "B 站" : "",
+        settings.enable_qzone_life_publish ? "空间说说" : "",
         privateReadingAvailable && settings.enable_private_reading_boredom_read ? "夹层阅读" : "",
         privateReadingAvailable && settings.enable_private_reading_ask_recommendation ? "征求推荐" : "",
       ].filter(Boolean).join(" / ") || "联动关闭",
-      tone: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch || (privateReadingAvailable && (settings.enable_private_reading_boredom_read || settings.enable_private_reading_ask_recommendation)) ? "ok" : "off",
+      tone: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch || settings.enable_qzone_life_publish || (privateReadingAvailable && (settings.enable_private_reading_boredom_read || settings.enable_private_reading_ask_recommendation)) ? "ok" : "off",
     },
   ];
   $("#moduleSummary").innerHTML = cards.map((item) => `
@@ -2216,8 +2309,9 @@ function renderPresetCards() {
   `).join("");
   document.querySelectorAll("[data-preset]").forEach((button) => {
     button.addEventListener("click", async () => {
-      if (!confirm(`应用“${presetCatalog[button.dataset.preset]?.label || button.dataset.preset}”预设？`)) return;
-      await runAction(() => postJson("/preset/apply", { name: button.dataset.preset }));
+      const label = presetCatalog[button.dataset.preset]?.label || button.dataset.preset;
+      if (!requireSecondClick(button, `preset:${button.dataset.preset}`, `再次点击应用“${label}”预设`, "再次点击应用")) return;
+      await runAction(() => postJson("/preset/apply", { name: button.dataset.preset }), "已应用配置预设", button);
     });
   });
 }
@@ -2809,12 +2903,80 @@ function formatValue(value) {
   return value ?? "";
 }
 
-async function runAction(action) {
+function showToast(message, tone = "ok") {
+  const text = String(message || "").trim();
+  if (!text) return;
+  let toast = document.getElementById("pageToast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "pageToast";
+    toast.className = "page-toast";
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    document.body.appendChild(toast);
+  }
+  toast.textContent = text;
+  toast.classList.toggle("error", tone === "error");
+  toast.classList.add("show");
+  window.clearTimeout(showToast._timer);
+  showToast._timer = window.setTimeout(() => toast.classList.remove("show"), 1800);
+}
+
+function setActionBusy(control, busy) {
+  if (!(control instanceof HTMLButtonElement)) return;
+  if (busy) {
+    control.dataset.originalText = control.textContent || "";
+    control.disabled = true;
+    control.classList.add("is-busy");
+    control.textContent = "处理中...";
+  } else {
+    control.disabled = false;
+    control.classList.remove("is-busy");
+    if (control.dataset.originalText) {
+      control.textContent = control.dataset.originalText;
+      delete control.dataset.originalText;
+    }
+  }
+}
+
+function requireSecondClick(control, key, message, nextText = "再次点击确认", timeoutMs = 6000) {
+  if (!(control instanceof HTMLButtonElement)) return true;
+  const now = Date.now();
+  const armed = control.dataset.confirmKey === key && now - Number(control.dataset.confirmAt || 0) < timeoutMs;
+  if (armed) {
+    delete control.dataset.confirmKey;
+    delete control.dataset.confirmAt;
+    return true;
+  }
+  control.dataset.confirmKey = key;
+  control.dataset.confirmAt = String(now);
+  control.dataset.originalText = control.dataset.originalText || control.textContent || "";
+  control.textContent = nextText;
+  showToast(message);
+  window.clearTimeout(control._confirmTimer);
+  control._confirmTimer = window.setTimeout(() => {
+    if (control.dataset.confirmKey === key) {
+      delete control.dataset.confirmKey;
+      delete control.dataset.confirmAt;
+      control.textContent = control.dataset.originalText || "";
+      delete control.dataset.originalText;
+    }
+  }, timeoutMs);
+  return false;
+}
+
+async function runAction(action, successMessage = "", control = null) {
+  setActionBusy(control, true);
+  showToast("正在处理...");
   try {
-    await action();
+    const result = await action();
     await loadAll();
+    showToast(successMessage || result?.message || "操作已完成");
+    return result;
   } catch (error) {
-    alert(`操作失败：${error.message}`);
+    showToast(`操作失败：${error.message}`, "error");
+  } finally {
+    setActionBusy(control, false);
   }
 }
 
@@ -2889,7 +3051,7 @@ async function deleteSelectedBookshelfItem(button = null) {
     return;
   }
   const label = kind === "diary" && diaryDate ? `${diaryDate} 的日记` : (title || "这本书");
-  if (kind !== "jm_album" && typeof window.confirm === "function" && !window.confirm(`确定删除「${label}」吗？`)) return;
+  if (kind !== "jm_album" && !requireSecondClick(button, `book:${kind}:${itemId}:${diaryDate}`, `再次点击删除「${label}」`, "再次点击删除")) return;
   if (button) {
     button.disabled = true;
     button.textContent = "移除中...";
@@ -2966,8 +3128,20 @@ $("#userFilter").addEventListener("input", renderUsers);
 $("#groupFilter").addEventListener("input", renderGroups);
 $("#worldbookMemberFilter").addEventListener("input", renderWorldbook);
 $("#featureFilter").addEventListener("input", renderFeatureSwitches);
+$("#worldbookMembers").addEventListener("click", async (event) => {
+  const button = event.target instanceof Element ? event.target.closest("[data-worldbook-edit], [data-worldbook-member], [data-worldbook-save], [data-worldbook-memory-toggle], [data-worldbook-memory-delete], [data-worldbook-delete]") : null;
+  if (!button) return;
+  event.preventDefault();
+  await handleWorldbookMemberAction(button);
+});
+$("#worldbookGroups").addEventListener("click", async (event) => {
+  const button = event.target instanceof Element ? event.target.closest("[data-worldbook-group-save], [data-worldbook-group-delete]") : null;
+  if (!button) return;
+  event.preventDefault();
+  await handleWorldbookGroupAction(button);
+});
 $("#worldbookImportBtn").addEventListener("click", async () => {
-  await runAction(() => postJson("/worldbook/import", {}));
+  await runAction(() => postJson("/worldbook/import", {}), "已刷新关系网", $("#worldbookImportBtn"));
 });
 $("#worldbookAddMemberForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -2983,7 +3157,7 @@ $("#worldbookAddMemberForm").addEventListener("submit", async (event) => {
     name: form.get("name") || userId,
     priority: Number(form.get("priority") || 120),
     enabled: true,
-  }));
+  }), "已添加关系节点", event.submitter);
   event.currentTarget.reset();
 });
 $("#worldbookAddGroupForm").addEventListener("submit", async (event) => {
@@ -2995,12 +3169,13 @@ $("#worldbookAddGroupForm").addEventListener("submit", async (event) => {
     group_id: groupId,
     name: form.get("name") || groupId,
     enabled: true,
-  }));
+  }), "已添加群资料", event.submitter);
   event.currentTarget.reset();
 });
 $("#resetTokenStatsBtn").addEventListener("click", async () => {
-  if (!confirm("确定清空 Token 消耗统计吗？这不会影响聊天记忆和配置。")) return;
-  await runAction(() => postJson("/token/reset", {}));
+  const button = $("#resetTokenStatsBtn");
+  if (!requireSecondClick(button, "token-reset", "再次点击清空 Token 统计", "再次点击清空")) return;
+  await runAction(() => postJson("/token/reset", {}), "已清空 Token 统计", button);
 });
 
 ["quickModuleForm", "environmentModuleForm", "privateModuleForm", "groupModuleForm", "worldbookModuleForm", "memoryModuleForm", "longTermModuleForm"].forEach((formId) => {
@@ -3012,7 +3187,7 @@ $("#resetTokenStatsBtn").addEventListener("click", async () => {
     event.preventDefault();
     await runAction(() => postJson("/settings/update", {
       settings: collectFormSettings(`#${formId}`),
-    }));
+    }), "已保存模块配置", event.submitter);
     markModuleFormClean(form);
   });
 });
@@ -3027,7 +3202,7 @@ $("#addUserForm").addEventListener("submit", async (event) => {
     user_id: userId,
     enabled: true,
     nickname: form.get("nickname") || "",
-  }));
+  }), "已添加私聊对象", event.submitter);
   event.currentTarget.reset();
 });
 
@@ -3051,7 +3226,7 @@ $("#addGroupForm").addEventListener("submit", async (event) => {
         group_blacklist_ids: [...blacklist],
       });
     }
-  });
+  }, "已添加群聊观测", event.submitter);
   event.currentTarget.reset();
 });
 
@@ -3079,7 +3254,7 @@ $("#accessForm").addEventListener("submit", async (event) => {
     group_access_mode: draft.mode,
     group_whitelist_ids: [...draft.whitelist],
     group_blacklist_ids: [...draft.blacklist],
-  }));
+  }), "已保存群聊名单", event.submitter);
 });
 
 $("#groupAccessMode").addEventListener("change", () => {
@@ -3116,11 +3291,11 @@ $("#accessQuickGroups").addEventListener("click", async (event) => {
     group_access_mode: draft.mode,
     group_whitelist_ids: [...draft.whitelist],
     group_blacklist_ids: [...draft.blacklist],
-  }));
+  }), "已更新群聊名单", button);
 });
 
 $("#saveFeaturesBtn").addEventListener("click", async () => {
-  await runAction(() => postJson("/settings/update", { features: state.featureDraft }));
+  await runAction(() => postJson("/settings/update", { features: state.featureDraft }), "已保存功能开关", $("#saveFeaturesBtn"));
 });
 
 $("#enableSafeFeaturesBtn").addEventListener("click", () => {
@@ -3137,7 +3312,7 @@ $("#saveProvidersBtn").addEventListener("click", async () => {
   document.querySelectorAll("[data-provider-key]").forEach((input) => {
     providers[input.dataset.providerKey] = input.value.trim();
   });
-  await runAction(() => postJson("/settings/update", { providers }));
+  await runAction(() => postJson("/settings/update", { providers }), "已保存模型配置", $("#saveProvidersBtn"));
 });
 
 $("#testAllProvidersBtn").addEventListener("click", async () => {

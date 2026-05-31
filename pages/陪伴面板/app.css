@@ -2160,6 +2160,38 @@ input[type="search"] {
   overflow-wrap: anywhere;
 }
 
+.worldbook-card-actions,
+.worldbook-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.worldbook-card-actions button,
+.worldbook-editor-actions button {
+  min-height: 30px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 4px 9px;
+  background: #fff;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button.is-busy,
+button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.worldbook-card-actions .danger-outline,
+.worldbook-editor-actions .danger-outline {
+  border-color: rgba(161, 95, 38, 0.45);
+  color: var(--warn);
+}
+
 .worldbook-compact-meta {
   display: flex;
   flex-wrap: wrap;
@@ -2179,6 +2211,32 @@ input[type="search"] {
   margin: 0;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+.worldbook-member-preview-list {
+  display: grid;
+  gap: 5px;
+}
+
+.worldbook-member-preview-list p {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.worldbook-member-preview-list b {
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.worldbook-member-preview-list span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .worldbook-chip-row {
@@ -2220,6 +2278,10 @@ input[type="search"] {
 
 .worldbook-editor button {
   margin-top: 9px;
+}
+
+.worldbook-editor-actions button {
+  margin-top: 0;
 }
 
 .worldbook-memory-list {
@@ -2269,6 +2331,34 @@ input[type="search"] {
 
 .worldbook-group-card span {
   color: var(--accent-strong);
+}
+
+.page-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 40;
+  max-width: min(360px, calc(100vw - 44px));
+  border: 1px solid rgba(47, 117, 102, 0.25);
+  border-radius: 8px;
+  padding: 11px 14px;
+  background: #fff;
+  color: var(--accent-strong);
+  box-shadow: 0 14px 32px rgba(36, 54, 49, 0.16);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.page-toast.error {
+  border-color: rgba(161, 95, 38, 0.35);
+  color: var(--warn);
+}
+
+.page-toast.show {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .creative-hero article {

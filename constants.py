@@ -304,6 +304,7 @@ _DEFAULT_GROUP_TEMPLATE = {
     "relationship_edges": {},
     "interjection_feedback": {},
     "last_bot_interjection": {},
+    "repeat_follow_state": {},
     "last_speaker": {},
     "atmosphere": {},
     "last_summary_at": 0,

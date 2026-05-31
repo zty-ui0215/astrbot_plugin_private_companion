@@ -84,6 +84,7 @@ class PrivateCompanionPageApi:
                         "whitelist": self.plugin._configured_group_ids(),
                         "blacklist": self.plugin._configured_group_blacklist_ids(),
                         "interjection_enabled": bool(getattr(self.plugin, "enable_group_interjection", False)),
+                        "repeat_follow_enabled": bool(getattr(self.plugin, "enable_group_repeat_follow", False)),
                     },
                     "features": self._feature_flags(),
                     "providers": self._provider_settings(),
@@ -92,6 +93,7 @@ class PrivateCompanionPageApi:
                     "worldbook": self._worldbook_summary(data),
                     "proactive_candidates": self._proactive_candidate_summary(data),
                     "bilibili": self._bilibili_summary(data),
+                    "qzone": self._qzone_summary(data),
                     "private_reading": self._jm_cosmos_summary(data),
                     "creative": self._creative_summary(data),
                     "bookshelf": await self._bookshelf_summary(data, unlocked=False),
@@ -650,8 +652,6 @@ class PrivateCompanionPageApi:
         user_id = self._single_line(payload.get("user_id"), 40)
         if not user_id:
             return self._error("缺少 user_id")
-        if not user_id.isdigit() or len(user_id) < 5:
-            return self._error("关系节点必须使用有效 QQ 号作为身份键")
         try:
             async with self.plugin._data_lock:
                 profiles = self.plugin.data.setdefault("worldbook_member_profiles", {})
@@ -659,10 +659,21 @@ class PrivateCompanionPageApi:
                     profiles = {}
                     self.plugin.data["worldbook_member_profiles"] = profiles
                 if payload.get("delete"):
-                    profiles.pop(user_id, None)
+                    deleted = self.plugin.data.setdefault("worldbook_deleted_member_ids", [])
+                    if not isinstance(deleted, list):
+                        deleted = []
+                        self.plugin.data["worldbook_deleted_member_ids"] = deleted
+                    if user_id not in deleted:
+                        deleted.append(user_id)
+                    changed = profiles.pop(user_id, None) is not None
                     self.plugin._save_data_sync()
                     data = deepcopy(self.plugin.data)
-                    return self._ok({"worldbook": self._worldbook_summary(data)})
+                    return self._ok({"changed": changed, "message": "已删除关系节点", "worldbook": self._worldbook_summary(data)})
+                if not user_id.isdigit() or len(user_id) < 5:
+                    return self._error("关系节点必须使用有效 QQ 号作为身份键")
+                deleted = self.plugin.data.setdefault("worldbook_deleted_member_ids", [])
+                if isinstance(deleted, list) and user_id in deleted:
+                    self.plugin.data["worldbook_deleted_member_ids"] = [item for item in deleted if str(item) != user_id]
                 profile = profiles.get(user_id)
                 if not isinstance(profile, dict):
                     profile = {
@@ -701,7 +712,13 @@ class PrivateCompanionPageApi:
                 profile["manual_edit_ts"] = time.time()
                 self.plugin._save_data_sync()
                 data = deepcopy(self.plugin.data)
-            return self._ok({"worldbook": self._worldbook_summary(data)})
+            if payload.keys() <= {"user_id", "enabled"}:
+                message = "已更新关系节点状态"
+            elif "important_memories" in payload and len(payload) <= 2:
+                message = "已更新重要记忆"
+            else:
+                message = "已保存关系节点"
+            return self._ok({"message": message, "worldbook": self._worldbook_summary(data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新关系节点失败: {exc}", exc_info=True)
             return self._error(str(exc))
@@ -718,10 +735,19 @@ class PrivateCompanionPageApi:
                     groups = {}
                     self.plugin.data["worldbook_group_profiles"] = groups
                 if payload.get("delete"):
-                    groups.pop(group_id, None)
+                    deleted = self.plugin.data.setdefault("worldbook_deleted_group_ids", [])
+                    if not isinstance(deleted, list):
+                        deleted = []
+                        self.plugin.data["worldbook_deleted_group_ids"] = deleted
+                    if group_id not in deleted:
+                        deleted.append(group_id)
+                    changed = groups.pop(group_id, None) is not None
                     self.plugin._save_data_sync()
                     data = deepcopy(self.plugin.data)
-                    return self._ok({"worldbook": self._worldbook_summary(data)})
+                    return self._ok({"changed": changed, "message": "已删除群资料", "worldbook": self._worldbook_summary(data)})
+                deleted = self.plugin.data.setdefault("worldbook_deleted_group_ids", [])
+                if isinstance(deleted, list) and group_id in deleted:
+                    self.plugin.data["worldbook_deleted_group_ids"] = [item for item in deleted if str(item) != group_id]
                 group = groups.get(group_id)
                 if not isinstance(group, dict):
                     group = {
@@ -746,7 +772,7 @@ class PrivateCompanionPageApi:
                 group["manual_edit_ts"] = time.time()
                 self.plugin._save_data_sync()
                 data = deepcopy(self.plugin.data)
-            return self._ok({"worldbook": self._worldbook_summary(data)})
+            return self._ok({"message": "已保存群资料", "worldbook": self._worldbook_summary(data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新群资料失败: {exc}", exc_info=True)
             return self._error(str(exc))
@@ -916,6 +942,7 @@ class PrivateCompanionPageApi:
             "enable_group_context_injection",
             "enable_group_scene_awareness",
             "enable_group_interjection",
+            "enable_group_repeat_follow",
             "enable_group_topic_threads",
             "enable_group_episode_memory",
             "enable_group_interjection_feedback",
@@ -927,6 +954,8 @@ class PrivateCompanionPageApi:
             "enable_livingmemory_integration",
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
+            "enable_qzone_integration",
+            "enable_qzone_life_publish",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
@@ -1077,8 +1106,14 @@ class PrivateCompanionPageApi:
             "idle_minutes",
             "min_interval_minutes",
             "max_daily_messages",
+            "enable_group_repeat_follow",
             "group_interject_min_interval_minutes",
             "group_interject_max_daily",
+            "group_repeat_follow_probability",
+            "group_repeat_interrupt_probability",
+            "group_repeat_interrupt_probability_step",
+            "group_repeat_interrupt_text",
+            "group_repeat_interrupt_image_path",
             "group_scene_recent_limit",
             "max_group_recent_messages",
             "max_group_slang_terms",
@@ -1093,9 +1128,16 @@ class PrivateCompanionPageApi:
             "bilibili_boredom_min_interval_hours",
             "bilibili_share_probability",
             "bilibili_share_min_score",
+            "enable_qzone_integration",
+            "enable_qzone_life_publish",
+            "qzone_life_publish_min_interval_hours",
+            "qzone_life_publish_probability",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
+            "enable_unanswered_screen_peek_followup",
+            "unanswered_screen_peek_after_minutes",
+            "unanswered_screen_peek_cooldown_minutes",
             "private_reading_min_interval_hours",
             "private_reading_max_photo_count",
             "private_reading_share_probability",
@@ -1131,6 +1173,9 @@ class PrivateCompanionPageApi:
                 "private_reading_share_probability": getattr(self.plugin, "jm_cosmos_share_probability", 0.18),
                 "private_reading_ask_probability": getattr(self.plugin, "private_reading_ask_probability", 0.16),
                 "private_reading_default_keywords": getattr(self.plugin, "jm_cosmos_default_keywords", ""),
+                "group_repeat_follow_probability": int(round(float(getattr(self.plugin, "group_repeat_follow_probability", 0.18) or 0) * 100)),
+                "group_repeat_interrupt_probability": int(round(float(getattr(self.plugin, "group_repeat_interrupt_probability", 0.10) or 0) * 100)),
+                "group_repeat_interrupt_probability_step": int(round(float(getattr(self.plugin, "group_repeat_interrupt_probability_step", 0.12) or 0) * 100)),
             }
         )
         return values
@@ -1373,9 +1418,7 @@ class PrivateCompanionPageApi:
         }
 
     def _apply_config_value(self, key: str, value: Any) -> None:
-        config = getattr(self.plugin, "config", None)
-        if isinstance(config, dict):
-            config[key] = value
+        self._set_config_value(key, value)
         attr_map = {
             "LLM_PROVIDER_ID": "llm_provider_id",
             "MAI_STYLE_PROVIDER_ID": "mai_style_provider_id",
@@ -1425,11 +1468,43 @@ class PrivateCompanionPageApi:
         if key in private_reading_attr_map:
             setattr(self.plugin, private_reading_attr_map[key], value)
             return
+        if key in {"group_repeat_follow_probability", "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step"}:
+            setattr(self.plugin, key, max(0.0, min(1.0, float(value or 0))))
+            return
         if key in self._allowed_feature_keys():
             setattr(self.plugin, key, bool(value))
             return
         if key in self._allowed_setting_keys():
             setattr(self.plugin, key, value)
+
+    def _set_config_value(self, key: str, value: Any) -> None:
+        config = getattr(self.plugin, "config", None)
+        if config is None:
+            return
+        try:
+            config[key] = value
+            return
+        except Exception:
+            pass
+        setter = getattr(config, "set", None)
+        if callable(setter):
+            try:
+                setter(key, value)
+                return
+            except Exception:
+                pass
+        data = getattr(config, "data", None)
+        if isinstance(data, dict):
+            data[key] = value
+            return
+        raw = getattr(config, "config", None)
+        if isinstance(raw, dict):
+            raw[key] = value
+            return
+        try:
+            setattr(config, key, value)
+        except Exception:
+            logger.debug("[PrivateCompanionPage] 配置字段写入失败: %s", key)
 
     def _config_get(self, key: str) -> str:
         config = getattr(self.plugin, "config", None)
@@ -1470,6 +1545,7 @@ class PrivateCompanionPageApi:
             "enable_group_member_profiles",
             "enable_group_context_injection",
             "enable_group_interjection",
+            "enable_group_repeat_follow",
             "enable_group_topic_threads",
             "enable_group_episode_memory",
             "enable_group_interjection_feedback",
@@ -1482,6 +1558,8 @@ class PrivateCompanionPageApi:
             "enable_livingmemory_integration",
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
+            "enable_qzone_integration",
+            "enable_qzone_life_publish",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
@@ -1537,8 +1615,14 @@ class PrivateCompanionPageApi:
             "idle_minutes",
             "min_interval_minutes",
             "max_daily_messages",
+            "enable_group_repeat_follow",
             "group_interject_min_interval_minutes",
             "group_interject_max_daily",
+            "group_repeat_follow_probability",
+            "group_repeat_interrupt_probability",
+            "group_repeat_interrupt_probability_step",
+            "group_repeat_interrupt_text",
+            "group_repeat_interrupt_image_path",
             "group_scene_recent_limit",
             "max_group_recent_messages",
             "max_group_slang_terms",
@@ -1553,6 +1637,10 @@ class PrivateCompanionPageApi:
             "bilibili_boredom_min_interval_hours",
             "bilibili_share_probability",
             "bilibili_share_min_score",
+            "enable_qzone_integration",
+            "enable_qzone_life_publish",
+            "qzone_life_publish_min_interval_hours",
+            "qzone_life_publish_probability",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
@@ -1561,6 +1649,9 @@ class PrivateCompanionPageApi:
             "private_reading_share_probability",
             "private_reading_ask_probability",
             "private_reading_default_keywords",
+            "enable_unanswered_screen_peek_followup",
+            "unanswered_screen_peek_after_minutes",
+            "unanswered_screen_peek_cooldown_minutes",
             "enable_creative_writing",
             "creative_inspiration_probability",
             "creative_share_probability",
@@ -1607,6 +1698,7 @@ class PrivateCompanionPageApi:
             "max_dialogue_episodes",
             "bilibili_boredom_min_interval_hours",
             "bilibili_share_min_score",
+            "qzone_life_publish_min_interval_hours",
             "private_reading_min_interval_hours",
             "private_reading_max_photo_count",
             "unanswered_screen_peek_after_minutes",
@@ -1621,7 +1713,18 @@ class PrivateCompanionPageApi:
             except (TypeError, ValueError):
                 return 0
         if key in {
+            "group_repeat_follow_probability",
+            "group_repeat_interrupt_probability",
+            "group_repeat_interrupt_probability_step",
+        }:
+            try:
+                raw = float(value)
+                return max(0.0, min(1.0, raw / 100.0 if raw > 1 else raw))
+            except (TypeError, ValueError):
+                return 0.0
+        if key in {
             "bilibili_share_probability",
+            "qzone_life_publish_probability",
             "private_reading_share_probability",
             "private_reading_ask_probability",
             "creative_inspiration_probability",
@@ -1634,6 +1737,8 @@ class PrivateCompanionPageApi:
         if key in {
             "enable_bilibili_integration",
             "enable_bilibili_boredom_watch",
+            "enable_qzone_integration",
+            "enable_qzone_life_publish",
             "enable_private_reading_integration",
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
@@ -1648,6 +1753,7 @@ class PrivateCompanionPageApi:
             "enable_almanac_perception",
             "enable_worldbook_member_recognition",
             "enable_group_scene_awareness",
+            "enable_group_repeat_follow",
             "worldbook_auto_import",
             "worldbook_member_match_aliases",
             "worldbook_self_registration",
@@ -1786,6 +1892,21 @@ class PrivateCompanionPageApi:
             "latest_video": latest if isinstance(latest, dict) else {},
         }
 
+    def _qzone_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        state = data.get("qzone_integration") if isinstance(data.get("qzone_integration"), dict) else {}
+        try:
+            available = bool(getattr(self.plugin, "_qzone_available", lambda: False)())
+        except Exception:
+            available = False
+        return {
+            "enabled": bool(getattr(self.plugin, "enable_qzone_integration", False)),
+            "life_publish_enabled": bool(getattr(self.plugin, "enable_qzone_life_publish", False)),
+            "available": available,
+            "last_life_publish_at": self.plugin._format_timestamp_elapsed(state.get("last_life_publish_at", 0)),
+            "last_status": state.get("last_life_publish_status", ""),
+            "last_text": state.get("last_life_publish_text", ""),
+        }
+
     def _jm_cosmos_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         state = data.get("jm_cosmos_integration") if isinstance(data.get("jm_cosmos_integration"), dict) else {}
         try:
@@ -1868,6 +1989,7 @@ class PrivateCompanionPageApi:
                     "intro": self._single_line(item.get("premise"), 240) or "这本书还没整理出简介。",
                     "status": status,
                     "tone": self._single_line(item.get("tone"), 40),
+                    "point_of_view": self._single_line(item.get("point_of_view"), 40) or "第三人称有限视角",
                     "progress": progress,
                     "content": full_text or self._single_line(chunks[-1].get("text") if chunks else "", 2000) or "这本书还没有正文。",
                     "created": self.plugin._format_timestamp_elapsed(item.get("created_at", 0)),
@@ -2039,6 +2161,7 @@ class PrivateCompanionPageApi:
                     "title": self._single_line(item.get("title"), 60),
                     "premise": self._single_line(item.get("premise"), 160),
                     "tone": self._single_line(item.get("tone"), 40),
+                    "point_of_view": self._single_line(item.get("point_of_view"), 40) or "第三人称有限视角",
                     "source": self._single_line(item.get("source_text"), 160),
                     "status": self._single_line(item.get("status"), 24),
                     "current_chars": self._int(item.get("current_chars")),
