@@ -296,7 +296,7 @@ class _CapturedSendMessageCall:
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "2.8.0",
+    "2.8.1",
 )
 class PrivateCompanionPlugin(Star):
     @staticmethod
@@ -416,9 +416,9 @@ class PrivateCompanionPlugin(Star):
         self.segmented_proactive_scope = self._cfg_str(c, "segmented_proactive_scope", "proactive_only", "proactive_only")
         if self.segmented_proactive_scope not in {"proactive_only", "all_llm"}:
             self.segmented_proactive_scope = "proactive_only"
-        self.segmented_proactive_threshold = self._cfg_int(c, "segmented_proactive_threshold", 120, 20, 500)
+        self.segmented_proactive_threshold = self._cfg_int(c, "segmented_proactive_threshold", 500, 20, 500)
         self.segmented_proactive_min_segment_chars = self._cfg_int(c, "segmented_proactive_min_segment_chars", 8, 1, 40)
-        self.segmented_proactive_max_segments = self._cfg_int(c, "segmented_proactive_max_segments", 2, 1, 8)
+        self.segmented_proactive_max_segments = self._cfg_int(c, "segmented_proactive_max_segments", 3, 1, 8)
         self.segmented_proactive_split_mode = self._cfg_str(c, "segmented_proactive_split_mode", "regex", "regex")
         if self.segmented_proactive_split_mode not in {"regex", "words"}:
             self.segmented_proactive_split_mode = "regex"
@@ -558,6 +558,7 @@ class PrivateCompanionPlugin(Star):
         self.forward_message_image_limit = self._cfg_int(c, "forward_message_image_limit", 4, 0, 12)
         self.enable_group_scene_awareness = self._cfg_bool(c, "enable_group_scene_awareness", True)
         self.group_scene_recent_limit = self._cfg_int(c, "group_scene_recent_limit", 5, 2, 12)
+        self.enable_group_reality_promise_guard = self._cfg_bool(c, "enable_group_reality_promise_guard", True)
         self.enable_group_wakeup_enhancement = self._cfg_bool(c, "enable_group_wakeup_enhancement", True)
         self.group_wakeup_direct_words = self._parse_text_list_config(c.get("group_wakeup_direct_words", []))
         self.group_wakeup_context_words = self._parse_text_list_config(
@@ -1571,18 +1572,15 @@ class PrivateCompanionPlugin(Star):
     def _group_message_addresses_bot(self, event: AstrMessageEvent, text: str) -> bool:
         if getattr(event, "is_at_or_wake_command", False) or getattr(event, "is_wake", False):
             return True
+        signals = self._event_scene_signals(event)
+        at_targets = signals.get("at_targets") if isinstance(signals.get("at_targets"), list) else []
+        if any(isinstance(item, dict) and item.get("is_bot") for item in at_targets):
+            return True
+        if any(isinstance(item, dict) and str(item.get("user_id") or "").strip() and not item.get("is_bot") for item in at_targets):
+            return False
         cleaned = str(text or "")
         if self.bot_name and self.bot_name in cleaned:
             return True
-        if re.search(r"(^|\s)@\S+", cleaned):
-            return True
-        message_obj = getattr(event, "message_obj", None)
-        chain = getattr(message_obj, "message", None) if message_obj is not None else None
-        if isinstance(chain, list):
-            for item in chain:
-                type_name = item.__class__.__name__.lower()
-                if "at" in type_name or hasattr(item, "qq") or hasattr(item, "target"):
-                    return True
         return False
 
     def _group_message_explicitly_ats_bot(self, event: AstrMessageEvent) -> bool:
@@ -1780,7 +1778,8 @@ class PrivateCompanionPlugin(Star):
             return {}
         now = _now_ts()
         first_ts = _safe_float(buffer.get("first_ts"), 0.0, 0.0)
-        if first_ts <= 0 or now - first_ts > wait + 0.8:
+        updated_ts = _safe_float(buffer.get("updated_ts"), first_ts, first_ts)
+        if first_ts <= 0 or now - updated_ts > wait + 0.8:
             return {}
         messages = buffer.get("messages") if isinstance(buffer.get("messages"), list) else []
         texts = []
@@ -1792,8 +1791,8 @@ class PrivateCompanionPlugin(Star):
         return {
             "active": True,
             "first_ts": first_ts,
-            "updated_ts": _safe_float(buffer.get("updated_ts"), first_ts, first_ts),
-            "remaining": max(0.0, first_ts + wait - now),
+            "updated_ts": updated_ts,
+            "remaining": max(0.0, updated_ts + wait - now),
             "texts": texts,
         }
 
@@ -1812,10 +1811,10 @@ class PrivateCompanionPlugin(Star):
             buffers = {}
             self._semantic_message_buffers = buffers
         for item_key, item in list(buffers.items()):
-            if not isinstance(item, dict) or now - _safe_float(item.get("first_ts"), 0) > max(20.0, wait + 8.0):
+            if not isinstance(item, dict) or now - _safe_float(item.get("updated_ts"), item.get("first_ts"), 0) > max(20.0, wait + 8.0):
                 buffers.pop(item_key, None)
         current = buffers.get(key)
-        if isinstance(current, dict) and now - _safe_float(current.get("first_ts"), 0) <= wait + 0.8:
+        if isinstance(current, dict) and now - _safe_float(current.get("updated_ts"), current.get("first_ts"), 0) <= wait + 0.8:
             messages = current.setdefault("messages", [])
             if not isinstance(messages, list):
                 messages = []
@@ -2073,10 +2072,20 @@ class PrivateCompanionPlugin(Star):
         buffer = buffers.get(key)
         if not isinstance(buffer, dict):
             return ""
-        first_ts = _safe_float(buffer.get("first_ts"), _now_ts())
-        remaining = max(0.0, first_ts + wait - _now_ts())
-        if remaining > 0:
-            await asyncio.sleep(remaining)
+        deadline_guard = _now_ts() + max(wait + 2.0, min(30.0, wait * 3.0 + 2.0))
+        while True:
+            buffer = buffers.get(key)
+            if not isinstance(buffer, dict):
+                return ""
+            updated_ts = _safe_float(buffer.get("updated_ts"), buffer.get("first_ts"), _now_ts())
+            remaining = max(0.0, updated_ts + wait - _now_ts())
+            if remaining <= 0:
+                break
+            if _now_ts() + remaining > deadline_guard:
+                remaining = max(0.0, deadline_guard - _now_ts())
+                if remaining <= 0:
+                    break
+            await asyncio.sleep(min(remaining, 1.0))
         buffer = buffers.pop(key, None)
         if not isinstance(buffer, dict):
             return ""
@@ -2110,7 +2119,7 @@ class PrivateCompanionPlugin(Star):
         buffer = buffers.get(key)
         if not isinstance(buffer, dict):
             return {}
-        if _now_ts() - _safe_float(buffer.get("first_ts"), 0) > max(30.0, float(getattr(self, "semantic_message_debounce_seconds", 8.0) or 8.0) + 30.0):
+        if _now_ts() - _safe_float(buffer.get("updated_ts"), buffer.get("first_ts"), 0) > max(30.0, float(getattr(self, "semantic_message_debounce_seconds", 8.0) or 8.0) + 30.0):
             return {}
         images = buffer.pop("images", [])
         return {
@@ -3221,6 +3230,8 @@ class PrivateCompanionPlugin(Star):
         if not cleaned:
             return {}
         if str(scene.get("talking_to") or "") == "bot":
+            return {}
+        if str(scene.get("trigger") or "") in {"at_other", "reply_other", "at_all"}:
             return {}
         now = _now_ts()
         direct_words = self._configured_group_direct_wakeup_words()
@@ -16252,24 +16263,25 @@ Bot 主动后用户回复次数：{reply_count}
             flush()
             return chunks
 
-        def _protect_segmented_urls(value: str) -> tuple[str, dict[str, str]]:
-            url_pattern = re.compile(r"(?i)\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+        def _protect_segmented_literals(value: str) -> tuple[str, dict[str, str]]:
             replacements: dict[str, str] = {}
+            protected_parts: list[str] = []
+            for chunk, protected in _protected_cleanup_chunks(str(value or "")):
+                if not protected:
+                    protected_parts.append(chunk)
+                    continue
+                token = f"PCSEGTOKEN{len(replacements)}X"
+                replacements[token] = chunk
+                protected_parts.append(token)
+            return "".join(protected_parts), replacements
 
-            def repl(match: re.Match[str]) -> str:
-                token = f"PCURLTOKEN{len(replacements)}X"
-                replacements[token] = match.group(0)
-                return token
-
-            return url_pattern.sub(repl, str(value or "")), replacements
-
-        def _restore_segmented_urls(value: str, replacements: dict[str, str]) -> str:
+        def _restore_segmented_literals(value: str, replacements: dict[str, str]) -> str:
             restored = str(value or "")
             for token, original in replacements.items():
                 restored = restored.replace(token, original)
             return restored
 
-        protected_normalized, protected_urls = _protect_segmented_urls(normalized)
+        protected_normalized, protected_literals = _protect_segmented_literals(normalized)
 
         def _clean_segment(segment: str) -> str:
             original = str(segment or "")
@@ -16363,7 +16375,7 @@ Bot 主动后用户回复次数：{reply_count}
                 else:
                     merged.append(current)
                 index += 1
-            max_segments = max(1, _safe_int(getattr(self, "segmented_proactive_max_segments", 2), 2, 1))
+            max_segments = max(1, _safe_int(getattr(self, "segmented_proactive_max_segments", 3), 3, 1))
             if len(merged) > max_segments:
                 kept = merged[: max_segments - 1]
                 tail = merged[max_segments - 1]
@@ -16384,7 +16396,7 @@ Bot 主动后用户回复次数：{reply_count}
                 content = segment[0] if isinstance(segment, tuple) else segment
                 if not isinstance(content, str):
                     continue
-                cleaned = _restore_segmented_urls(_clean_segment(content), protected_urls)
+                cleaned = _restore_segmented_literals(_clean_segment(content), protected_literals)
                 if cleaned:
                     segments.append(cleaned)
             segments = _merge_segments(segments)
@@ -16405,7 +16417,7 @@ Bot 主动后用户回复次数：{reply_count}
             content = segment[0] if isinstance(segment, tuple) else segment
             if not isinstance(content, str):
                 continue
-            cleaned = _restore_segmented_urls(_clean_segment(content), protected_urls)
+            cleaned = _restore_segmented_literals(_clean_segment(content), protected_literals)
             if cleaned:
                 segments.append(cleaned)
         segments = _merge_segments(segments)
@@ -23822,6 +23834,19 @@ Bot 主动后用户回复次数：{reply_count}
         if environment_injection:
             req.system_prompt = f"{current_prompt}\n\n{marker}\n{environment_injection}".strip()
 
+    async def _append_capability_boundary_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        marker = "<!-- private_companion_capability_boundary_v1 -->"
+        current_prompt = req.system_prompt or ""
+        if marker in current_prompt:
+            return
+        boundary = (
+            "【能力边界】\n"
+            "你不能假装自己能影响现实、网络、游戏房间、他人设备或用户身体动作。"
+            "没有可用工具且没有实际执行结果时,不要承诺“我这就拉你/我帮你操作/我已经处理/我去修/我给你弄好”。"
+            "遇到拉人、开房间、修网、重启、登录、下载、现实代办等请求,只能自然说明自己做不到实际操作,可以提醒、陪用户确认、建议对方找能操作的人,或在确有工具时调用工具后再描述结果。"
+        )
+        req.system_prompt = f"{current_prompt}\n\n{marker}\n{boundary}".strip()
+
     async def _append_conditional_tool_instructions_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         message_text = str(getattr(event, "message_str", "") or "")
         current_prompt = req.system_prompt or ""
@@ -24231,6 +24256,8 @@ Bot 主动后用户回复次数：{reply_count}
                         pass
         await self._append_forward_message_context_to_request(event, req)
         is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
+        if not is_private_chat and self.enable_group_reality_promise_guard:
+            await self._append_capability_boundary_to_request(event, req)
         if not is_private_chat:
             await self._mark_group_conversation_from_llm_request(event)
         if not self.inject_passive_states:

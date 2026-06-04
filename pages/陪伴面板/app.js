@@ -124,6 +124,7 @@ const featureMeta = {
   enable_group_context_injection: ["群上下文注入", "在群聊回复时加入群氛围、话题和成员信息。"],
   enable_forward_message_adaptation: ["合并消息阅读", "读取合并转发节点并整理成自然聊天记录，让 Bot 能理解转发里的发言顺序、人物和话题。"],
   enable_group_scene_awareness: ["群聊场景感知", "推断当前消息是在对 Bot、某个群友还是整个群说话，减少误以为别人都在问自己。"],
+  enable_group_reality_promise_guard: ["阻止群聊现实承诺", "群聊里避免承诺自己能拉人、修网、开房间或操作现实设备；私聊扮演不受影响。"],
   enable_group_wakeup_enhancement: ["群聊唤醒强化", "通过强唤醒词、弱相关唤醒词和兴趣关键词，让 Bot 在群里被自然叫到或碰到感兴趣话题时进入回复链。"],
   enable_group_conversation_followup: ["连续对话保持", "群里叫过 Bot 后，短时间内判断同一用户没继续 @ 的话是否仍在对 Bot 说。"],
   enable_group_interjection: ["群主动插话", "允许 Bot 在群聊里主动插一句。谨慎开启。"],
@@ -200,6 +201,7 @@ const featureGroups = [
       "enable_group_context_injection",
       "enable_forward_message_adaptation",
       "enable_group_scene_awareness",
+      "enable_group_reality_promise_guard",
       "enable_group_wakeup_enhancement",
       "enable_group_conversation_followup",
       "enable_group_slang_learning",
@@ -430,7 +432,7 @@ const configDescriptions = {
   segmented_proactive_threshold: "主动文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
   segmented_proactive_scope: "插件主动只影响插件主动消息；全部 LLM 回复会额外拆普通模型纯文本回复，图片、语音、AT 或工具转述等复杂消息不会拆。",
   segmented_proactive_min_segment_chars: "分段后短于或等于该字数的片段会并入相邻消息，避免“哈哈”“我也觉得”这类附和语单独发出。",
-  segmented_proactive_max_segments: "一次主动消息最多拆成几条。建议 2，过高会显得刷屏。",
+  segmented_proactive_max_segments: "一次主动消息最多拆成几条。默认 3，过高会显得刷屏。",
   segmented_proactive_split_mode: "regex 使用正则切句；words 使用分段词列表，更适合清理句号、空格等固定分隔符。网址会自动保护，不会被按点号或斜杠拆开。",
   segmented_proactive_regex: "分段模式为 regex 时使用的切分正则。",
   segmented_proactive_split_words: "分段模式为 words 时使用的分段词。可用换行、逗号或顿号分隔；命中网址内部字符时会自动跳过。",
@@ -451,6 +453,7 @@ const configDescriptions = {
   group_repeat_interrupt_text: "选择文本打断时发送的句子，例如“禁止复读”。",
   group_repeat_interrupt_image_path: "表情包路径。填写后可用图片代替打断文本。",
   group_scene_recent_limit: "判断群聊场景时参考最近多少条群消息。",
+  enable_group_reality_promise_guard: "仅群聊生效。开启后 Bot 不会承诺自己能拉人、修网、开房间、登录或操作现实设备；私聊扮演不受影响。",
   group_wakeup_direct_words: "消息中出现即唤醒 Bot。适合填写 Bot 名字、昵称、固定称呼。多个词可用换行、逗号或顿号分隔。",
   group_wakeup_context_words: "与 Bot 身份、称呼或设定弱相关的关键词。命中后不会直接回复，而是先结合群聊上下文、关系网和句式判断是否适合自然接话。适合填写“机器人”“bot”、外号、作品名、设定称呼或常被拿来指代 Bot 的梗；不适合填“你怎么看”“问问你”这类泛请求句。",
   group_wakeup_interest_keywords: "手动补充 Bot 感兴趣的话题关键词。命中后按概率唤醒，不会每次都抢话。",
@@ -3070,7 +3073,7 @@ function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readin
           ${spread.map((page, spreadIndex) => {
             const comment = String(page.comment || "").trim();
             const note = comment
-              ? `<aside class="manga-page-note ${spreadIndex === 0 ? "left" : "right"}"><span>Bot 批注</span><p>${escapeHtml(comment)}</p></aside>`
+              ? `<details class="manga-page-note ${spreadIndex === 0 ? "left" : "right"}"><summary>Bot 批注</summary><p>${escapeHtml(comment)}</p></details>`
               : "";
             return `
             <figure class="manga-page ${comment ? `has-note ${spreadIndex === 0 ? "note-left" : "note-right"}` : ""}">
@@ -3842,8 +3845,8 @@ function resetNewsSourcesToDefault() {
 }
 
 const segmentedPreviewExamples = {
-  simple: "嗯……晚安，做个好梦。\n我也觉得今天的云超像棉花糖。",
-  complex: "哈哈，我也觉得。\n今天的云超像棉花糖。你刚才说“句号。不要被清理掉”，我记住啦。\n链接也不能被拆：https://www.bilibili.com/video/BV1n77f6mE9m/\n还有（这里面的句号。应该保留），所以我准备先去睡一会儿……醒了再继续跟你说。",
+  simple: "我刚才趴在窗边看了一会儿雨，玻璃上全是细细的水线。\n忽然想起你说今天会很忙，所以来轻轻报个到。",
+  complex: "刚刷到一条有意思的 AI 早报，里面提到“模型更新。成本下降。工具链变多”这几件事。\n我把文字版链接先夹在这里：https://www.bilibili.com/video/BV1n77f6mE9m/\n还有（括号里的句号。和补充说明。都应该被完整保留），所以我想晚点整理成几句自己的想法再跟你说。",
 };
 
 function decodeSegmentedWordToken(value) {
@@ -3937,12 +3940,13 @@ function segmentedProtectedCleanupChunks(value) {
 
 function protectSegmentedUrls(value) {
   const replacements = {};
-  const protectedText = String(value || "").replace(/\b(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/gi, (match) => {
-    const token = `PCURLTOKEN${Object.keys(replacements).length}X`;
-    replacements[token] = match;
+  const parts = segmentedProtectedCleanupChunks(value).map(([chunk, protectedChunk]) => {
+    if (!protectedChunk) return chunk;
+    const token = `PCSEGTOKEN${Object.keys(replacements).length}X`;
+    replacements[token] = chunk;
     return token;
   });
-  return [protectedText, replacements];
+  return [parts.join(""), replacements];
 }
 
 function restoreSegmentedUrls(value, replacements) {
@@ -4024,7 +4028,7 @@ function simulateSegmentedProactive(text, values) {
   if (!values.enable_segmented_proactive_reply) {
     return { segments: [normalized], status: "主动分段未开启，真实发送会保持一整条。" };
   }
-  const threshold = Math.max(20, Number(values.segmented_proactive_threshold || 120));
+  const threshold = Math.max(20, Number(values.segmented_proactive_threshold || 500));
   if (normalized.length > threshold) {
     return { segments: [normalized], status: `文本长度 ${normalized.length} 超过阈值 ${threshold}，真实发送不会分段。` };
   }
@@ -4032,7 +4036,7 @@ function simulateSegmentedProactive(text, values) {
   const scope = String(values.segmented_proactive_scope || "proactive_only");
   const cleanupEnabled = Boolean(values.enable_segmented_proactive_content_cleanup);
   const minChars = Math.max(1, Number(values.segmented_proactive_min_segment_chars || 8));
-  const maxSegments = Math.max(1, Number(values.segmented_proactive_max_segments || 2));
+  const maxSegments = Math.max(1, Number(values.segmented_proactive_max_segments || 3));
   const cleanupWords = parseSegmentedWordList(values.segmented_proactive_content_cleanup_words);
   const [protectedNormalized, protectedUrls] = protectSegmentedUrls(normalized);
   let cleanupRegex = null;
@@ -4721,6 +4725,12 @@ const featureDetailGuides = {
     trigger: "群聊消息进入回复或唤醒判断前。",
     enabled: "减少 Bot 抢话，也能识别该接话的无 @ 场景。",
     disabled: "群聊指向判断更依赖硬规则。",
+  },
+  enable_group_reality_promise_guard: {
+    summary: "限制群聊回复里的现实执行承诺，避免 Bot 说自己能实际拉人、修网、开房间或操作设备。",
+    trigger: "群聊 LLM 回复生成前。",
+    enabled: "Bot 会把现实执行请求改成提醒、建议或说明做不到实际操作。",
+    disabled: "群聊也按人格自由扮演，不额外限制现实承诺。",
   },
   enable_group_wakeup_enhancement: {
     summary: "扩展群聊唤醒方式：强唤醒词直接叫到 Bot，弱相关词先判断语境，兴趣词按概率接话。",

@@ -3376,6 +3376,7 @@ input[type="search"] {
 }
 
 .manga-page {
+  position: relative;
   display: grid;
   gap: 8px;
   min-width: 0;
@@ -3387,12 +3388,11 @@ input[type="search"] {
 }
 
 .manga-page.has-note {
-  grid-template-columns: minmax(92px, 0.22fr) minmax(0, 1fr);
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .manga-page.has-note.note-right {
-  grid-template-columns: minmax(0, 1fr) minmax(92px, 0.22fr);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .manga-page-image {
@@ -3411,27 +3411,65 @@ input[type="search"] {
 }
 
 .manga-page-note {
-  position: sticky;
-  top: 86px;
+  position: absolute;
+  z-index: 3;
+  top: 18px;
   border: 1px solid rgba(93, 62, 39, 0.18);
   border-radius: 8px;
-  padding: 9px;
-  background: #fff8df;
+  max-width: min(260px, 48%);
+  background: rgba(255, 248, 223, 0.96);
   color: #4b3020;
   box-shadow: 0 10px 22px rgba(93, 62, 39, 0.1);
+  overflow: hidden;
+  backdrop-filter: blur(8px);
 }
 
-.manga-page-note span {
+.manga-page-note.left {
+  left: 18px;
+}
+
+.manga-page-note.right {
+  right: 18px;
+}
+
+.manga-page-note summary {
   display: block;
-  margin-bottom: 5px;
+  padding: 7px 10px;
   color: #8a5f2d;
+  cursor: pointer;
   font-size: 11px;
+  font-weight: 700;
+  list-style: none;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.manga-page-note summary::-webkit-details-marker {
+  display: none;
+}
+
+.manga-page-note summary::after {
+  content: "展开";
+  margin-left: 8px;
+  color: rgba(75, 48, 32, 0.48);
+  font-weight: 500;
+}
+
+.manga-page-note[open] summary {
+  border-bottom: 1px solid rgba(93, 62, 39, 0.12);
+}
+
+.manga-page-note[open] summary::after {
+  content: "收起";
 }
 
 .manga-page-note p {
   margin: 0;
+  padding: 9px 10px 10px;
   font-size: 12px;
   line-height: 1.55;
+  max-height: min(34vh, 220px);
+  overflow: auto;
 }
 
 .manga-page figcaption {
@@ -6220,6 +6258,8 @@ pre {
 
   .manga-page-note {
     position: static;
+    max-width: none;
+    width: 100%;
   }
 
   .group-topic-card,

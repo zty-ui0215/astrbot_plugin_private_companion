@@ -348,7 +348,7 @@
       "max": 600,
       "step": 5
     },
-    "default": 120,
+    "default": 500,
     "condition": "enable_group_conversation_followup"
   },
   "group_conversation_followup_max_turns": {
@@ -1449,6 +1449,15 @@
     "default": 5,
     "condition": {
       "enable_group_scene_awareness": true
+    }
+  },
+  "enable_group_reality_promise_guard": {
+    "description": "阻止群聊现实承诺",
+    "type": "bool",
+    "hint": "仅影响群聊。开启后，Bot 不会在群聊里承诺自己能拉人、修网、操作设备、开房间或处理现实事务；只能说明做不到实际操作、给提醒或建议。私聊扮演不受此开关限制。",
+    "default": true,
+    "condition": {
+      "enable_group_companion": true
     }
   },
   "enable_group_wakeup_enhancement": {
@@ -2602,7 +2611,7 @@
       "max": 1024,
       "step": 2
     },
-    "default": 120,
+    "default": 500,
     "condition": {
       "enable_segmented_proactive_reply": true
     }
@@ -2624,13 +2633,13 @@
   "segmented_proactive_max_segments": {
     "description": "主动最多分段数",
     "type": "int",
-    "hint": "单条主动文本最多拆成几条消息。默认 2，防止一条短主动被拆成刷屏。",
+    "hint": "单条主动文本最多拆成几条消息。默认 3，防止一条主动被拆成刷屏。",
     "slider": {
       "min": 1,
       "max": 8,
       "step": 1
     },
-    "default": 2,
+    "default": 3,
     "condition": {
       "enable_segmented_proactive_reply": true
     }

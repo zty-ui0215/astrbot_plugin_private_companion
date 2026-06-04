@@ -1450,6 +1450,7 @@ class PrivateCompanionPageApi:
             "enable_group_context_injection",
             "enable_forward_message_adaptation",
             "enable_group_scene_awareness",
+            "enable_group_reality_promise_guard",
             "enable_group_wakeup_enhancement",
             "enable_semantic_message_debounce",
             "enable_group_conversation_followup",
@@ -1664,6 +1665,7 @@ class PrivateCompanionPageApi:
             "group_repeat_interrupt_text",
             "group_repeat_interrupt_image_path",
             "group_scene_recent_limit",
+            "enable_group_reality_promise_guard",
             "group_wakeup_direct_words",
             "group_wakeup_context_words",
             "group_wakeup_interest_keywords",
@@ -2118,12 +2120,18 @@ class PrivateCompanionPageApi:
 
     def _save_config_if_possible(self) -> None:
         config = getattr(self.plugin, "config", None)
-        save = getattr(config, "save_config", None)
-        if callable(save):
-            save()
+        for method_name in ("save_config", "save", "save_conf"):
+            save = getattr(config, method_name, None)
+            if callable(save):
+                try:
+                    save()
+                    return
+                except TypeError:
+                    continue
 
     def _can_save_config(self) -> bool:
-        return callable(getattr(getattr(self.plugin, "config", None), "save_config", None))
+        config = getattr(self.plugin, "config", None)
+        return any(callable(getattr(config, method_name, None)) for method_name in ("save_config", "save", "save_conf"))
 
     @staticmethod
     def _allowed_feature_keys() -> set[str]:
@@ -2156,6 +2164,7 @@ class PrivateCompanionPageApi:
             "enable_group_member_profiles",
             "enable_group_context_injection",
             "enable_forward_message_adaptation",
+            "enable_group_reality_promise_guard",
             "enable_group_wakeup_enhancement",
             "enable_semantic_message_debounce",
             "enable_group_conversation_followup",
@@ -2169,6 +2178,7 @@ class PrivateCompanionPageApi:
             "enable_group_privacy_guard",
             "enable_worldbook_member_recognition",
             "enable_group_scene_awareness",
+            "enable_group_reality_promise_guard",
             "enable_atrelay_tools",
             "enable_livingmemory_integration",
             "enable_bilibili_integration",
@@ -2583,6 +2593,7 @@ class PrivateCompanionPageApi:
             "enable_cycle_state",
             "enable_worldbook_member_recognition",
             "enable_group_scene_awareness",
+            "enable_group_reality_promise_guard",
             "enable_group_wakeup_enhancement",
             "enable_group_repeat_follow",
             "enable_forward_message_adaptation",
