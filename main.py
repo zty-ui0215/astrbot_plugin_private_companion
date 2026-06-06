@@ -6375,6 +6375,7 @@ class PrivateCompanionPlugin(Star):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
                 "Referer": f"https://www.bilibili.com/video/{bvid}",
                 "Accept": "application/json, text/plain, */*",
+                "Accept-Encoding": "gzip, deflate",
             }
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.get(f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}") as resp:
@@ -6396,6 +6397,52 @@ class PrivateCompanionPlugin(Star):
         )
         return [item] if item else await self._fetch_bilibili_news_search_fallback(source)
 
+    async def _probe_bilibili_arc_search(self, mid: str, *, limit: int = 10) -> dict[str, Any]:
+        safe_mid = re.sub(r"\D+", "", str(mid or ""))
+        if not safe_mid:
+            return {"ok": False, "error": "empty_mid"}
+        url = (
+            "https://api.bilibili.com/x/space/arc/search"
+            f"?mid={safe_mid}&pn=1&ps={max(1, min(30, limit))}&order=pubdate&jsonp=jsonp"
+        )
+        probe: dict[str, Any] = {"ok": False, "url": url, "mid": safe_mid}
+        try:
+            import aiohttp
+
+            timeout = aiohttp.ClientTimeout(total=12)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+                "Referer": f"https://space.bilibili.com/{safe_mid}",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Encoding": "gzip, deflate",
+            }
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(url) as resp:
+                    probe["http_status"] = resp.status
+                    payload = await resp.json(content_type=None)
+        except Exception as exc:
+            probe["error"] = _single_line(str(exc), 160)
+            return probe
+        if not isinstance(payload, dict):
+            probe["error"] = "non_json_payload"
+            return probe
+        probe["code"] = payload.get("code")
+        probe["message"] = _single_line(payload.get("message"), 80)
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        vlist = (((data.get("list") or {}) if isinstance(data.get("list"), dict) else {}).get("vlist") or [])
+        if not isinstance(vlist, list):
+            vlist = []
+        probe["vlist_count"] = len(vlist)
+        if vlist and isinstance(vlist[0], dict):
+            first = vlist[0]
+            created = _safe_float(first.get("created"), 0)
+            probe["first_title"] = _single_line(first.get("title"), 140)
+            probe["first_bvid"] = _single_line(first.get("bvid"), 40)
+            probe["first_created_ts"] = created
+            probe["first_created"] = datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M:%S") if created > 0 else ""
+        probe["ok"] = int(payload.get("code") or 0) == 0 and bool(vlist)
+        return probe
+
     async def _fetch_bilibili_news_source(self, source: dict[str, str], *, limit: int | None = None) -> list[dict[str, Any]]:
         mid = re.sub(r"\D+", "", str(source.get("mid") or ""))
         if not mid:
@@ -6410,6 +6457,7 @@ class PrivateCompanionPlugin(Star):
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
                 "Referer": f"https://space.bilibili.com/{mid}",
                 "Accept": "application/json, text/plain, */*",
+                "Accept-Encoding": "gzip, deflate",
             }
             api_urls = [
                 f"https://api.bilibili.com/x/space/arc/search?mid={mid}&pn=1&ps={max(1, min(30, item_limit))}&order=pubdate&jsonp=jsonp",
@@ -7020,11 +7068,56 @@ class PrivateCompanionPlugin(Star):
             "mid": str(getattr(self, "ai_daily_source_uid", "") or "285286947"),
             "url": f"https://space.bilibili.com/{getattr(self, 'ai_daily_source_uid', '285286947')}",
         }
-        items = await self._fetch_bilibili_news_source(
-            source,
+        arc_probe = await self._probe_bilibili_arc_search(
+            str(getattr(self, "ai_daily_source_uid", "") or "285286947"),
             limit=max(10, _safe_int(getattr(self, "news_max_items_per_source", 6), 6, 1)),
         )
-        today_items = [item for item in items if isinstance(item, dict) and self._news_item_is_today(item, today)]
+        ai_state["last_arc_probe"] = arc_probe
+        if arc_probe.get("ok"):
+            ai_state["last_successful_arc_probe"] = arc_probe
+        effective_probe = arc_probe
+        if not arc_probe.get("ok") and _safe_int(arc_probe.get("code"), 0, -99999) == -799:
+            cached_probe = ai_state.get("last_successful_arc_probe") if isinstance(ai_state.get("last_successful_arc_probe"), dict) else {}
+            cached_created = _safe_float(cached_probe.get("first_created_ts"), 0)
+            if cached_created > 0:
+                try:
+                    if datetime.fromtimestamp(cached_created).strftime("%Y-%m-%d") == today:
+                        effective_probe = cached_probe
+                except Exception:
+                    pass
+        items: list[dict[str, Any]] = []
+        today_items: list[dict[str, Any]] = []
+        probe_title = _single_line(effective_probe.get("first_title") if isinstance(effective_probe, dict) else "", 160)
+        probe_bvid = _single_line(effective_probe.get("first_bvid") if isinstance(effective_probe, dict) else "", 40)
+        probe_created = _safe_float(effective_probe.get("first_created_ts") if isinstance(effective_probe, dict) else 0, 0)
+        if probe_title and probe_bvid and probe_created > 0:
+            probe_items = await self._fetch_bilibili_video_news_source(
+                {
+                    "name": "B站 AI早报",
+                    "type": "bilibili_video",
+                    "bvid": probe_bvid,
+                    "url": f"https://www.bilibili.com/video/{probe_bvid}",
+                }
+            )
+            probe_item = next((item for item in probe_items if isinstance(item, dict) and self._news_item_is_today(item, today)), {})
+            if not probe_item:
+                probe_item = await self._bilibili_news_item_from_video(
+                    source_name="B站 AI早报",
+                    title=probe_title,
+                    desc="",
+                    bvid=probe_bvid,
+                    created=probe_created,
+                )
+            if probe_item and self._news_item_is_today(probe_item, today):
+                probe_item["bilibili_integration_source"] = "arc_probe"
+                items.append(probe_item)
+                today_items = [probe_item]
+        if not today_items and _safe_int(arc_probe.get("code"), 0, -99999) != -799:
+            items = await self._fetch_bilibili_news_source(
+                source,
+                limit=max(10, _safe_int(getattr(self, "news_max_items_per_source", 6), 6, 1)),
+            )
+            today_items = [item for item in items if isinstance(item, dict) and self._news_item_is_today(item, today)]
         if not today_items:
             fallback_items = await self._fetch_bilibili_news_search_fallback(source)
             if fallback_items:
@@ -14321,6 +14414,24 @@ Bot 主动后用户回复次数：{reply_count}
             lines.append(f"- 文字版/链接：{text_link}")
         if candidate_count:
             lines.append(f"- 候选数量：{candidate_count}")
+        probe = ai_state.get("last_arc_probe") if isinstance(ai_state.get("last_arc_probe"), dict) else {}
+        if probe:
+            http_status = _single_line(probe.get("http_status"), 20) or "未知"
+            code = str(probe.get("code")) if probe.get("code") is not None else "未知"
+            message = _single_line(probe.get("message"), 80)
+            vlist_count = _safe_int(probe.get("vlist_count"), 0, 0)
+            lines.append(
+                f"- 直连投稿接口：HTTP {http_status}｜code {code}"
+                + (f"｜{message}" if message else "")
+                + f"｜vlist {vlist_count}"
+            )
+            first_title = _single_line(probe.get("first_title"), 100)
+            first_created = _single_line(probe.get("first_created"), 24)
+            first_bvid = _single_line(probe.get("first_bvid"), 32)
+            if first_title:
+                lines.append(f"- 接口第一条：{first_created or '无时间'}｜{first_bvid}｜{first_title}")
+            elif probe.get("error"):
+                lines.append(f"- 接口错误：{_single_line(probe.get('error'), 140)}")
         digest = ai_state.get("last_digest") if isinstance(ai_state.get("last_digest"), dict) else {}
         if digest:
             headline = _single_line(digest.get("headline") or digest.get("topic"), 120)
