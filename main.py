@@ -24,16 +24,23 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from xml.etree import ElementTree as ET
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 try:
-    from astrbot.api.message_components import At, Image, Plain, Record
+    from astrbot.api.message_components import At, Image, Plain, Record, Reply
 except ImportError:
     from astrbot.api.message_components import At, Image, Plain
     from astrbot.core.message.components import Record
+    try:
+        from astrbot.api.message_components import Reply
+    except ImportError:
+        try:
+            from astrbot.core.message.components import Reply
+        except ImportError:
+            Reply = None
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core import file_token_service
@@ -298,7 +305,7 @@ class _CapturedSendMessageCall:
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "3.0.0",
+    "3.0.1",
 )
 class PrivateCompanionPlugin(Star):
     @staticmethod
@@ -426,6 +433,7 @@ class PrivateCompanionPlugin(Star):
         self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", True)
         self.enable_proactive_decorating_hooks = self._cfg_bool(c, "enable_proactive_decorating_hooks", True)
         self.enable_precise_platform_send = self._cfg_bool(c, "enable_precise_platform_send", True)
+        self.enable_proactive_quote_trigger_message = self._cfg_bool(c, "enable_proactive_quote_trigger_message", False)
         self.enable_segmented_proactive_reply = self._cfg_bool(c, "enable_segmented_proactive_reply", False)
         self.segmented_proactive_scope = self._cfg_str(c, "segmented_proactive_scope", "proactive_only", "proactive_only")
         if self.segmented_proactive_scope not in {"proactive_only", "all_llm"}:
@@ -983,6 +991,7 @@ class PrivateCompanionPlugin(Star):
             "worldbook_group_profiles": {},
             "worldbook_import_state": {},
             "inbound_debounce_stats": {},
+            "cache_metrics": {},
         }
 
     @staticmethod
@@ -1028,6 +1037,7 @@ class PrivateCompanionPlugin(Star):
         data.setdefault("worldbook_import_state", {})
         data.setdefault("atrelay_send_log", [])
         data.setdefault("inbound_debounce_stats", {})
+        data.setdefault("cache_metrics", {})
         return data
 
     @staticmethod
@@ -1044,6 +1054,24 @@ class PrivateCompanionPlugin(Star):
     def _data_str(data: Any, field: str, default: str = "") -> str:
         value = data.get(field) if isinstance(data, dict) else None
         return str(value) if value is not None else default
+
+    def _record_cache_metric(self, namespace: str, *, hit: bool, detail: str = "") -> None:
+        name = _single_line(namespace, 80)
+        if not name:
+            return
+        metrics = self.data.setdefault("cache_metrics", {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+            self.data["cache_metrics"] = metrics
+        item = metrics.setdefault(name, {})
+        if not isinstance(item, dict):
+            item = {}
+            metrics[name] = item
+        key = "hits" if hit else "misses"
+        item[key] = _safe_int(item.get(key), 0, 0) + 1
+        item["last_hit_ts" if hit else "last_miss_ts"] = _now_ts()
+        if detail:
+            item["last_hit_detail" if hit else "last_miss_detail"] = _single_line(detail, 160)
 
     def _load_data_sync(self) -> dict[str, Any]:
         if not os.path.exists(self.data_file):
@@ -1647,6 +1675,83 @@ class PrivateCompanionPlugin(Star):
                 return _single_line(value, 120)
         return ""
 
+    def _candidate_trigger_message_id(self, candidate: dict[str, Any]) -> str:
+        for key in ("trigger_message_id", "message_id", "msg_id"):
+            value = _single_line(candidate.get(key), 120)
+            if value:
+                return value
+        context = candidate.get("context")
+        if isinstance(context, dict):
+            for key in ("trigger_message_id", "message_id", "msg_id"):
+                value = _single_line(context.get(key), 120)
+                if value:
+                    return value
+        return ""
+
+    def _clear_planned_proactive_trigger(self, user: dict[str, Any]) -> None:
+        user["planned_proactive_trigger_message_id"] = ""
+        user["planned_proactive_trigger_umo"] = ""
+        user["planned_proactive_trigger_ts"] = 0
+
+    def _set_planned_proactive_trigger(
+        self,
+        user: dict[str, Any],
+        *,
+        message_id: str,
+        umo: str = "",
+        created_at: float = 0,
+    ) -> None:
+        message_id = _single_line(message_id, 120)
+        if not message_id:
+            self._clear_planned_proactive_trigger(user)
+            return
+        user["planned_proactive_trigger_message_id"] = message_id
+        user["planned_proactive_trigger_umo"] = _single_line(umo, 160)
+        user["planned_proactive_trigger_ts"] = created_at if created_at > 0 else _now_ts()
+
+    def _planned_proactive_quote_message_id(self, user: dict[str, Any], umo: str) -> str:
+        if not getattr(self, "enable_proactive_quote_trigger_message", False):
+            return ""
+        message_id = _single_line(user.get("planned_proactive_trigger_message_id"), 120)
+        if not message_id:
+            return ""
+        trigger_umo = _single_line(user.get("planned_proactive_trigger_umo"), 160)
+        if trigger_umo and trigger_umo != _single_line(umo, 160):
+            return ""
+        trigger_ts = _safe_float(user.get("planned_proactive_trigger_ts"), 0)
+        if trigger_ts > 0 and _now_ts() - trigger_ts > max(1, self.proactive_reply_context_hours) * 3600:
+            return ""
+        return message_id
+
+    def _make_reply_component(self, message_id: str) -> Any | None:
+        if Reply is None:
+            return None
+        message_id = _single_line(message_id, 120)
+        if not message_id:
+            return None
+        candidate_ids: list[Any] = [message_id]
+        try:
+            candidate_ids.append(int(message_id))
+        except (TypeError, ValueError):
+            pass
+        for value in candidate_ids:
+            for kwargs in ({"id": value}, {"message_id": value}, {"msg_id": value}):
+                try:
+                    return Reply(**kwargs)
+                except Exception:
+                    continue
+            try:
+                return Reply(value)
+            except Exception:
+                continue
+        return None
+
+    def _with_optional_reply(self, chain: list[Any], message_id: str) -> list[Any]:
+        reply = self._make_reply_component(message_id)
+        if reply is None:
+            return chain
+        return [reply, *chain]
+
     def _event_component_stable_fingerprint_part(self, item: Any) -> str:
         class_name = item.__class__.__name__.lower()
         if isinstance(item, dict):
@@ -2074,7 +2179,30 @@ class PrivateCompanionPlugin(Star):
         except Exception as exc:
             logger.debug("[PrivateCompanion] 私聊图片缓存键生成失败: %s", exc)
         if re.match(r"^https?://", text, flags=re.I):
-            return "url:" + hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+            try:
+                parsed = urlparse(text)
+                volatile_keys = {
+                    "term", "is_origin", "spec", "rkey", "token", "sign", "expires", "expire", "ts",
+                    "timestamp", "t", "time", "cache", "cache_key", "ck", "rand", "random", "nonce",
+                    "download", "disposition", "file_size", "size", "width", "height",
+                }
+                query_parts = []
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+                    lowered = key.lower()
+                    if lowered in volatile_keys or lowered.startswith("utm_"):
+                        continue
+                    query_parts.append((key, value))
+                normalized = urlunparse((
+                    parsed.scheme.lower() or "https",
+                    parsed.netloc.lower(),
+                    parsed.path,
+                    "",
+                    urlencode(sorted(query_parts)),
+                    "",
+                ))
+                return "url:" + hashlib.sha1(normalized.encode("utf-8", errors="ignore")).hexdigest()
+            except Exception:
+                return "url:" + hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
         return ""
 
     def _private_image_cache_image_keys(self, sources: list[str]) -> list[str]:
@@ -2092,33 +2220,65 @@ class PrivateCompanionPlugin(Star):
             self.data["private_image_vision_cache"] = cache
         return cache
 
-    def _private_image_vision_cache_key(self, image_keys: list[str], provider_id: str, prompt: str) -> str:
+    def _private_image_vision_cache_key(self, image_keys: list[str], provider_id: str, prompt: str = "", *, scope: str = "private_image") -> str:
         clean_keys = [str(item).strip() for item in image_keys if str(item or "").strip()]
         if not clean_keys:
             return ""
-        prompt_sig = hashlib.sha1(str(prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
-        raw = "v1|" + str(provider_id or "") + "|" + prompt_sig + "|" + "|".join(clean_keys)
+        raw = "v2|" + _single_line(scope, 40) + "|" + str(provider_id or "") + "|" + "|".join(clean_keys)
         return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
 
-    def _get_private_image_vision_cache(self, cache_key: str) -> str:
+    def _get_private_image_vision_cache(self, cache_key: str, *, provider_id: str = "", image_keys: list[str] | None = None, scope: str = "private_image") -> str:
         if not bool(getattr(self, "enable_private_image_vision_cache", True)):
             return ""
         cache = self._private_image_vision_cache_store()
-        item = cache.get(cache_key)
-        if not isinstance(item, dict):
-            return ""
-        text = _single_line(item.get("text"), 600)
-        if not text:
-            cache.pop(cache_key, None)
-            return ""
-        item["hits"] = _safe_int(item.get("hits"), 0, 0) + 1
-        item["last_hit_ts"] = _now_ts()
-        return text
+        clean_image_keys = [str(item).strip() for item in (image_keys or []) if str(item or "").strip()]
 
-    def _set_private_image_vision_cache(self, cache_key: str, text: str, *, provider_id: str, image_keys: list[str]) -> None:
+        def use_item(key: str, item: dict[str, Any], *, fallback: bool = False) -> str:
+            text = _single_line(item.get("text"), 900 if scope == "forward_image" else 600)
+            if not text:
+                cache.pop(key, None)
+                return ""
+            item["hits"] = _safe_int(item.get("hits"), 0, 0) + 1
+            item["last_hit_ts"] = _now_ts()
+            if fallback and cache_key and key != cache_key:
+                item.setdefault("migrated_from", key)
+                cache[cache_key] = item
+                cache.pop(key, None)
+            self._record_cache_metric(f"image_vision:{scope}", hit=True, detail="fallback" if fallback else "direct")
+            return text
+
+        item = cache.get(cache_key)
+        if isinstance(item, dict):
+            text = use_item(cache_key, item)
+            if text:
+                return text
+
+        if clean_image_keys:
+            expected_provider = _single_line(provider_id, 160)
+            expected_scope = _single_line(scope, 40)
+            for key, item in list(cache.items()):
+                if key == cache_key or not isinstance(item, dict):
+                    continue
+                cached_keys = [str(value).strip() for value in item.get("image_keys", []) if str(value or "").strip()]
+                if cached_keys != clean_image_keys:
+                    continue
+                cached_provider = _single_line(item.get("provider_id"), 160)
+                if expected_provider and cached_provider and cached_provider != expected_provider:
+                    continue
+                cached_scope = _single_line(item.get("scope"), 40)
+                if cached_scope and expected_scope and cached_scope != expected_scope:
+                    continue
+                text = use_item(key, item, fallback=True)
+                if text:
+                    return text
+
+        self._record_cache_metric(f"image_vision:{scope}", hit=False, detail="miss")
+        return ""
+
+    def _set_private_image_vision_cache(self, cache_key: str, text: str, *, provider_id: str, image_keys: list[str], prompt: str = "", scope: str = "private_image") -> None:
         if not bool(getattr(self, "enable_private_image_vision_cache", True)):
             return
-        cleaned = _single_line(text, 600)
+        cleaned = _single_line(text, 900 if scope == "forward_image" else 600)
         if not cache_key or not cleaned:
             return
         cache = self._private_image_vision_cache_store()
@@ -2126,6 +2286,8 @@ class PrivateCompanionPlugin(Star):
             "text": cleaned,
             "provider_id": _single_line(provider_id, 160),
             "image_keys": [str(item) for item in image_keys[:4]],
+            "scope": _single_line(scope, 40),
+            "prompt_sig": hashlib.sha1(str(prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:16] if prompt else "",
             "created_ts": _now_ts(),
             "last_hit_ts": 0,
             "hits": 0,
@@ -2374,7 +2536,7 @@ class PrivateCompanionPlugin(Star):
             return ""
         provider_id, provider_source, configured_prompt = self._private_image_caption_provider_id(umo)
         if not provider_id:
-            logger.info("[PrivateCompanion] 私聊图片视觉转述跳过: 未配置 AstrBot 识图模型或插件总视觉模型")
+            logger.info("[PrivateCompanion] 私聊图片视觉转述跳过: 未配置首选识图模型或备选识图模型")
             return ""
         getter = getattr(self.context, "get_provider_by_id", None)
         provider = getter(provider_id) if callable(getter) else None
@@ -2414,8 +2576,8 @@ class PrivateCompanionPlugin(Star):
         self_recognition_prompt = self._private_image_self_recognition_prompt()
         if self_recognition_prompt and self_recognition_prompt not in prompt:
             prompt = f"{prompt}\n\n{self_recognition_prompt}"
-        cache_key = self._private_image_vision_cache_key(image_keys, provider_id, prompt)
-        cached_text = self._get_private_image_vision_cache(cache_key)
+        cache_key = self._private_image_vision_cache_key(image_keys, provider_id, prompt, scope="private_image")
+        cached_text = self._get_private_image_vision_cache(cache_key, provider_id=provider_id, image_keys=image_keys, scope="private_image")
         if cached_text:
             intent_line = self._private_image_intent_line(cached_text)
             ownership_line = self._private_image_ownership_line(cached_text)
@@ -2458,7 +2620,7 @@ class PrivateCompanionPlugin(Star):
                 ownership_line or "无",
                 _single_line(cleaned_text, 220),
             )
-            self._set_private_image_vision_cache(cache_key, cleaned_text, provider_id=provider_id, image_keys=image_keys)
+            self._set_private_image_vision_cache(cache_key, cleaned_text, provider_id=provider_id, image_keys=image_keys, prompt=prompt, scope="private_image")
             return cleaned_text
         except Exception as exc:
             logger.info("[PrivateCompanion] 私聊图片视觉转述失败: %s", _single_line(exc, 160))
@@ -7256,11 +7418,21 @@ class PrivateCompanionPlugin(Star):
                 "last_video_title": _single_line(item.get("title"), 120),
                 "last_video_pub_ts": _safe_float(item.get("published_ts"), 0),
                 "last_text_link": _single_line(item.get("article_link") or item.get("link"), 400),
+                "last_text_readable": bool(item.get("article_readable") and item.get("article_text")),
+                "last_text_chars": len(str(item.get("article_text") or "")),
+                "last_text_excerpt_chars": len(str(item.get("article_excerpt") or "")),
+                "last_read_basis": "完整文字版正文" if item.get("article_readable") and item.get("article_text") else "视频标题/简介",
                 "last_digest": digest,
             }
         )
         self._save_data_sync()
-        logger.info("[PrivateCompanion] 已读取今日 AI 日报: %s", _single_line(item.get("title"), 120))
+        logger.info(
+            "[PrivateCompanion] 已读取今日 AI 日报: %s text_readable=%s text_chars=%s basis=%s",
+            _single_line(item.get("title"), 120),
+            bool(item.get("article_readable") and item.get("article_text")),
+            len(str(item.get("article_text") or "")),
+            "article_text" if item.get("article_readable") and item.get("article_text") else "video_desc",
+        )
 
     async def _maybe_trigger_news_boredom_read(self) -> None:
         if not (self.enable_news_integration and self.enable_news_boredom_read):
@@ -8136,8 +8308,15 @@ class PrivateCompanionPlugin(Star):
         user["planned_event_chain"] = []
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
+        self._clear_planned_proactive_trigger(user)
         user["planned_proactive_quota_exempt"] = False
         user["planned_candidate_id"] = item.get("id", "")
+        self._set_planned_proactive_trigger(
+            user,
+            message_id=self._candidate_trigger_message_id(candidate),
+            umo=_single_line(candidate.get("trigger_umo") or candidate.get("umo"), 160),
+            created_at=_safe_float(candidate.get("trigger_ts") or candidate.get("created_ts"), 0),
+        )
         context_key = _single_line(candidate.get("context_key"), 60)
         context = candidate.get("context")
         if context_key and isinstance(context, dict):
@@ -9379,6 +9558,7 @@ class PrivateCompanionPlugin(Star):
         text: str,
         group_id: str = "",
         scene: dict[str, Any] | None = None,
+        message_id: str = "",
     ) -> None:
         cleaned = _single_line(text, 260)
         if not cleaned:
@@ -9399,6 +9579,7 @@ class PrivateCompanionPlugin(Star):
             "identity_name": self._group_member_identity_name(sender_id, sender_name, limit=30),
             "identity_known": bool(self._worldbook_profile_by_user_id(sender_id)),
             "text": cleaned,
+            "message_id": _single_line(message_id, 120),
         }
         if isinstance(scene, dict):
             record.update({
@@ -10650,11 +10831,12 @@ class PrivateCompanionPlugin(Star):
         return {"action": "follow", "text": cleaned, "image_path": ""}
 
     async def _maybe_group_interject(self, event: AstrMessageEvent, group: dict[str, Any], text: str) -> None:
+        quote_message_id = self._event_message_id(event) if getattr(self, "enable_proactive_quote_trigger_message", False) else ""
         repeat_action = self._update_group_repeat_follow_state(group, text)
         if repeat_action:
             repeat_reply = _single_line(repeat_action.get("text"), 80)
             image_path = str(repeat_action.get("image_path") or "")
-            await self._reply_with_optional_media(event, repeat_reply, image_path=image_path)
+            await self._reply_with_optional_media(event, repeat_reply, image_path=image_path, quote_message_id=quote_message_id)
             now = _now_ts()
             group["last_interject_at"] = now
             group["interject_today"] = _safe_int(group.get("interject_today"), 0, 0) + 1
@@ -10697,7 +10879,10 @@ class PrivateCompanionPlugin(Star):
             return
         if self._response_review_flags(reply, {}):
             return
-        await event.send(event.plain_result(reply))
+        if quote_message_id:
+            await event.send(event.chain_result(self._with_optional_reply([Plain(reply)], quote_message_id)))
+        else:
+            await event.send(event.plain_result(reply))
         group["last_interject_at"] = _now_ts()
         group["interject_today"] = _safe_int(group.get("interject_today"), 0, 0) + 1
         group["last_bot_interjection"] = {
@@ -12242,6 +12427,12 @@ Bot 主动后用户回复次数：{reply_count}
                     if isinstance(planned_event, dict)
                     else self._choose_proactive_topic(reason, user)
                 )
+                self._set_planned_proactive_trigger(
+                    user,
+                    message_id=_single_line(timer_event.get("trigger_message_id"), 120),
+                    umo=_single_line(timer_event.get("trigger_umo"), 160),
+                    created_at=_safe_float(timer_event.get("trigger_ts"), 0),
+                )
                 user["planned_event_chain"] = (
                     list(timer_event.get("chain") or [])
                     if isinstance(timer_event.get("chain"), list)
@@ -12276,6 +12467,7 @@ Bot 主动后用户回复次数：{reply_count}
             if isinstance(planned_event, dict)
             else self._choose_proactive_topic(reason, user)
         )
+        self._clear_planned_proactive_trigger(user)
         user["planned_event_chain"] = (
             list(planned_event.get("chain") or [])
             if isinstance(planned_event, dict) and isinstance(planned_event.get("chain"), list)
@@ -12382,6 +12574,7 @@ Bot 主动后用户回复次数：{reply_count}
         user["planned_proactive_source"] = "event"
         user["planned_proactive_motive"] = motive
         user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
+        self._clear_planned_proactive_trigger(user)
         user["planned_event_chain"] = list(event.get("chain") or []) if isinstance(event.get("chain"), list) else []
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
@@ -14462,6 +14655,18 @@ Bot 主动后用户回复次数：{reply_count}
         title = _single_line(ai_state.get("last_video_title"), 120)
         text_link = _single_line(ai_state.get("last_text_link"), 420)
         candidate_count = _safe_int(ai_state.get("last_candidate_count"), 0, 0)
+        digest = ai_state.get("last_digest") if isinstance(ai_state.get("last_digest"), dict) else {}
+        selected_item: dict[str, Any] = {}
+        digest_items = digest.get("items") if isinstance(digest.get("items"), list) else []
+        selected_key = _single_line(digest.get("selected_key"), 80)
+        for candidate in digest_items:
+            if not isinstance(candidate, dict):
+                continue
+            if selected_key and _single_line(candidate.get("key"), 80) == selected_key:
+                selected_item = candidate
+                break
+        if not selected_item and digest_items and isinstance(digest_items[0], dict):
+            selected_item = digest_items[0]
         if date:
             lines.append(f"- 状态日期：{date}")
         if checked:
@@ -14472,6 +14677,18 @@ Bot 主动后用户回复次数：{reply_count}
             lines.append(f"- 视频：{title}")
         if text_link:
             lines.append(f"- 文字版/链接：{text_link}")
+        text_readable_raw = ai_state.get("last_text_readable")
+        text_readable = bool(text_readable_raw) if isinstance(text_readable_raw, bool) else bool(selected_item.get("article_readable") and selected_item.get("article_text"))
+        text_chars = _safe_int(ai_state.get("last_text_chars"), 0, 0)
+        if not text_chars and selected_item:
+            text_chars = len(str(selected_item.get("article_text") or ""))
+        read_basis = _single_line(ai_state.get("last_read_basis"), 40) or ("完整文字版正文" if text_readable else "视频标题/简介")
+        if text_link or selected_item:
+            lines.append(f"- 文字版读取：{'已读取完整正文' if text_readable else '未读取到正文'}")
+        if text_chars:
+            lines.append(f"- 文字版正文字数：{text_chars}")
+        if read_basis:
+            lines.append(f"- 整理依据：{read_basis}")
         if candidate_count:
             lines.append(f"- 候选数量：{candidate_count}")
         probe = ai_state.get("last_arc_probe") if isinstance(ai_state.get("last_arc_probe"), dict) else {}
@@ -14492,7 +14709,6 @@ Bot 主动后用户回复次数：{reply_count}
                 lines.append(f"- 接口第一条：{first_created or '无时间'}｜{first_bvid}｜{first_title}")
             elif probe.get("error"):
                 lines.append(f"- 接口错误：{_single_line(probe.get('error'), 140)}")
-        digest = ai_state.get("last_digest") if isinstance(ai_state.get("last_digest"), dict) else {}
         if digest:
             headline = _single_line(digest.get("headline") or digest.get("topic"), 120)
             impression = _single_line(digest.get("impression"), 220)
@@ -15017,9 +15233,9 @@ Bot 主动后用户回复次数：{reply_count}
         vision_id, vision_source, _ = self._private_image_caption_provider_id(str(getattr(event, "unified_msg_origin", "") or ""))
         if vision_id:
             source_label = {
-                "astrbot_image_caption": "AstrBot 识图模型",
-                "plugin_vision": "插件总视觉模型",
-                "plugin_vision_fallback": "插件总视觉模型兜底",
+                "astrbot_image_caption": "首选识图模型",
+                "plugin_vision": "备选识图模型",
+                "plugin_vision_fallback": "备选识图模型兜底",
             }.get(vision_source, vision_source or "视觉转述模型")
             lines.append(f"视觉转述模型：{source_label}={self._provider_identity_label(vision_id)}")
         else:
@@ -17757,6 +17973,7 @@ Bot 主动后用户回复次数：{reply_count}
         image_path: str = "",
         *,
         extra_components: list[Any] | None = None,
+        quote_message_id: str = "",
     ) -> None:
         if self._contains_inline_image_tag(text):
             image_path = ""
@@ -17771,15 +17988,19 @@ Bot 主动后用户回复次数：{reply_count}
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else ""
             if outbound_text:
-                await self._send_chain_components(umo, [Plain(outbound_text)])
+                await self._send_chain_components(umo, self._with_optional_reply([Plain(outbound_text)], quote_message_id))
+                quote_message_id = ""
         else:
             for index, segment in enumerate(segments):
-                await self._send_chain_components(umo, [Plain(segment)])
+                chain = self._with_optional_reply([Plain(segment)], quote_message_id) if index == 0 else [Plain(segment)]
+                await self._send_chain_components(umo, chain)
+                quote_message_id = ""
                 if index < len(segments) - 1:
                     await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
         has_media = bool((extra_components or []) or (image_path and os.path.exists(image_path)))
         if has_media:
             media_chain = self._build_outbound_chain("", image_path, extra_components=extra_components)
+            media_chain = self._with_optional_reply(media_chain, quote_message_id)
             await self._send_chain_components(umo, media_chain)
 
     async def _send_proactive_message_chain(
@@ -17789,6 +18010,7 @@ Bot 主动后用户回复次数：{reply_count}
         image_path: str = "",
         *,
         extra_components: list[Any] | None = None,
+        quote_message_id: str = "",
     ) -> None:
         if image_path or extra_components:
             await self._send_media_proactive_chain(
@@ -17796,6 +18018,7 @@ Bot 主动后用户回复次数：{reply_count}
                 text,
                 image_path,
                 extra_components=extra_components,
+                quote_message_id=quote_message_id,
             )
             return
         if text:
@@ -17809,11 +18032,16 @@ Bot 主动后用户回复次数：{reply_count}
             outbound_text = segments[0] if segments else text
             await self._send_chain_components(
                 umo,
-                self._build_outbound_chain(outbound_text, image_path, extra_components=extra_components),
+                self._with_optional_reply(
+                    self._build_outbound_chain(outbound_text, image_path, extra_components=extra_components),
+                    quote_message_id,
+                ),
             )
             return
         for index, segment in enumerate(segments):
-            await self._send_chain_components(umo, [Plain(segment)])
+            chain = self._with_optional_reply([Plain(segment)], quote_message_id) if index == 0 else [Plain(segment)]
+            await self._send_chain_components(umo, chain)
+            quote_message_id = ""
             if index < len(segments) - 1:
                 await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
 
@@ -23192,6 +23420,8 @@ Bot 主动后用户回复次数：{reply_count}
         *,
         source_text: str,
         source_origin: str,
+        trigger_message_id: str = "",
+        trigger_umo: str = "",
     ) -> None:
         scheduled_ts = max(_now_ts() + 30, _safe_float(payload.get("scheduled_ts"), 0))
         if scheduled_ts <= 0:
@@ -23228,6 +23458,9 @@ Bot 主动后用户回复次数：{reply_count}
                 "seed_text": _single_line(source_text, 80),
                 "origin": source_origin,
                 "created_at": _now_ts(),
+                "trigger_message_id": _single_line(trigger_message_id, 120),
+                "trigger_umo": _single_line(trigger_umo, 160),
+                "trigger_ts": _now_ts() if trigger_message_id else 0,
                 "chain": list(payload.get("chain") or []) if isinstance(payload.get("chain"), list) else [],
             }
             user["llm_timer_event"] = timer_event
@@ -23241,6 +23474,12 @@ Bot 主动后用户回复次数：{reply_count}
             user["planned_opener_mode"] = ""
             user["planned_followup_kind"] = ""
             user["planned_proactive_quota_exempt"] = False
+            self._set_planned_proactive_trigger(
+                user,
+                message_id=timer_event["trigger_message_id"],
+                umo=timer_event["trigger_umo"],
+                created_at=timer_event["trigger_ts"],
+            )
             self._save_data_sync()
         logger.info(
             "[PrivateCompanion] 已记录 LLM 自预约: user=%s time=%s reason=%s action=%s topic=%s",
@@ -24289,6 +24528,7 @@ Bot 主动后用户回复次数：{reply_count}
                 if isinstance(user.get("planned_event_chain"), list)
                 else []
             )
+            proactive_quote_message_id = self._planned_proactive_quote_message_id(user, str(user.get("umo") or ""))
             planned_opener_mode_for_send = str(user.get("planned_opener_mode") or "")
             planned_followup_kind_for_send = str(user.get("planned_followup_kind") or "")
             task_start_last_seen = _safe_float(user.get("last_seen"), 0)
@@ -24334,10 +24574,11 @@ Bot 主动后用户回复次数：{reply_count}
                 continue
             try:
                 logger.info(
-                    "[PrivateCompanion] 准备主动发送给 %s: reason=%s action=%s text=%s image=%s extra=%s",
+                    "[PrivateCompanion] 准备主动发送给 %s: reason=%s action=%s quote=%s text=%s image=%s extra=%s",
                     user_id,
                     reason,
                     effective_action_for_send or planned_action_for_send or "message",
+                    bool(proactive_quote_message_id),
                     _single_line(text, 120),
                     bool(image_path),
                     len(extra_components),
@@ -24347,6 +24588,7 @@ Bot 主动后用户回复次数：{reply_count}
                     text,
                     image_path,
                     extra_components=extra_components,
+                    quote_message_id=proactive_quote_message_id,
                 )
                 logger.info(
                     "[PrivateCompanion] 主动发送完成: user=%s reason=%s action=%s",
@@ -24516,6 +24758,12 @@ Bot 主动后用户回复次数：{reply_count}
                         current["planned_proactive_source"] = "timer"
                         current["planned_proactive_motive"] = _single_line(next_timer.get("motive"), 140)
                         current["planned_proactive_topic"] = _single_line(next_timer.get("topic"), 60)
+                        self._set_planned_proactive_trigger(
+                            current,
+                            message_id=_single_line(next_timer.get("trigger_message_id"), 120),
+                            umo=_single_line(next_timer.get("trigger_umo"), 160),
+                            created_at=_safe_float(next_timer.get("trigger_ts"), 0),
+                        )
                         current["planned_event_chain"] = list(next_timer.get("chain") or []) if isinstance(next_timer.get("chain"), list) else []
                         current["planned_opener_mode"] = ""
                         current["planned_followup_kind"] = ""
@@ -24531,6 +24779,7 @@ Bot 主动后用户回复次数：{reply_count}
                         current["planned_opener_mode"] = ""
                         current["planned_followup_kind"] = ""
                         current["planned_proactive_quota_exempt"] = False
+                        self._clear_planned_proactive_trigger(current)
                         self._schedule_next_proactive(current, now=_now_ts())
                 self._save_data_sync()
                 current_snapshot = dict(current)
@@ -24589,13 +24838,23 @@ Bot 主动后用户回复次数：{reply_count}
         text: str,
         image_path: str = "",
         extra_components: list[Any] | None = None,
+        quote_message_id: str = "",
     ):
+        quote_message_id = _single_line(quote_message_id, 120) if getattr(self, "enable_proactive_quote_trigger_message", False) else ""
         if (image_path and os.path.exists(image_path)) or extra_components:
             await event.send(
                 event.chain_result(
-                    self._build_outbound_chain(text, image_path, extra_components=extra_components)
+                    self._with_optional_reply(
+                        self._build_outbound_chain(text, image_path, extra_components=extra_components),
+                        quote_message_id,
+                    )
                 )
             )
+            return
+        if quote_message_id and text:
+            await event.send(event.chain_result(self._with_optional_reply([Plain(text)], quote_message_id)))
+            return
+        if not text:
             return
         await self._reply(event, text)
 
@@ -24604,18 +24863,20 @@ Bot 主动后用户回复次数：{reply_count}
             return ""
         return """
 【跨会话转述与 @ 群友工具】
-当用户明确要求你“发到某个群”“告诉某个群友”“帮我 @ 某人”“私聊某人”时,优先调用 Private Companion 提供的工具,不要在普通回复里预览要发送的完整内容。
+当用户明确要求你“发到某个群”“告诉某个群友”“帮我 @ 某人”“私聊某人”时,优先调用 `pc_relay_message`,不要在普通回复里预览要发送的完整内容。
+- 统一入口：常见转述只用 `pc_relay_message`。你只需要整理 destination/group_hint/recipient_hint/message/relay_mode。
+- destination 规则：发群填 `group`,私聊填 `private`,不确定填 `auto`。私聊转群、群聊转私聊、群聊转群聊都走同一个工具。
+- 群聊转私聊：只发送用户明确要求转述的内容,不要附带群聊上下文、内部记忆或“群里大家说了什么”。
+- 发到群并点名某人：destination=`group`,group_hint=群号/群名,recipient_hint=目标昵称或 QQ,message=要说的话；工具会自动 @ 并解析关系网/群名片。
+- 私聊某人：destination=`private`,recipient_hint=QQ 或称呼；如果称呼不是 QQ,尽量提供 group_hint 以便从群成员里解析。
 - 默认使用“语气转译”：不要把用户原话机械复制给对方,而是保留事实意图,按你的人格、你和说话人/收话人的关系改写成自然转述。例如“你帮我跟 A 说一下别忘了交作业”可以转成“A,刚才他说让你记得交作业,我顺手提醒一下。”
 - 只有用户明确要求“原话/照原话/一字不改/截图式转发”时才用原话模式,调用工具时把 `relay_mode` 填 `original`；其他情况填 `persona` 或留空。
 - 对敏感、私密、带强情绪、告白/指责/吵架/金钱/密码/身体健康/秘密类内容,发送前先问用户要“原样带过去”还是“委婉一点”。工具也会二次拦截；得到用户确认后再调用,并把 `sensitive_confirmed` 设为 true。
 - 普通提醒、约时间、作业/待办/到场通知等低风险内容可以直接转述。
 - 转述边界：拒绝骂人、羞辱、威胁、冒充身份、宣称虚假权限/身份、索要或转交密码等请求；可以改成中性提醒,但不要替用户攻击别人。
-- 延迟转述：用户说“等 A 出现/等他冒泡/他上线再说”时,用 `pc_schedule_group_relay` 挂起,目标用户在该群发言后自动转述。
+- 延迟转述：用户说“等 A 出现/等他冒泡/他上线再说”时,仍优先用 `pc_relay_message` 并设置 `delay_until_recipient_seen=true`。
 - 多目标转述：多个 QQ 用 `pc_send_to_private_users`,多个群用 `pc_send_to_groups`。不要自己循环调用单目标工具刷屏；工具会限量、去重并返回结果。
-- 发送到群：使用 `pc_send_to_group`。`at_user` 可以填 QQ 号、关系网名称、别名或群名片；工具会优先按关系网 QQ 身份解析。
-- 私聊指定 QQ：使用 `pc_send_to_private_user`。如果用户只说“告诉比矜”而没给 QQ,先用 `pc_get_user_id_by_name` 解析；关系网 QQ 锚点优先,不受群名片变化影响。
-- 不确定群号：先用 `pc_get_group_id_by_name`。
-- 不确定群友是谁：先用 `pc_get_user_id_by_name` 或 `pc_get_specified_group_members`。关系网命中优先,群昵称只作辅助。
+- 底层工具 `pc_send_to_group`、`pc_send_to_private_user`、`pc_get_user_id_by_name`、`pc_get_group_id_by_name`、`pc_get_specified_group_members` 只在统一入口无法表达或需要人工查询候选时使用。
 - 如果出现多个同名/相似成员,不要猜,把候选姓名/QQ 简短列给用户选择。
 - 私聊转群聊时,只发送用户明确要求公开的那句话；不要暴露“这是私聊里说的”、不要附带额外私聊上下文。
 - 禁止泄露私聊记忆、关系网内部备注或工具参数。工具成功后只给一句简短结果。
@@ -24677,10 +24938,15 @@ Bot 主动后用户回复次数：{reply_count}
         return json.dumps({"status": "success" if result.get("success") else "error", **result}, ensure_ascii=False)
 
     @filter.llm_tool(name="pc_get_group_id_by_name")
-    async def pc_get_group_id_by_name(self, event: AstrMessageEvent, group_name: str) -> str:
-        """按群名关键词查询机器人已加入的群号。"""
+    async def pc_get_group_id_by_name(self, event: AstrMessageEvent, **kwargs) -> str:
+        """按群名关键词查询机器人已加入的群号。
+
+        Args:
+            group_name(string): 群名关键词或群号。
+        """
         if not self.enable_atrelay_tools:
             return json.dumps({"status": "disabled", "message": "跨群转述工具未启用"}, ensure_ascii=False)
+        group_name = kwargs.get("group_name") or kwargs.get("name") or kwargs.get("keyword") or kwargs.get("group_id") or ""
         keyword = _single_line(group_name, 80)
         bot = getattr(event, "bot", None)
         api = getattr(bot, "api", None)
@@ -24700,12 +24966,21 @@ Bot 主动后用户回复次数：{reply_count}
             return json.dumps({"status": "error", "message": f"获取群列表失败: {_single_line(exc, 120)}"}, ensure_ascii=False)
 
     @filter.llm_tool(name="pc_get_user_id_by_name")
-    async def pc_get_user_id_by_name(self, event: AstrMessageEvent, group_id: str, nickname: str) -> str:
-        """按关系网名称、别名、群名片或昵称解析群友 QQ。"""
+    async def pc_get_user_id_by_name(self, event: AstrMessageEvent, **kwargs) -> str:
+        """按关系网名称、别名、群名片或昵称解析群友 QQ。
+
+        Args:
+            group_id(string): 目标群号；私聊中可填写要查询的群号。
+            nickname(string): 关系网名称、别名、群名片、昵称或 QQ。
+        """
         if not self.enable_atrelay_tools:
             return json.dumps({"status": "disabled", "message": "跨群转述工具未启用"}, ensure_ascii=False)
+        group_id = kwargs.get("group_id") or kwargs.get("group") or kwargs.get("group_name") or ""
+        nickname = kwargs.get("nickname") or kwargs.get("name") or kwargs.get("keyword") or kwargs.get("user_name") or kwargs.get("user") or ""
         target_group = _single_line(group_id, 40) or self._extract_group_id_from_event(event)
         query = _single_line(nickname, 60)
+        if not query:
+            return json.dumps({"status": "error", "message": "缺少 nickname/name 参数"}, ensure_ascii=False)
         resolved = await self._resolve_atrelay_target_user(event, target_group, query)
         if resolved.get("ambiguous"):
             return json.dumps({"status": "ambiguous", "message": "匹配到多个群友,需要用户补充 QQ 或更明确称呼", "matches": resolved.get("matches", [])}, ensure_ascii=False)
@@ -24714,10 +24989,17 @@ Bot 主动后用户回复次数：{reply_count}
         return json.dumps({"status": "not_found", "message": "未找到匹配群友"}, ensure_ascii=False)
 
     @filter.llm_tool(name="pc_get_specified_group_members")
-    async def pc_get_specified_group_members(self, event: AstrMessageEvent, group_id: str = "", keyword: str = "") -> str:
-        """查询指定群成员,并标记是否已在关系网中登记。"""
+    async def pc_get_specified_group_members(self, event: AstrMessageEvent, **kwargs) -> str:
+        """查询指定群成员,并标记是否已在关系网中登记。
+
+        Args:
+            group_id(string): 目标群号。
+            keyword(string): 可选筛选关键词、昵称、群名片或 QQ。
+        """
         if not self.enable_atrelay_tools:
             return json.dumps({"status": "disabled", "message": "跨群转述工具未启用"}, ensure_ascii=False)
+        group_id = kwargs.get("group_id") or kwargs.get("group") or kwargs.get("group_name") or ""
+        keyword = kwargs.get("keyword") or kwargs.get("name") or kwargs.get("nickname") or kwargs.get("user") or ""
         target_group = _single_line(group_id, 40) or self._extract_group_id_from_event(event)
         if not target_group:
             return json.dumps({"status": "error", "message": "未指定群号且当前不在群聊环境中"}, ensure_ascii=False)
@@ -24758,7 +25040,7 @@ Bot 主动后用户回复次数：{reply_count}
         if not cleaned:
             return ""
         rules = [
-            ("私密内容", ("秘密", "私下", "私密", "隐私", "别告诉", "不要告诉", "只告诉你", "偷偷", "密码", "口令", "账号")),
+            ("私密内容", ("秘密", "私下说", "私下聊", "私密", "隐私", "别告诉", "不要告诉", "只告诉你", "密码", "口令", "账号")),
             ("强情绪内容", ("讨厌", "恨", "烦死", "恶心", "滚", "闭嘴", "傻逼", "废物", "垃圾", "绝交", "再也不")),
             ("关系或告白内容", ("喜欢你", "爱你", "暗恋", "告白", "表白", "分手", "复合", "吃醋", "想你")),
             ("金钱或求助内容", ("借钱", "还钱", "转账", "红包", "欠我", "欠钱", "救命", "报警")),
@@ -24770,6 +25052,31 @@ Bot 主动后用户回复次数：{reply_count}
         if re.search(r"(你|他|她).{0,8}(怎么|凭什么|是不是|到底).{0,20}(烦|讨厌|过分|有病|恶心)", cleaned):
             return "带情绪的质问"
         return ""
+
+    def _atrelay_event_confirms_sensitive_send(self, event: AstrMessageEvent) -> bool:
+        message_text = _single_line(getattr(event, "message_str", ""), 220)
+        if not message_text:
+            return False
+        confirms = (
+            "随便", "都行", "可以", "发吧", "就这样", "原样", "原话", "照发",
+            "委婉", "换种说法", "你看着办", "直接发", "确认", "没事",
+        )
+        if not any(token in message_text for token in confirms):
+            return False
+        quote_text = ""
+        try:
+            for seg in getattr(getattr(event, "message_obj", None), "message", []) or []:
+                for attr in ("text", "message", "raw_message", "content"):
+                    value = getattr(seg, attr, None)
+                    if value:
+                        quote_text += " " + str(value)
+                data = getattr(seg, "data", None)
+                if isinstance(data, dict):
+                    quote_text += " " + " ".join(str(data.get(key) or "") for key in ("text", "message", "raw_message", "content"))
+        except Exception:
+            quote_text = ""
+        combined = f"{message_text} {quote_text}"
+        return any(token in combined for token in ("原样发", "原样带", "换种说法", "委婉一点", "直接转述", "不能直接转述"))
 
     def _atrelay_boundary_reason(self, text: str) -> str:
         cleaned = _single_line(text, 800)
@@ -24844,6 +25151,39 @@ Bot 主动后用户回复次数：{reply_count}
         compact = re.sub(r"\s+", "", _single_line(text, 240))
         return f"{kind}:{target}:{at_user}:{compact[:160]}"
 
+    async def _resolve_atrelay_target_group(self, event: AstrMessageEvent, group_hint: Any = "") -> dict[str, Any]:
+        hint = _single_line(group_hint, 80)
+        if hint.isdigit():
+            return {"status": "success", "group_id": hint, "source": "direct"}
+        current_group = self._extract_group_id_from_event(event)
+        if not hint and current_group:
+            return {"status": "success", "group_id": current_group, "source": "current_group"}
+        configured_groups = [str(item) for item in self._configured_group_ids() if str(item or "").strip()]
+        if not hint and len(configured_groups) == 1:
+            return {"status": "success", "group_id": configured_groups[0], "source": "single_configured_group"}
+        if not hint:
+            return {"status": "need_group", "message": "需要补充目标群号或群名"}
+        bot = getattr(event, "bot", None)
+        api = getattr(bot, "api", None)
+        call_action = getattr(api, "call_action", None)
+        if not callable(call_action):
+            return {"status": "need_group", "message": "当前平台不能查询群列表，请直接提供群号"}
+        try:
+            groups = await call_action("get_group_list")
+        except Exception as exc:
+            return {"status": "error", "message": f"获取群列表失败: {_single_line(exc, 120)}"}
+        matches = []
+        for item in groups if isinstance(groups, list) else []:
+            group_id = str(item.get("group_id") or "")
+            name = _single_line(item.get("group_name") or item.get("group_remark"), 100)
+            if hint in group_id or hint in name:
+                matches.append({"group_id": group_id, "group_name": name})
+        if len(matches) == 1:
+            return {"status": "success", **matches[0], "source": "group_list"}
+        if len(matches) > 1:
+            return {"status": "ambiguous", "matches": matches[:8], "message": "匹配到多个群，请补充群号"}
+        return {"status": "not_found", "message": "未找到匹配群聊"}
+
     def _atrelay_duplicate_guard(self, kind: str, target: str, text: str, at_user: str = "") -> str:
         signature = self._atrelay_send_signature(kind, target, text, at_user)
         now = _now_ts()
@@ -24865,19 +25205,160 @@ Bot 主动后用户回复次数：{reply_count}
         )
         del log[:-80]
 
+    @filter.llm_tool(name="pc_relay_message")
+    async def pc_relay_message(self, event: AstrMessageEvent, **kwargs) -> str:
+        """统一转述入口：把用户明确要求转发/转述/提醒的话发送到群聊或私聊。
+
+        Args:
+            destination(string): group/private/auto。发群填 group, 私聊填 private, 不确定填 auto。
+            group_hint(string): 群号或群名。群聊转私聊时可用于按群成员名解析 QQ。
+            recipient_hint(string): 收件人 QQ、关系网名称、别名、群名片或昵称。
+            message(string): 最终要发送的内容。
+            at_recipient(boolean): 发到群时是否 @ recipient_hint。
+            relay_mode(string): persona/soft/original。默认 persona。
+            sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
+            delay_until_recipient_seen(boolean): 是否等目标群友在群里出现后再转述。
+            expire_hours(number): 延迟转述有效小时数。
+        """
+        if not self.enable_atrelay_tools:
+            return json.dumps({"status": "disabled", "message": "跨会话转述工具未启用"}, ensure_ascii=False)
+        destination_raw = _single_line(
+            kwargs.get("destination")
+            or kwargs.get("target_scope")
+            or kwargs.get("scope")
+            or kwargs.get("target_type")
+            or kwargs.get("type")
+            or "auto",
+            40,
+        ).lower()
+        group_hint = kwargs.get("group_hint") or kwargs.get("group_id") or kwargs.get("group") or kwargs.get("target_group") or ""
+        recipient_hint = (
+            kwargs.get("recipient_hint")
+            or kwargs.get("recipient")
+            or kwargs.get("to")
+            or kwargs.get("at_user")
+            or kwargs.get("target_user")
+            or kwargs.get("user_id")
+            or kwargs.get("nickname")
+            or kwargs.get("name")
+            or ""
+        )
+        message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
+        relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
+        sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
+        delay_until_seen = self._atrelay_bool_flag(
+            kwargs.get("delay_until_recipient_seen", kwargs.get("delay", kwargs.get("wait_until_seen", False)))
+        )
+        at_recipient = self._atrelay_bool_flag(kwargs.get("at_recipient", kwargs.get("at", False)))
+        expire_hours = kwargs.get("expire_hours", kwargs.get("ttl_hours", 24))
+
+        text = _single_line(message, 800)
+        recipient = _single_line(recipient_hint, 80)
+        if not text:
+            return json.dumps({"status": "error", "message": "缺少 message/text 内容"}, ensure_ascii=False)
+
+        if destination_raw in {"group", "groups", "群", "群聊", "send_group", "to_group"}:
+            destination = "group"
+        elif destination_raw in {"private", "user", "friend", "私聊", "私发", "私信", "to_user", "dm"}:
+            destination = "private"
+        else:
+            if group_hint:
+                destination = "group"
+            elif recipient:
+                destination = "private"
+            else:
+                destination = "auto"
+
+        if destination == "auto":
+            return json.dumps({"status": "need_target", "message": "需要说明发到哪个群或私聊给谁"}, ensure_ascii=False)
+
+        if destination == "group":
+            group_result = await self._resolve_atrelay_target_group(event, group_hint)
+            if group_result.get("status") != "success":
+                return json.dumps(group_result, ensure_ascii=False)
+            group_id = _single_line(group_result.get("group_id"), 40)
+            if delay_until_seen:
+                if not recipient:
+                    return json.dumps({"status": "need_recipient", "message": "延迟转述需要目标群友"}, ensure_ascii=False)
+                result = await self.pc_schedule_group_relay(
+                    event,
+                    group_id=group_id,
+                    at_user=recipient,
+                    message=text,
+                    relay_mode=relay_mode,
+                    sensitive_confirmed=sensitive_confirmed,
+                    expire_hours=expire_hours,
+                )
+                return json.dumps({"status": "scheduled" if result.startswith("已挂起") else "error", "message": result}, ensure_ascii=False)
+            result = await self.pc_send_to_group(
+                event,
+                group_id=group_id,
+                message=text,
+                at_user=recipient if (recipient and (at_recipient or recipient)) else "",
+                relay_mode=relay_mode,
+                sensitive_confirmed=sensitive_confirmed,
+            )
+            return json.dumps({"status": "success" if result.startswith("消息已发送") else "error", "message": result}, ensure_ascii=False)
+
+        target_user = recipient
+        if not target_user:
+            return json.dumps({"status": "need_recipient", "message": "需要补充私聊目标 QQ 或称呼"}, ensure_ascii=False)
+        if not target_user.isdigit():
+            group_result = await self._resolve_atrelay_target_group(event, group_hint)
+            group_id = _single_line(group_result.get("group_id"), 40) if group_result.get("status") == "success" else ""
+            if not group_id and self._extract_group_id_from_event(event):
+                group_id = self._extract_group_id_from_event(event)
+            if not group_id:
+                return json.dumps(
+                    {
+                        "status": "need_group_or_qq",
+                        "message": "按昵称私聊需要目标所在群号/群名，或直接提供 QQ。",
+                    },
+                    ensure_ascii=False,
+                )
+            resolved = await self._resolve_atrelay_target_user(event, group_id, target_user)
+            if resolved.get("ambiguous"):
+                return json.dumps(
+                    {
+                        "status": "ambiguous",
+                        "message": "匹配到多个用户，请补充 QQ",
+                        "matches": resolved.get("matches", [])[:8],
+                    },
+                    ensure_ascii=False,
+                )
+            target_user = _single_line(resolved.get("user_id"), 40)
+            if not target_user:
+                return json.dumps({"status": "not_found", "message": "未找到私聊目标"}, ensure_ascii=False)
+        result = await self.pc_send_to_private_user(
+            event,
+            user_id=target_user,
+            message=text,
+            relay_mode=relay_mode,
+            sensitive_confirmed=sensitive_confirmed,
+        )
+        return json.dumps({"status": "success" if result.startswith("已向") else "error", "message": result}, ensure_ascii=False)
+
     @filter.llm_tool(name="pc_send_to_group")
-    async def pc_send_to_group(
-        self,
-        event: AstrMessageEvent,
-        group_id: str,
-        message: str,
-        at_user: str = "",
-        relay_mode: str = "",
-        sensitive_confirmed: bool = False,
-    ) -> str:
-        """向指定群聊发送消息,可按 QQ/关系网名称/别名/群名片 @ 群友。message 应是最终要发送的转述文本。"""
+    async def pc_send_to_group(self, event: AstrMessageEvent, **kwargs) -> str:
+        """向指定群聊发送消息,可按 QQ/关系网名称/别名/群名片 @ 群友。
+
+        Args:
+            group_id(string): 目标群号。
+            message(string): 最终要发送的转述文本。
+            at_user(string): 可选,要 @ 的 QQ、关系网名称、别名、群名片或昵称。
+            relay_mode(string): persona/soft/original。
+            sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
+        """
         if not self.enable_atrelay_tools:
             return "发送失败：跨群转述工具未启用"
+        group_id = kwargs.get("group_id") or kwargs.get("group") or kwargs.get("target_group") or ""
+        message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
+        at_user = kwargs.get("at_user") or kwargs.get("at") or kwargs.get("target_user") or kwargs.get("user_id") or ""
+        at_qq_list = kwargs.get("at_qq_list") or kwargs.get("at_users") or kwargs.get("at_list")
+        if not at_user and isinstance(at_qq_list, list) and at_qq_list:
+            at_user = str(at_qq_list[0])
+        relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
+        sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         target_group = _single_line(group_id, 40)
         text = _single_line(message, 800)
         relay_mode_normalized = self._normalize_atrelay_relay_mode(relay_mode)
@@ -24894,7 +25375,7 @@ Bot 主动后用户回复次数：{reply_count}
         guard = self._atrelay_confirmation_guard(
             text,
             relay_mode=relay_mode_normalized,
-            sensitive_confirmed=self._atrelay_bool_flag(sensitive_confirmed),
+            sensitive_confirmed=self._atrelay_bool_flag(sensitive_confirmed) or self._atrelay_event_confirms_sensitive_send(event),
         )
         if guard:
             return guard
@@ -24924,17 +25405,21 @@ Bot 主动后用户回复次数：{reply_count}
             return f"发送失败：{_single_line(exc, 160)}"
 
     @filter.llm_tool(name="pc_send_to_private_user")
-    async def pc_send_to_private_user(
-        self,
-        event: AstrMessageEvent,
-        user_id: str,
-        message: str,
-        relay_mode: str = "",
-        sensitive_confirmed: bool = False,
-    ) -> str:
-        """向指定 QQ 用户发送私聊消息。message 应是最终要发送的转述文本。"""
+    async def pc_send_to_private_user(self, event: AstrMessageEvent, **kwargs) -> str:
+        """向指定 QQ 用户发送私聊消息。
+
+        Args:
+            user_id(string): 目标 QQ。
+            message(string): 最终要发送的转述文本。
+            relay_mode(string): persona/soft/original。
+            sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
+        """
         if not self.enable_atrelay_tools:
             return "发送失败：跨群转述工具未启用"
+        user_id = kwargs.get("user_id") or kwargs.get("qq") or kwargs.get("target_user") or kwargs.get("target") or ""
+        message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
+        relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
+        sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         target_user = _single_line(user_id, 40)
         text = _single_line(message, 800)
         relay_mode_normalized = self._normalize_atrelay_relay_mode(relay_mode)
@@ -24951,7 +25436,7 @@ Bot 主动后用户回复次数：{reply_count}
         guard = self._atrelay_confirmation_guard(
             text,
             relay_mode=relay_mode_normalized,
-            sensitive_confirmed=self._atrelay_bool_flag(sensitive_confirmed),
+            sensitive_confirmed=self._atrelay_bool_flag(sensitive_confirmed) or self._atrelay_event_confirms_sensitive_send(event),
         )
         if guard:
             return guard
@@ -24965,16 +25450,21 @@ Bot 主动后用户回复次数：{reply_count}
             return f"私聊发送失败：{_single_line(exc, 160)}"
 
     @filter.llm_tool(name="pc_send_to_groups")
-    async def pc_send_to_groups(
-        self,
-        event: AstrMessageEvent,
-        group_ids: str,
-        message: str,
-        at_user: str = "",
-        relay_mode: str = "",
-        sensitive_confirmed: bool = False,
-    ) -> str:
-        """向多个群发送同一条通知。group_ids 可用逗号、空格或换行分隔,会自动限量和去重。"""
+    async def pc_send_to_groups(self, event: AstrMessageEvent, **kwargs) -> str:
+        """向多个群发送同一条通知。
+
+        Args:
+            group_ids(string): 目标群号,可用逗号、空格或换行分隔。
+            message(string): 最终要发送的转述文本。
+            at_user(string): 可选,要 @ 的 QQ、关系网名称、别名、群名片或昵称。
+            relay_mode(string): persona/soft/original。
+            sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
+        """
+        group_ids = kwargs.get("group_ids") or kwargs.get("groups") or kwargs.get("group_id") or kwargs.get("targets") or ""
+        message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
+        at_user = kwargs.get("at_user") or kwargs.get("at") or kwargs.get("target_user") or kwargs.get("user_id") or ""
+        relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
+        sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         targets = [item for item in self._parse_atrelay_target_list(group_ids, limit=self.atrelay_multi_target_limit) if item.isdigit()]
         if not targets:
             return "发送失败：没有有效群号"
@@ -24992,15 +25482,19 @@ Bot 主动后用户回复次数：{reply_count}
         return "多群通知完成：\n" + "\n".join(results[: self.atrelay_multi_target_limit])
 
     @filter.llm_tool(name="pc_send_to_private_users")
-    async def pc_send_to_private_users(
-        self,
-        event: AstrMessageEvent,
-        user_ids: str,
-        message: str,
-        relay_mode: str = "",
-        sensitive_confirmed: bool = False,
-    ) -> str:
-        """向多个 QQ 用户发送同一条私聊转述。user_ids 可用逗号、空格或换行分隔,会自动限量和去重。"""
+    async def pc_send_to_private_users(self, event: AstrMessageEvent, **kwargs) -> str:
+        """向多个 QQ 用户发送同一条私聊转述。
+
+        Args:
+            user_ids(string): 目标 QQ,可用逗号、空格或换行分隔。
+            message(string): 最终要发送的转述文本。
+            relay_mode(string): persona/soft/original。
+            sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
+        """
+        user_ids = kwargs.get("user_ids") or kwargs.get("users") or kwargs.get("user_id") or kwargs.get("targets") or ""
+        message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
+        relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
+        sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         targets = [item for item in self._parse_atrelay_target_list(user_ids, limit=self.atrelay_multi_target_limit) if item.isdigit()]
         if not targets:
             return "发送失败：没有有效 QQ"
@@ -25017,19 +25511,25 @@ Bot 主动后用户回复次数：{reply_count}
         return "多人转述完成：\n" + "\n".join(results[: self.atrelay_multi_target_limit])
 
     @filter.llm_tool(name="pc_schedule_group_relay")
-    async def pc_schedule_group_relay(
-        self,
-        event: AstrMessageEvent,
-        group_id: str,
-        at_user: str,
-        message: str,
-        relay_mode: str = "",
-        sensitive_confirmed: bool = False,
-        expire_hours: int = 24,
-    ) -> str:
-        """挂起一条群聊转述,等目标用户在群里发言后自动 @ 并转述。"""
+    async def pc_schedule_group_relay(self, event: AstrMessageEvent, **kwargs) -> str:
+        """挂起一条群聊转述,等目标用户在群里发言后自动 @ 并转述。
+
+        Args:
+            group_id(string): 目标群号。
+            at_user(string): 目标 QQ、关系网名称、别名、群名片或昵称。
+            message(string): 最终要发送的转述文本。
+            relay_mode(string): persona/soft/original。
+            sensitive_confirmed(boolean): 敏感内容是否已获得用户确认。
+            expire_hours(number): 挂起有效小时数。
+        """
         if not self.enable_atrelay_tools:
             return "挂起失败：跨群转述工具未启用"
+        group_id = kwargs.get("group_id") or kwargs.get("group") or kwargs.get("target_group") or ""
+        at_user = kwargs.get("at_user") or kwargs.get("target_user") or kwargs.get("user_id") or kwargs.get("name") or kwargs.get("nickname") or ""
+        message = kwargs.get("message") or kwargs.get("text") or kwargs.get("content") or kwargs.get("msg") or ""
+        relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
+        sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
+        expire_hours = kwargs.get("expire_hours", kwargs.get("ttl_hours", 24))
         target_group = _single_line(group_id, 40) or self._extract_group_id_from_event(event)
         text = _single_line(message, 800)
         if not target_group.isdigit():
@@ -25043,7 +25543,7 @@ Bot 主动后用户回复次数：{reply_count}
         guard = self._atrelay_confirmation_guard(
             text,
             relay_mode=relay_mode_normalized,
-            sensitive_confirmed=self._atrelay_bool_flag(sensitive_confirmed),
+            sensitive_confirmed=self._atrelay_bool_flag(sensitive_confirmed) or self._atrelay_event_confirms_sensitive_send(event),
         )
         if guard:
             return guard.replace("不能直接转述", "不能直接挂起转述")
@@ -25080,7 +25580,7 @@ Bot 主动后用户回复次数：{reply_count}
                     "target_name": target_name,
                     "message": text,
                     "relay_mode": relay_mode_normalized,
-                    "sensitive_confirmed": self._atrelay_bool_flag(sensitive_confirmed),
+                    "sensitive_confirmed": self._atrelay_bool_flag(sensitive_confirmed) or self._atrelay_event_confirms_sensitive_send(event),
                     "signature": signature,
                 }
             )
@@ -25676,7 +26176,7 @@ Bot 主动后用户回复次数：{reply_count}
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         provider_id, provider_source, _configured_prompt = self._private_image_caption_provider_id(umo)
         if not provider_id:
-            logger.info("[PrivateCompanion] 合并消息图片视觉跳过: 未配置 AstrBot 识图模型或插件总视觉模型")
+            logger.info("[PrivateCompanion] 合并消息图片视觉跳过: 未配置首选识图模型或备选识图模型")
             return ""
         getter = getattr(self.context, "get_provider_by_id", None)
         provider = getter(provider_id) if callable(getter) else None
@@ -25716,8 +26216,8 @@ Bot 主动后用户回复次数：{reply_count}
         self_recognition_prompt = self._private_image_self_recognition_prompt()
         if self_recognition_prompt and self_recognition_prompt not in prompt:
             prompt = f"{prompt}\n\n{self_recognition_prompt}"
-        cache_key = self._private_image_vision_cache_key(image_keys, provider_id, prompt)
-        cached_text = self._get_private_image_vision_cache(cache_key)
+        cache_key = self._private_image_vision_cache_key(image_keys, provider_id, prompt, scope="forward_image")
+        cached_text = self._get_private_image_vision_cache(cache_key, provider_id=provider_id, image_keys=image_keys, scope="forward_image")
         if cached_text:
             logger.info(
                 "[PrivateCompanion] 合并消息图片视觉命中缓存: provider=%s images=%s preview=%s",
@@ -25752,7 +26252,7 @@ Bot 主动后用户回复次数：{reply_count}
                 len(cleaned_text),
                 _single_line(cleaned_text, 220),
             )
-            self._set_private_image_vision_cache(cache_key, cleaned_text, provider_id=provider_id, image_keys=image_keys)
+            self._set_private_image_vision_cache(cache_key, cleaned_text, provider_id=provider_id, image_keys=image_keys, prompt=prompt, scope="forward_image")
             return cleaned_text
         except Exception as exc:
             logger.info("[PrivateCompanion] 合并消息图片视觉失败: %s", _single_line(exc, 160))
@@ -26162,6 +26662,8 @@ Bot 主动后用户回复次数：{reply_count}
                     payloads[-1],
                     source_text=working_text,
                     source_origin="llm_response",
+                    trigger_message_id=self._event_message_id(event),
+                    trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
                 )
 
         inbound_text = _single_line(current_user.get("last_user_message"), 260)
@@ -27563,6 +28065,7 @@ Bot 主动后用户回复次数：{reply_count}
                 text=text,
                 group_id=group_id,
                 scene=scene,
+                message_id=self._event_message_id(event),
             )
             registration_payload = self._maybe_worldbook_self_register_from_group_message(
                 event,

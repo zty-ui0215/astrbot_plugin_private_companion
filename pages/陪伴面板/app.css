@@ -339,15 +339,20 @@ h2 {
 }
 
 .shortcut-chip b {
+  min-width: 0;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .shortcut-chip span {
+  min-width: 0;
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .dashboard-grid article {
+  min-width: 0;
   min-height: 190px;
   border: 1px solid rgba(222, 217, 206, 0.80);
   border-radius: var(--radius);
@@ -362,6 +367,7 @@ h2 {
 
 .health-list,
 .diagnostic-list,
+.ux-review-list,
 .coverage-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -371,6 +377,7 @@ h2 {
 
 .health-item,
 .diagnostic-item,
+.ux-review-item,
 .coverage-item {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -379,20 +386,64 @@ h2 {
   box-shadow: 0 1px 0 rgba(255,255,255,0.72) inset;
 }
 
+.ux-review-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ux-review-item {
+  display: grid;
+  gap: 6px;
+  min-height: 102px;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: border-color .16s var(--ease), box-shadow .16s var(--ease), transform .16s var(--ease);
+}
+
+.ux-review-item:hover {
+  border-color: rgba(47, 117, 102, 0.34);
+  box-shadow: 0 9px 20px rgba(49, 45, 34, 0.09), 0 1px 0 rgba(255,255,255,0.72) inset;
+  transform: translateY(-1px);
+}
+
+.ux-review-item span {
+  justify-self: start;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ux-review-item b {
+  font-size: 15px;
+}
+
+.ux-review-item small {
+  color: var(--muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .health-item b,
-.coverage-item b {
+.coverage-item b,
+.module-summary-card b {
   display: block;
   margin-bottom: 4px;
+  overflow-wrap: anywhere;
 }
 
 .health-item span,
-.coverage-item span {
+.coverage-item span,
+.module-summary-card small {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
 
 .health-item.ok,
 .diagnostic-item.ok,
+.ux-review-item.ok,
 .coverage-item.ok {
   border-color: rgba(47, 117, 102, 0.42);
   background: var(--accent-soft);
@@ -400,9 +451,15 @@ h2 {
 
 .health-item.warn,
 .diagnostic-item.warn,
+.ux-review-item.warn,
 .coverage-item.blocked {
   border-color: rgba(161, 95, 38, 0.36);
   background: #f2e8df;
+}
+
+.ux-review-item.info {
+  border-color: rgba(66, 111, 156, 0.28);
+  background: var(--blue-soft);
 }
 
 .diagnostic-list {
@@ -1786,8 +1843,8 @@ input[type="search"] {
 
 .module-nav {
   position: sticky;
-  top: 0;
-  z-index: 2;
+  top: 58px;
+  z-index: 3;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -1817,6 +1874,7 @@ input[type="search"] {
   display: grid;
   gap: 12px;
   align-content: space-between;
+  min-width: 0;
   min-height: 130px;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
@@ -1832,6 +1890,7 @@ input[type="search"] {
 .preset-card p {
   color: var(--muted);
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .preset-card button,
@@ -1861,6 +1920,7 @@ input[type="search"] {
 
 .module-grid article,
 .module-card {
+  min-width: 0;
   border: 1px solid rgba(222, 217, 206, 0.82);
   border-radius: var(--radius);
   padding: 16px;
@@ -1997,6 +2057,7 @@ input[type="search"] {
   grid-column: auto;
   height: 30px;
   flex: 0 0 auto;
+  white-space: nowrap;
   border: 1px solid rgba(47, 117, 102, 0.22);
   border-radius: var(--radius-sm);
   padding: 0 10px;
@@ -2030,9 +2091,16 @@ input[type="search"] {
 .persona-card-head,
 .blueprint-head,
 .roleplay-user-card {
+  min-width: 0;
   display: flex;
   gap: 12px;
   align-items: flex-start;
+}
+
+.persona-card-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
 }
 
 .persona-avatar {
@@ -2101,13 +2169,14 @@ input[type="search"] {
 .blueprint-standard-grid label,
 .user-standard-grid label,
 .translation-standard-grid label {
+  min-width: 0;
   display: grid;
   gap: 7px;
 }
 
 .roleplay-appearance-group {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   grid-column: 1 / -1;
   border: 1px solid rgba(47, 117, 102, 0.14);
@@ -2178,7 +2247,7 @@ input[type="search"] {
 .roleplay-user-card {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(220px, 0.38fr) minmax(220px, 0.24fr) minmax(420px, 1fr);
+  grid-template-columns: minmax(220px, 0.9fr) minmax(120px, auto) minmax(220px, 0.8fr);
   gap: 12px;
   align-items: start;
   padding: 14px;
@@ -6460,9 +6529,39 @@ pre {
   padding: 18px 0;
 }
 
+@media (max-width: 1180px) {
+  .dashboard-pulse,
+  .module-summary,
+  .preset-grid,
+  .health-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ux-review-list,
+  .feature-switch-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .roleplay-user-card {
+    grid-template-columns: minmax(0, 1fr) minmax(150px, auto);
+  }
+
+  .roleplay-user-fields {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 1040px) {
   .roleplay-form {
     grid-template-columns: 1fr;
+  }
+
+  .blueprint-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .blueprint-head label {
+    grid-column: 1 / -1;
   }
 }
 
@@ -6476,11 +6575,16 @@ pre {
     padding: 8px;
   }
 
+  .panel {
+    padding: 14px;
+  }
+
   .stats,
   .dashboard-grid,
   .dashboard-pulse,
   .health-list,
   .diagnostic-list,
+  .ux-review-list,
   .coverage-grid,
   .group-page-head,
   .group-workbench,
@@ -6708,6 +6812,32 @@ pre {
     flex-wrap: nowrap;
   }
 
+  .module-nav a {
+    flex: 0 0 auto;
+  }
+
+  .heatmap {
+    grid-template-columns: repeat(6, minmax(34px, 1fr));
+  }
+
+  .persona-card-head {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .persona-card-head .roleplay-example-btn {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+
+  .roleplay-mode-switch {
+    width: 100%;
+  }
+
+  .roleplay-mode-switch button {
+    flex: 1;
+    min-width: 0;
+  }
+
   .module-card-head {
     flex-direction: column;
   }
@@ -6892,5 +7022,48 @@ pre {
 
   .tabs {
     overflow-x: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .shell {
+    width: min(100vw - 12px, 1320px);
+  }
+
+  .topbar {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 14px;
+  }
+
+  .icon-button {
+    align-self: flex-end;
+  }
+
+  .stats,
+  .dashboard-pulse,
+  .health-list,
+  .diagnostic-list,
+  .ux-review-list,
+  .module-summary,
+  .preset-grid,
+  .feature-switch-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-grid article,
+  .module-card,
+  .persona-card,
+  .world-blueprint,
+  .roleplay-user-card {
+    padding: 12px;
+  }
+
+  .roleplay-form {
+    gap: 12px;
+  }
+
+  dl {
+    grid-template-columns: 1fr;
   }
 }

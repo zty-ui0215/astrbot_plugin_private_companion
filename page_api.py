@@ -99,6 +99,7 @@ class PrivateCompanionPageApi:
                     "features": self._feature_flags(),
                     "providers": self._provider_settings(),
                     "settings": self._runtime_settings(),
+                    "cache": self._cache_summary(data),
                     "livingmemory": self._livingmemory_summary(),
                     "worldbook": self._worldbook_summary(data),
                     "proactive_candidates": self._proactive_candidate_summary(data),
@@ -119,6 +120,54 @@ class PrivateCompanionPageApi:
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取总览失败: {exc}", exc_info=True)
             return self._error(str(exc))
+
+    def _cache_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        image_cache = data.get("private_image_vision_cache") if isinstance(data.get("private_image_vision_cache"), dict) else {}
+        metrics = data.get("cache_metrics") if isinstance(data.get("cache_metrics"), dict) else {}
+
+        def metric_row(name: str) -> dict[str, Any]:
+            item = metrics.get(name) if isinstance(metrics.get(name), dict) else {}
+            hits = 0
+            misses = 0
+            try:
+                hits = max(0, int(item.get("hits") or 0))
+            except (TypeError, ValueError):
+                hits = 0
+            try:
+                misses = max(0, int(item.get("misses") or 0))
+            except (TypeError, ValueError):
+                misses = 0
+            total = hits + misses
+            return {
+                "hits": hits,
+                "misses": misses,
+                "total": total,
+                "hit_rate": round(hits / total, 4) if total else 0,
+                "last_hit_at": self.plugin._format_timestamp_elapsed(item.get("last_hit_ts", 0)),
+                "last_miss_at": self.plugin._format_timestamp_elapsed(item.get("last_miss_ts", 0)),
+            }
+
+        atrelay_cache = getattr(self.plugin, "_atrelay_member_cache", {})
+        atrelay_count = len(atrelay_cache) if isinstance(atrelay_cache, dict) else 0
+        weather = data.get("daily_weather") if isinstance(data.get("daily_weather"), dict) else {}
+        weather_age = self.plugin._format_timestamp_elapsed(weather.get("fetched_ts", 0)) if weather else ""
+        return {
+            "private_image_vision": {
+                "enabled": bool(getattr(self.plugin, "enable_private_image_vision_cache", False)),
+                "items": len(image_cache),
+                "max_items": int(getattr(self.plugin, "private_image_vision_cache_max_items", 0) or 0),
+                "private": metric_row("image_vision:private_image"),
+                "forward": metric_row("image_vision:forward_image"),
+            },
+            "atrelay_member_cache": {
+                "items": atrelay_count,
+                "ttl_minutes": int(getattr(self.plugin, "atrelay_member_cache_minutes", 0) or 0),
+            },
+            "weather": {
+                "cached": bool(weather),
+                "age": weather_age,
+            },
+        }
 
     def _auto_import_worldbook_if_needed_locked(self) -> None:
         if not bool(getattr(self.plugin, "worldbook_auto_import", False)):
@@ -1481,6 +1530,7 @@ class PrivateCompanionPageApi:
             "enable_user_habit_learning",
             "enable_humanized_states",
             "enable_segmented_proactive_reply",
+            "enable_proactive_quote_trigger_message",
             "inject_passive_states",
             "enable_cycle_state",
             "enable_skill_growth_simulation",
@@ -1690,6 +1740,7 @@ class PrivateCompanionPageApi:
             "inbound_message_debounce_seconds",
             "enable_semantic_message_debounce",
             "semantic_message_debounce_seconds",
+            "enable_proactive_quote_trigger_message",
             "private_image_vision_wait_seconds",
             "enable_private_image_self_recognition",
             "private_image_self_recognition_hint",
@@ -2220,6 +2271,7 @@ class PrivateCompanionPageApi:
             "enable_user_habit_learning",
             "enable_humanized_states",
             "enable_segmented_proactive_reply",
+            "enable_proactive_quote_trigger_message",
             "inject_passive_states",
             "enable_cycle_state",
             "enable_skill_growth_simulation",
@@ -2334,6 +2386,7 @@ class PrivateCompanionPageApi:
             "inbound_message_debounce_seconds",
             "enable_semantic_message_debounce",
             "semantic_message_debounce_seconds",
+            "enable_proactive_quote_trigger_message",
             "private_image_vision_wait_seconds",
             "enable_private_image_self_recognition",
             "private_image_self_recognition_hint",
@@ -2710,6 +2763,7 @@ class PrivateCompanionPageApi:
             "forward_message_parse_nested",
             "forward_message_image_vision",
             "enable_semantic_message_debounce",
+            "enable_proactive_quote_trigger_message",
             "enable_private_image_self_recognition",
             "enable_private_image_vision_cache",
             "enable_segmented_proactive_reply",
@@ -2883,6 +2937,14 @@ class PrivateCompanionPageApi:
         latest_items = state.get("latest_items") if isinstance(state.get("latest_items"), list) else []
         ai_daily = state.get("ai_daily") if isinstance(state.get("ai_daily"), dict) else {}
         ai_digest = ai_daily.get("last_digest") if isinstance(ai_daily.get("last_digest"), dict) else {}
+        ai_digest_items = ai_digest.get("items") if isinstance(ai_digest.get("items"), list) else []
+        ai_digest_first_item = ai_digest_items[0] if ai_digest_items and isinstance(ai_digest_items[0], dict) else {}
+        try:
+            ai_text_chars = max(0, int(ai_daily.get("last_text_chars") or 0))
+        except (TypeError, ValueError):
+            ai_text_chars = 0
+        if not ai_text_chars and ai_digest_first_item:
+            ai_text_chars = len(str(ai_digest_first_item.get("article_text") or ""))
         try:
             source_count = len(getattr(self.plugin, "_news_source_items", lambda: [])())
         except Exception:
@@ -2902,6 +2964,9 @@ class PrivateCompanionPageApi:
                 "last_success_date": self._single_line(ai_daily.get("last_success_date"), 20),
                 "last_video_title": self._single_line(ai_daily.get("last_video_title"), 120),
                 "last_text_link": self._single_line(ai_daily.get("last_text_link"), 400),
+                "last_text_readable": bool(ai_daily.get("last_text_readable")) if "last_text_readable" in ai_daily else bool(ai_digest_first_item.get("article_readable") and ai_digest_first_item.get("article_text")),
+                "last_text_chars": ai_text_chars,
+                "last_read_basis": self._single_line(ai_daily.get("last_read_basis"), 40),
                 "topic": self._single_line(ai_digest.get("topic"), 60),
                 "headline": self._single_line(ai_digest.get("headline"), 120),
             },

@@ -279,9 +279,9 @@
     "_special": "select_provider"
   },
   "PRIVATE_READING_VISION_PROVIDER_ID": {
-    "description": "总视觉模型（留空跟随工具结果转述模型）",
+    "description": "备选识图模型（留空跟随工具结果转述模型）",
     "type": "string",
-    "hint": "用于插件自身的视觉理解任务：识屏、素材封面/抽样页理解等需要看图的环节。私聊用户图片会优先使用 AstrBot 本体配置的识图模型，未配置时才回退到这里；留空会回退到 NARRATION_PROVIDER_ID 或相关工具默认模型。",
+    "hint": "首选识图模型来自 AstrBot 本体识图配置；未配置或不可用时才回退到这里。用于插件自身的视觉理解任务：私聊图片转述、合并消息图片、识屏、素材封面/抽样页理解等需要看图的环节。留空会回退到 NARRATION_PROVIDER_ID 或相关工具默认模型。",
     "default": "",
     "_special": "select_provider"
   },
@@ -489,6 +489,12 @@
     "type": "bool",
     "hint": "开启后会解析 unified_msg_origin，优先通过对应平台实例 send_by_session 发送，并在平台未运行时跳过；失败时回退 AstrBot 核心发送。",
     "default": true
+  },
+  "enable_proactive_quote_trigger_message": {
+    "description": "主动消息引用触发消息",
+    "type": "bool",
+    "hint": "开启后，群聊主动插话、复读跟读/打断会引用当前触发的群消息；模型预约的私聊主动若能追溯到同一私聊消息，也会引用。跨群转私聊、新闻、日程和随机主动等无同会话触发消息的场景不会强行引用。",
+    "default": false
   },
   "max_proactive_plan_lag_minutes": {
     "description": "主动候选过期重排时间（分钟）",

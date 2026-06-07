@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>陪伴面板</title>
-  <link rel="stylesheet" href="./app.css?v=20260607-roleplay-world-layout2" />
+  <link rel="stylesheet" href="./app.css?v=20260607-proactive-quote1" />
 </head>
 <body>
   <main class="shell">
@@ -51,6 +51,10 @@
           <article class="wide">
             <h2>运行诊断</h2>
             <div id="diagnosticPanel" class="diagnostic-list"></div>
+          </article>
+          <article class="wide">
+            <h2>拓展页自检</h2>
+            <div id="uxReviewPanel" class="ux-review-list"></div>
           </article>
           <article>
             <h2>私聊关系分布</h2>
@@ -117,9 +121,9 @@
               <label class="roleplay-textarea roleplay-freeform">角色设定补充
                 <textarea name="schedule_persona_prompt" rows="10" placeholder="姓名：
 种族：
-年龄：
+生日：
 性别：
-外貌：
+识别点：
 发型发色：
 瞳色：
 服饰风格：
@@ -134,11 +138,11 @@
               <div class="roleplay-standard persona-standard-grid">
                 <label>姓名 <textarea data-roleplay-persona-part="name" rows="2"></textarea></label>
                 <label>种族 <textarea data-roleplay-persona-part="species" rows="2"></textarea></label>
-                <label>年龄 <textarea data-roleplay-persona-part="age" rows="2"></textarea></label>
+                <label>生日 <textarea data-roleplay-persona-part="age" rows="2"></textarea></label>
                 <label>性别 <textarea data-roleplay-persona-part="gender" rows="2"></textarea></label>
                 <div class="roleplay-appearance-group">
                   <h4>外貌信息</h4>
-                  <label>外貌 <textarea data-roleplay-persona-part="appearance" rows="2"></textarea></label>
+                  <label>识别点 <textarea data-roleplay-persona-part="appearance" rows="2"></textarea></label>
                   <label>发型发色 <textarea data-roleplay-persona-part="hair" rows="2"></textarea></label>
                   <label>瞳色 <textarea data-roleplay-persona-part="eyes" rows="2"></textarea></label>
                   <label>服饰风格 <textarea data-roleplay-persona-part="clothing" rows="2"></textarea></label>
@@ -218,11 +222,17 @@ QQ空间 = 公开札记
               </div>
               <label class="roleplay-textarea roleplay-freeform">用户补充信息
                 <textarea name="private_image_self_recognition_hint" rows="5" placeholder="对用户的称呼：
+用户性别：
+用户生日：
+用户职业：
 是角色的XX：
 与角色的相处方式：
 其他补充信息："></textarea>
               </label>
               <div class="roleplay-standard user-standard-grid">
+                <label>性别 <textarea data-roleplay-user-part="user_gender" rows="2"></textarea></label>
+                <label>生日 <textarea data-roleplay-user-part="user_age" rows="2"></textarea></label>
+                <label>职业 <textarea data-roleplay-user-part="user_occupation" rows="2"></textarea></label>
                 <label>是角色的XX <textarea data-roleplay-user-part="role_relation" rows="2"></textarea></label>
                 <label>与角色的相处方式 <textarea data-roleplay-user-part="interaction" rows="2"></textarea></label>
                 <label class="wide-field">其他补充信息 <textarea data-roleplay-user-part="extra" rows="2"></textarea></label>
@@ -544,7 +554,7 @@ QQ空间 = 公开札记
             <h2>任务消耗排行</h2>
             <div id="tokenTaskChart" class="chart-box"></div>
           </article>
-          <article class="wide">
+          <article class="wide" id="tokenHourlyPanel">
             <h2>近 48 小时趋势</h2>
             <div id="tokenHourlyChart" class="token-bars"></div>
           </article>
@@ -715,6 +725,7 @@ QQ空间 = 公开札记
               <label>打断文本 <input name="group_repeat_interrupt_text" placeholder="禁止复读" /></label>
               <label class="wide-field">打断表情包路径 <input name="group_repeat_interrupt_image_path" placeholder="C:\\path\\to\\meme.png" /></label>
               <label class="toggle-row"><input name="enable_group_repeat_follow" type="checkbox" /> <span>启用复读跟读</span></label>
+              <label class="toggle-row"><input name="enable_proactive_quote_trigger_message" type="checkbox" /> <span>主动消息引用触发消息</span></label>
               <label class="toggle-row"><input name="enable_group_conversation_followup" type="checkbox" /> <span>启用连续对话保持</span></label>
               <label>连续对话判断秒数 <input name="group_conversation_followup_seconds" type="number" min="0" max="600" /></label>
               <label>连续续接上限 <input name="group_conversation_followup_max_turns" type="number" min="0" max="10" /></label>
@@ -934,6 +945,6 @@ QQ空间 = 公开札记
     </section>
   </main>
 
-  <script src="./app.js?v=20260607-roleplay-appearance-anchor1"></script>
+  <script src="./app.js?v=20260607-proactive-quote1"></script>
 </body>
 </html>
