@@ -1022,43 +1022,52 @@
   "news_sources": {
     "description": "新闻源",
     "type": "string",
-    "hint": "每行一个新闻源，格式为 名称|URL、名称|bilibili:UID、名称|bvid:BV...，也可以直接填 RSS/Atom URL、B 站空间链接或 B 站视频链接。默认包含综合中文新闻、科技新闻源和一个 AI 早报 B 站源；B 站源会读取公开视频标题、简介、链接和发布时间，若简介里有文字版链接会优先抓取并阅读完整文字版正文，失败才退回视频简介。",
-    "default": "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml\nGoogle新闻中文|https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans\nSolidot|https://www.solidot.org/index.rss\nHacker News|https://hnrss.org/frontpage\nMIT Technology Review|https://www.technologyreview.com/feed/\nArs Technica|https://feeds.arstechnica.com/arstechnica/index\nB站 AI早报|bilibili:285286947",
+    "hint": "每行一个新闻源，格式为 名称|URL、名称|bilibili:UID、名称|bvid:BV...，也可以直接填 RSS/Atom URL、B 站空间链接或 B 站视频链接。默认只包含综合中文新闻和科技新闻源；AI 日报/早报建议交给下方定时来源，避免普通新闻阅读频繁访问 B 站 UP 空间。",
+    "default": "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml\nGoogle新闻中文|https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans\nSolidot|https://www.solidot.org/index.rss\nHacker News|https://hnrss.org/frontpage\nMIT Technology Review|https://www.technologyreview.com/feed/\nArs Technica|https://feeds.arstechnica.com/arstechnica/index",
     "condition": {
       "enable_news_integration": true
     }
   },
   "enable_ai_daily_watch": {
-    "description": "追踪每日 AI 早报",
+    "description": "追踪每日 AI 日报/早报",
     "type": "bool",
-    "hint": "开启后会在指定时间窗口内反复检查 B 站 AI 早报 UP 主，读到当天新视频后停止。适合发布时间不固定的日报源。",
+    "hint": "开启后按来源配置的固定时间读取 B 站 AI 日报/早报。默认 12:00 读黑鸦Heya早报，23:00 读橘鸦Juya日报；到点后当天只尝试一次，避免反复轮询 UP 空间导致限流。",
     "default": true,
     "condition": {
       "enable_news_integration": true
     }
   },
-  "ai_daily_source_uid": {
-    "description": "AI 早报 UP 主 UID",
+  "ai_daily_sources": {
+    "description": "AI 日报/早报定时来源",
     "type": "string",
-    "hint": "默认 285286947。插件会读取该 UP 主最新视频，并优先寻找简介里的文字版链接。",
+    "hint": "每行一个来源，格式：名称|UP主名|UID|关键词|HH:MM。默认：AI日报|橘鸦Juya|285286947|日报 早报|23:00，以及 AI早报|黑鸦Heya|3706929260006322|早报 日报|12:00。插件会通过 B 站搜索 API/网页搜索找到当天视频，再读取文字版、字幕或视频公开信息。",
+    "default": "AI日报|橘鸦Juya|285286947|日报 早报|23:00\nAI早报|黑鸦Heya|3706929260006322|早报 日报|12:00",
+    "condition": {
+      "enable_ai_daily_watch": true
+    }
+  },
+  "ai_daily_source_uid": {
+    "description": "兼容旧版 AI 早报 UID",
+    "type": "string",
+    "hint": "旧版单 UP 配置兼容项。新版本请优先使用“AI 日报/早报定时来源”。",
     "default": "285286947",
     "condition": {
       "enable_ai_daily_watch": true
     }
   },
   "ai_daily_check_window": {
-    "description": "AI 早报检查窗口",
+    "description": "旧版 AI 早报检查窗口",
     "type": "string",
-    "hint": "格式 HH:MM-HH:MM。窗口内按间隔轮询，读到当天新视频后当天停止。默认覆盖 8 点到 10 点附近的不固定更新时间。",
+    "hint": "旧版窗口轮询兼容项。新版本定时来源按每行 HH:MM 执行，不再依赖该窗口。",
     "default": "07:30-12:30",
     "condition": {
       "enable_ai_daily_watch": true
     }
   },
   "ai_daily_check_interval_minutes": {
-    "description": "AI 早报检查间隔分钟",
+    "description": "旧版 AI 早报检查间隔分钟",
     "type": "int",
-    "hint": "窗口内每隔多久检查一次。不要太短，避免频繁访问 B 站。",
+    "hint": "旧版窗口轮询兼容项。新版本到点后当天只尝试一次，避免频繁访问 B 站。",
     "slider": {
       "min": 10,
       "max": 240,
@@ -1070,9 +1079,9 @@
     }
   },
   "ai_daily_prefer_text_version": {
-    "description": "AI 早报优先文字版",
+    "description": "AI 日报/早报优先文字版",
     "type": "bool",
-    "hint": "开启后如果简介里有文字版链接，会优先阅读完整正文。若文字版暂时不可读，会退回视频简介避免完全漏读。",
+    "hint": "开启后如果简介里有文字版链接，会优先阅读完整正文。若文字版暂时不可读，会尝试读取公开视频字幕，再退回视频公开信息避免完全漏读。",
     "default": true,
     "condition": {
       "enable_ai_daily_watch": true
@@ -1574,6 +1583,20 @@
       "step": 1
     },
     "default": 4,
+    "condition": {
+      "forward_message_image_vision": true
+    }
+  },
+  "forward_message_image_vision_timeout_seconds": {
+    "description": "合并消息图片视觉等待秒数",
+    "type": "float",
+    "hint": "合并消息里图片识别最多等待多久。超时后会先按文字记录回复，并保留图片占位，避免视觉模型过慢拖住整轮对话。设为 0 表示不限制等待。",
+    "slider": {
+      "min": 0,
+      "max": 60,
+      "step": 1
+    },
+    "default": 6,
     "condition": {
       "forward_message_image_vision": true
     }

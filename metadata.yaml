@@ -1,8 +1,17 @@
 name: astrbot_plugin_private_companion
 display_name: 我会永远陪着你
 author: menglimi
+author_url: https://github.com/menglimi
 description: astrbot_plugin_private_companion 是面向 AstrBot 的人格连续性、关系识别与主动行为编排插件。它把生活状态、日程细化、梦境日记、长期创作、重要日期、私聊关系、群聊观察、QQ 关系网、可选外部动作、模型 Provider 和扩展页管理组织成一套持续陪伴体验。
 desc: 为 AstrBot 提供人格连续性、私聊/群聊陪伴、关系识别、主动行为、长期创作和可视化管理的陪伴编排插件。
+repo: https://github.com/menglimi/astrbot_plugin_private_companion
+category: AI 增强
+tags:
+  - 陪伴
+  - 长期记忆
+  - 主动行为
+  - 群聊观察
+  - 可视化管理
 help: |
   私聊发送：
   - 陪伴 状态
@@ -15,9 +24,6 @@ help: |
   - 陪伴 重置细化
   - 陪伴 能力列表
   - 陪伴 查看提示词 日程|细化|主动|回复注入
-  - 陪伴 完整测试
-  - 陪伴 结束完整测试
-  - 陪伴模拟唤醒 <想模拟的用户消息>
   - 陪伴 生成状态
   - 陪伴 梦境
   - 陪伴 梦境碎片
@@ -49,7 +55,7 @@ help: |
   - 陪伴群 关闭
 
   本插件不只限于私聊。私聊陪伴默认开启；配置页 target_user_ids 里的 QQ 会自动预热主动消息。群聊陪伴支持白名单/黑名单模式,默认白名单,不会主动抢话。插件遵守每日上限、最小间隔、免打扰时间、群聊插话间隔和主动生图额度。看屏幕、生图、戳一戳、语音、QQ 状态同步、B 站 Bot 等联动能力都是可选项,缺失时会自动跳过或回退。
-version: 3.0.3
+version: 3.1.0
 support_platforms:
   - aiocqhttp
 astrbot_version: ">=4.22.0"

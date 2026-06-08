@@ -148,7 +148,7 @@ const featureMeta = {
   enable_news_integration: ["新闻阅读", "低频读取 RSS/Atom 新闻源，形成近期见闻和主动分享素材。"],
   enable_news_daily_hot_read: ["每日热点", "随日程或后台检查读取热点候选，形成当天的时讯见闻。"],
   enable_news_boredom_read: ["无聊看新闻", "空档或无聊时扫几条新闻，按人格决定是否私聊提起。"],
-  enable_ai_daily_watch: ["AI 早报追踪", "在早间窗口反复检查 B 站 AI 早报，读到当天新视频后停止。"],
+  enable_ai_daily_watch: ["AI 日报/早报追踪", "按配置时间读取黑鸦早报和橘鸦日报，到点后当天只尝试一次。"],
   enable_external_event_self_link: ["外界信息自我关联", "让新闻和搜索结果先变成“这和我有什么关系”的内部意愿，再进入主动候选。"],
   enable_web_exploration: ["主动搜索", "按人格兴趣、最近话题、日程和心情低频使用 AstrBot 网页搜索，形成探索笔记。"],
   enable_web_exploration_boredom_search: ["空档自主搜索", "空闲或无聊时先自行决定搜索主题，再调用网页搜索了解新鲜事物。"],
@@ -410,10 +410,11 @@ const configLabels = {
   external_event_self_link_cooldown_hours: "自我关联冷却",
   news_max_items_per_source: "单源读取条数",
   news_sources: "新闻源",
-  enable_ai_daily_watch: "AI 早报追踪",
-  ai_daily_source_uid: "AI 早报 UP 主 UID",
-  ai_daily_check_window: "AI 早报检查窗口",
-  ai_daily_check_interval_minutes: "AI 早报检查间隔",
+  enable_ai_daily_watch: "AI 日报/早报追踪",
+  ai_daily_sources: "AI 日报/早报来源",
+  ai_daily_source_uid: "兼容旧版 UP 主 UID",
+  ai_daily_check_window: "旧版检查窗口",
+  ai_daily_check_interval_minutes: "旧版检查间隔",
   ai_daily_prefer_text_version: "优先文字版",
   enable_news_daily_hot_read: "每日获取热点",
   enable_news_boredom_read: "无聊看新闻",
@@ -564,12 +565,13 @@ const configDescriptions = {
   external_event_self_link_probability: "自我关联判断通过后进入主动候选的概率倍率，0-1。越高越容易因为与自己有关的新鲜事来找用户。",
   external_event_self_link_cooldown_hours: "同一用户两次因外界信息自我关联而主动找人的最小间隔。",
   news_max_items_per_source: "每个新闻源最多读取多少条候选。",
-  news_sources: "新闻源地址。可填 RSS/Atom、B 站空间链接、bilibili:UID、bvid:BV... 或单条 B 站视频链接；如果 B 站视频简介里有文字版链接，会优先抓取并阅读完整文字版正文，失败才退回视频简介。",
-  enable_ai_daily_watch: "开启后会在指定窗口内反复检查 AI 早报 UP 主；读到当天新视频后当天停止。",
-  ai_daily_source_uid: "AI 早报 UP 主的 B 站 UID。默认 285286947。",
-  ai_daily_check_window: "每天检查 AI 早报的时间窗口，格式 HH:MM-HH:MM。",
-  ai_daily_check_interval_minutes: "窗口内每隔多少分钟检查一次，避免发布时间不固定导致漏读。",
-  ai_daily_prefer_text_version: "开启后优先读取视频简介里的文字版链接，失败时退回视频简介。",
+  news_sources: "新闻源地址。可填 RSS/Atom、B 站空间链接、bilibili:UID、bvid:BV... 或单条 B 站视频链接。AI 日报/早报建议使用定时来源，避免普通新闻阅读反复访问 UP 空间。",
+  enable_ai_daily_watch: "开启后按来源配置的固定时间读取 AI 日报/早报；默认 12:00 黑鸦Heya早报，23:00 橘鸦Juya日报。",
+  ai_daily_sources: "每行一个来源：名称|UP主名|UID|关键词|HH:MM。到点后当天只尝试一次，会优先文字版，再尝试字幕和视频公开信息。",
+  ai_daily_source_uid: "旧版单 UP 配置兼容项。新版本请优先使用 AI 日报/早报来源。",
+  ai_daily_check_window: "旧版窗口轮询兼容项。定时来源按每行 HH:MM 执行。",
+  ai_daily_check_interval_minutes: "旧版窗口轮询兼容项。定时来源到点后当天只尝试一次。",
+  ai_daily_prefer_text_version: "开启后优先读取视频简介里的文字版链接，失败时尝试公开视频字幕，再退回视频公开信息。",
   news_hot_sources: "热点来源配置。用于每日热点候选。",
   news_hot_max_items: "热点候选最多抓取多少条。",
   web_exploration_interests: "主动搜索时的兴趣倾向。不是硬名单，Bot 会结合人格、日程和最近聊天自行决定。",
@@ -669,9 +671,9 @@ const featureSettingGroups = {
   enable_livingmemory_integration: [],
   enable_bilibili_integration: ["bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
   enable_bilibili_boredom_watch: ["bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
-  enable_news_integration: ["enable_news_daily_hot_read", "enable_ai_daily_watch", "enable_news_boredom_read", "enable_external_event_self_link", "news_hot_sources", "news_hot_max_items", "news_sources", "ai_daily_source_uid", "ai_daily_check_window", "ai_daily_check_interval_minutes", "ai_daily_prefer_text_version", "news_min_interval_hours", "news_share_probability", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
-  enable_news_daily_hot_read: ["news_hot_sources", "news_hot_max_items", "enable_ai_daily_watch", "ai_daily_check_window", "ai_daily_check_interval_minutes"],
-  enable_ai_daily_watch: ["ai_daily_source_uid", "ai_daily_check_window", "ai_daily_check_interval_minutes", "ai_daily_prefer_text_version"],
+  enable_news_integration: ["enable_news_daily_hot_read", "enable_ai_daily_watch", "enable_news_boredom_read", "enable_external_event_self_link", "news_hot_sources", "news_hot_max_items", "news_sources", "ai_daily_sources", "ai_daily_prefer_text_version", "news_min_interval_hours", "news_share_probability", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
+  enable_news_daily_hot_read: ["news_hot_sources", "news_hot_max_items", "enable_ai_daily_watch", "ai_daily_sources"],
+  enable_ai_daily_watch: ["ai_daily_sources", "ai_daily_prefer_text_version"],
   enable_news_boredom_read: ["news_min_interval_hours", "news_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
   enable_external_event_self_link: ["external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_share_probability", "web_exploration_share_probability"],
   enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
@@ -1207,6 +1209,8 @@ function insightStatus(value) {
     search_failed: "搜索失败",
     digest_failed: "整理失败",
     web_search_disabled_or_unconfigured: "搜索未配置",
+    waiting_schedule: "等待定时",
+    all_sources_done: "今日来源已处理",
     waiting_window: "等待窗口",
     checking: "正在检查",
     waiting_today_video: "等待今日视频",
@@ -1227,7 +1231,16 @@ function renderNewsInsightPanel() {
   const aiDailyTextStatus = news.ai_daily_enabled
     ? (aiDaily.last_text_readable
       ? `文字版 ${formatCompactNumber(aiDaily.last_text_chars || 0)}字`
-      : (aiDaily.last_text_link ? "文字版未读到正文" : "文字版暂无"))
+      : (aiDaily.last_video_subtitle_readable
+        ? `字幕 ${formatCompactNumber(aiDaily.last_video_subtitle_chars || 0)}字`
+        : (aiDaily.last_video_link
+          ? (aiDaily.last_video_context_chars
+            ? `视频信息 ${formatCompactNumber(aiDaily.last_video_context_chars || 0)}字`
+            : (aiDaily.last_video_subtitle_status === "missing" ? "字幕暂无，按视频公开信息" : "视频正文暂无"))
+          : (aiDaily.last_text_link ? "文字版未读到正文" : "文字版暂无"))))
+    : "";
+  const aiDailyBasisStatus = news.ai_daily_enabled && aiDaily.last_read_basis
+    ? `依据：${aiDaily.last_read_basis}`
     : "";
   const headline = digest.headline || digest.topic || "暂无新闻见闻";
   const impression = digest.impression || (enabled ? "暂无整理结果。" : "新闻阅读未开启");
@@ -1251,8 +1264,9 @@ function renderNewsInsightPanel() {
     <div class="insight-meta">
       <span>${escapeHtml(insightStatus(news.last_status))}</span>
       <span>${dailyHot ? "每日热点开启" : "每日热点关闭"}</span>
-      <span>${news.ai_daily_enabled ? `AI早报：${escapeHtml(insightStatus(aiDaily.status))}` : "AI早报关闭"}</span>
+      <span>${news.ai_daily_enabled ? `AI日报/早报：${escapeHtml(insightStatus(aiDaily.status))}` : "AI日报/早报关闭"}</span>
       ${aiDailyTextStatus ? `<span>${escapeHtml(aiDailyTextStatus)}</span>` : ""}
+      ${aiDailyBasisStatus ? `<span>${escapeHtml(aiDailyBasisStatus)}</span>` : ""}
       <span>${news.boredom_read_enabled ? "空档阅读开启" : "空档阅读关闭"}</span>
     </div>
     <ul class="insight-list">${itemHtml}</ul>
@@ -1493,10 +1507,10 @@ function renderUxReviewPanel() {
       level: news.ai_daily_enabled
         ? (aiDaily.last_text_readable || aiDaily.status === "already_read_today_video" ? "ok" : "warn")
         : "info",
-      title: "AI 早报可解释性",
+      title: "AI 日报/早报可解释性",
       text: news.ai_daily_enabled
         ? (aiDaily.last_text_readable ? `文字版已读 ${formatCompactNumber(aiDaily.last_text_chars || 0)} 字` : `状态：${insightStatus(aiDaily.status)}`)
-        : "AI 早报追踪关闭",
+        : "AI 日报/早报追踪关闭",
       tab: "dashboard",
     },
   ];
@@ -1729,14 +1743,14 @@ function renderTokens() {
   const hourlyPanel = $("#tokenHourlyPanel");
   if (hourlyPanel) hourlyPanel.hidden = !showHourlyTrend;
   const budgetCards = scope.isToday ? [
-    miniStat("今日上限", dailyLimit > 0 ? formatCompactNumber(dailyLimit) : "不限"),
-    miniStat("今日剩余", dailyRemaining == null ? "不限" : formatCompactNumber(dailyRemaining)),
-    miniStat(
-      budget.soft_active ? "软限额已接管" : "每日软限额",
-      budget.soft_enabled && softLimit > 0
+    tokenBudgetStat({
+      limit: dailyLimit > 0 ? formatCompactNumber(dailyLimit) : "不限",
+      remaining: dailyRemaining == null ? "不限" : formatCompactNumber(dailyRemaining),
+      softLabel: budget.soft_active ? "软限额已接管" : "每日软限额",
+      softValue: budget.soft_enabled && softLimit > 0
         ? (budget.soft_active ? `已暂缓 ${formatNumber(budget.deferred_calls || 0)} 次` : `剩 ${formatCompactNumber(softRemaining)}`)
         : "关闭",
-    ),
+    }),
     miniStat("主动消息", formatCompactNumber(exemptUsed)),
   ] : [];
   $("#tokenSummary").innerHTML = [
@@ -5738,10 +5752,10 @@ const featureDetailGuides = {
     disabled: "不会自动获取每日热点。",
   },
   enable_ai_daily_watch: {
-    summary: "在早间时间窗口内追踪 AI 早报 UP 主，解决发布时间从 8 点到 10 点不固定的问题。",
-    trigger: "后台检查进入配置窗口后，按间隔读取 UP 主最新视频。",
-    enabled: "读到当天新视频后优先读取文字版正文，并当天停止重复检查。",
-    disabled: "AI 早报只会作为普通新闻源参与抓取，可能错过不固定更新时间。",
+    summary: "按配置时间读取 AI 日报/早报来源，默认 12:00 读黑鸦Heya早报，23:00 读橘鸦Juya日报。",
+    trigger: "后台检查发现某个来源已到配置时间且今天尚未尝试时。",
+    enabled: "到点后当天只尝试一次，优先读取文字版正文，再尝试字幕和视频公开信息。",
+    disabled: "不会自动追踪 AI 日报/早报定时来源。",
   },
   enable_news_boredom_read: {
     summary: "Bot 空闲或无聊时低频看新闻，按人格判断是否提起。",
@@ -6140,6 +6154,24 @@ function renderProviderFlow(providers) {
 
 function miniStat(label, value) {
   return `<div class="mini-stat"><b>${escapeHtml(value)}</b><span>${escapeHtml(label)}</span></div>`;
+}
+
+function tokenBudgetStat({ limit, remaining, softLabel, softValue }) {
+  const rows = [
+    ["今日上限", limit],
+    ["今日剩余", remaining],
+    [softLabel, softValue],
+  ];
+  return `
+    <div class="mini-stat token-budget-stat">
+      ${rows.map(([label, value]) => `
+        <span class="token-budget-item">
+          <b>${escapeHtml(value)}</b>
+          <small>${escapeHtml(label)}</small>
+        </span>
+      `).join("")}
+    </div>
+  `;
 }
 
 function scoreGauge(label, value, min, max) {

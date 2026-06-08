@@ -1,0 +1,5810 @@
+# -*- coding: utf-8 -*-
+"""
+DailyStateMixin — 日程、状态、天气、日记、技能成长和计时器
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import gc
+import hashlib
+import html
+import importlib
+import json
+import math
+import os
+import random
+import re
+import shutil
+import sys
+import time
+import unicodedata
+import uuid
+import zoneinfo
+from copy import deepcopy
+from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
+from http.cookies import SimpleCookie
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from xml.etree import ElementTree as ET
+
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+try:
+    from astrbot.api.message_components import At, Image, Plain, Record, Reply
+except ImportError:
+    from astrbot.api.message_components import At, Image, Plain
+    from astrbot.core.message.components import Record
+    try:
+        from astrbot.api.message_components import Reply
+    except ImportError:
+        try:
+            from astrbot.core.message.components import Reply
+        except ImportError:
+            Reply = None
+from astrbot.api.provider import ProviderRequest
+from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core import file_token_service
+from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
+from astrbot.core.agent.message import AssistantMessageSegment, TextPart, UserMessageSegment
+from astrbot.core.db.po import Conversation
+from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
+from astrbot.core.platform.message_session import MessageSession
+from astrbot.core.platform.message_type import MessageType
+from astrbot.core.platform.platform import PlatformStatus
+from astrbot.core.platform.platform_metadata import PlatformMetadata
+from astrbot.core.star.star_handler import EventType, star_handlers_registry
+from astrbot.core.provider.entities import LLMResponse
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+try:
+    import chinese_calendar as calendar_cn
+except Exception:
+    calendar_cn = None
+
+try:
+    from lunarcalendar import Converter, Solar
+except Exception:
+    Converter = None
+    Solar = None
+
+from .constants import (
+    DEFAULT_DAILY_PLAN_ITEMS,
+    DEFAULT_HUMANIZED_STATE,
+    PLUGIN_NAME,
+    DATA_VERSION,
+    PROACTIVE_ABILITY_REGISTRY,
+    STYLE_TEMPLATES,
+    VOICE_FALLBACK_TEMPLATES,
+    TIMER_TAG_PATTERN,
+    SUPPORTED_TIMER_FORMATS,
+    _ACTION_TEXT,
+    _DATA_STORE_KEYS,
+    _DEFAULT_GROUP_TEMPLATE,
+    _DEFAULT_USER_TEMPLATE,
+    _REASON_TEXT,
+    _SIMULATION_FALLBACK_EVENTS,
+)
+from .dreaming import (
+    build_dream_memory_fragments,
+    dream_fragment_effective_weight,
+    dream_theme_specs,
+    extract_weighted_dream_fragments,
+    fallback_diary_payload,
+    fallback_dream_fragments_for_diary,
+    generate_daily_diary,
+    generate_enhanced_dream_pick,
+    merge_dream_fragment_pool,
+    normalize_dream_fragment_item,
+    normalize_dream_fragment_pool,
+    recent_diary_context,
+    recent_diary_tags,
+    weighted_unique_fragment_sample,
+)
+from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .planning import (
+    build_daily_plan_prompt,
+    build_detail_enhancement_prompt,
+    format_plan_for_diary,
+    generate_daily_plan,
+    generate_detail_enhancement,
+    get_schedule_planning_prompt,
+    normalize_long_term_events,
+    normalize_story_items,
+    normalize_story_plan,
+    pick_detail_segment,
+)
+
+
+DEFAULT_AI_DAILY_NEWS_SOURCE = "B站 AI早报|bilibili:285286947"
+
+DEFAULT_NEWS_SOURCES = "\n".join(
+    [
+        "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
+        "Google新闻中文|https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "Solidot|https://www.solidot.org/index.rss",
+        "Hacker News|https://hnrss.org/frontpage",
+        "MIT Technology Review|https://www.technologyreview.com/feed/",
+        "Ars Technica|https://feeds.arstechnica.com/arstechnica/index",
+        DEFAULT_AI_DAILY_NEWS_SOURCE,
+    ]
+)
+
+LEGACY_DEFAULT_NEWS_SOURCES = "\n".join(
+    [
+        "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
+        "Google新闻中文|https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "Solidot|https://www.solidot.org/index.rss",
+    ]
+)
+
+PREVIOUS_TECH_DEFAULT_NEWS_SOURCES = "\n".join(
+    [
+        "BBC中文|https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
+        "Google新闻中文|https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "Solidot|https://www.solidot.org/index.rss",
+        "Hacker News|https://hnrss.org/frontpage",
+        "MIT Technology Review|https://www.technologyreview.com/feed/",
+        "Ars Technica|https://feeds.arstechnica.com/arstechnica/index",
+    ]
+)
+
+
+
+_LUNAR_MONTH_NAMES = [
+    "正月",
+    "二月",
+    "三月",
+    "四月",
+    "五月",
+    "六月",
+    "七月",
+    "八月",
+    "九月",
+    "十月",
+    "冬月",
+    "腊月",
+]
+_LUNAR_DAY_NAMES = [
+    "初一",
+    "初二",
+    "初三",
+    "初四",
+    "初五",
+    "初六",
+    "初七",
+    "初八",
+    "初九",
+    "初十",
+    "十一",
+    "十二",
+    "十三",
+    "十四",
+    "十五",
+    "十六",
+    "十七",
+    "十八",
+    "十九",
+    "二十",
+    "廿一",
+    "廿二",
+    "廿三",
+    "廿四",
+    "廿五",
+    "廿六",
+    "廿七",
+    "廿八",
+    "廿九",
+    "三十",
+]
+_SOLAR_TERM_DATES = {
+    (1, 5): "小寒",
+    (1, 20): "大寒",
+    (2, 4): "立春",
+    (2, 19): "雨水",
+    (3, 5): "惊蛰",
+    (3, 20): "春分",
+    (4, 4): "清明",
+    (4, 20): "谷雨",
+    (5, 5): "立夏",
+    (5, 21): "小满",
+    (6, 5): "芒种",
+    (6, 21): "夏至",
+    (7, 7): "小暑",
+    (7, 22): "大暑",
+    (8, 7): "立秋",
+    (8, 23): "处暑",
+    (9, 7): "白露",
+    (9, 23): "秋分",
+    (10, 8): "寒露",
+    (10, 23): "霜降",
+    (11, 7): "立冬",
+    (11, 22): "小雪",
+    (12, 7): "大雪",
+    (12, 22): "冬至",
+}
+_ALMANAC_YI = ["整理房间", "写字", "散步", "读书", "听歌", "轻度创作", "复盘", "安静休息"]
+_ALMANAC_JI = ["熬夜", "冲动发言", "硬撑", "反复纠结", "过度解释", "临时加压", "情绪化决定"]
+_PLATFORM_DISPLAY_NAMES = {
+    "aiocqhttp": "QQ",
+    "qq": "QQ",
+    "onebot": "QQ",
+    "telegram": "Telegram",
+    "wechat": "微信",
+    "discord": "Discord",
+}
+
+
+class DailyStateMixin:
+    """日程、状态、天气、日记、技能成长和计时器"""
+
+    def _next_detail_due_in_seconds(self, now: float | None = None) -> float | None:
+        if not self.enable_detail_enhancement:
+            return None
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
+            return None
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            enhanced = {}
+        segments = self._collect_detail_segments(plan, enhanced)
+        if not segments:
+            return None
+        now_dt = datetime.fromtimestamp(now or _now_ts())
+        now_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
+        if now_minutes is None:
+            return None
+        lead = max(0, self.detail_enhancement_lead_minutes)
+        candidates: list[float] = []
+        for segment in segments:
+            start = _safe_int(segment.get("start"), 0)
+            due_minute = max(0, start - lead)
+            if due_minute <= now_minutes:
+                return 0.0
+            due_dt = datetime.combine(now_dt.date(), datetime.min.time()) + timedelta(minutes=due_minute)
+            candidates.append(max(0.0, due_dt.timestamp() - (now or _now_ts())))
+        if not candidates:
+            return None
+        return min(candidates)
+
+    async def _ensure_daily_plan(self, force: bool = False) -> dict[str, Any] | None:
+        if not self.enable_daily_plan and not force:
+            return None
+
+        await self._ensure_daily_state(force=force)
+        today = _today_key()
+        async with self._data_lock:
+            current_plan = self.data.setdefault("daily_plan", {})
+            known_users = [
+                user for user in self.data.get("users", {}).values() if isinstance(user, dict) and user.get("umo")
+            ]
+            if not force and current_plan.get("date") == today:
+                return current_plan
+            if not force and self._is_plan_date_active(current_plan.get("date")):
+                return current_plan
+            if not force and not known_users:
+                return None
+            if not force and not self._is_daily_plan_due():
+                return current_plan if self._is_plan_date_active(current_plan.get("date")) else None
+
+        plan = await self._generate_daily_plan()
+        async with self._data_lock:
+            self.data["daily_plan"] = plan
+            self._save_data_sync()
+        await self._ensure_daily_news_reading(force=force)
+        return plan
+
+    async def _ensure_daily_diary(self, force: bool = False) -> dict[str, Any] | None:
+        if not self.enable_daily_diary and not force:
+            return None
+        today = _today_key()
+        async with self._data_lock:
+            if not force and self.data.get("diary_generated_day") == today:
+                return None
+            if not force and not self._is_daily_diary_due():
+                return None
+
+        diary = await self._generate_daily_diary()
+        async with self._data_lock:
+            diaries = self.data.setdefault("bot_diaries", [])
+            if not isinstance(diaries, list):
+                diaries = []
+                self.data["bot_diaries"] = diaries
+            diaries.append(diary)
+            del diaries[:-self.max_diary_entries]
+            self.data["dream_fragments"] = self._merge_dream_fragment_pool(
+                diary.get("dream_fragments", []) if isinstance(diary, dict) else []
+            )
+            self.data["diary_generated_day"] = today
+            story_plan = diary.get("story_plan")
+            if isinstance(story_plan, dict):
+                self.data["daily_story_plan"] = story_plan
+            self._save_data_sync()
+        return diary
+
+    async def _ensure_detail_enhancement(self, force: bool = False) -> dict[str, Any] | None:
+        if not self.enable_detail_enhancement and not force:
+            return None
+        async with self._data_lock:
+            plan = dict(self.data.get("daily_plan", {}))
+            plan_date = str(plan.get("date") or "")
+            if not self._is_plan_date_active(plan_date):
+                return None
+            if self.data.get("detail_enhanced_day") != plan_date:
+                self.data["detail_enhanced_day"] = plan_date
+                self.data["detail_enhanced_segments"] = {}
+            state = dict(self.data.get("daily_state", {}))
+            enhanced = self.data.setdefault("detail_enhanced_segments", {})
+            if not isinstance(enhanced, dict):
+                enhanced = {}
+                self.data["detail_enhanced_segments"] = enhanced
+            segments = self._collect_due_detail_segments(plan, enhanced, force=force)
+            if not segments:
+                return None
+            for segment in segments:
+                enhanced[segment["key"]] = {"status": "generating", "started_at": datetime.now().strftime("%H:%M")}
+            self._save_data_sync()
+
+        last_detail = None
+        for segment in segments:
+            detail = await self._generate_detail_enhancement(segment, plan, state)
+            last_detail = detail
+            async with self._data_lock:
+                story_plan = self.data.setdefault("daily_story_plan", {})
+                if not isinstance(story_plan, dict) or story_plan.get("date") != plan_date:
+                    story_plan = {
+                        "date": plan_date,
+                        "today_events": [],
+                        "proactive_events": [],
+                        "long_term_events": [],
+                    }
+                    self.data["daily_story_plan"] = story_plan
+                self._merge_detail_enhancement(story_plan, detail)
+                enhanced = self.data.setdefault("detail_enhanced_segments", {})
+                enhanced[segment["key"]] = {
+                    "status": "done",
+                    "updated_at": datetime.now().strftime("%H:%M"),
+                    "summary": _single_line(detail.get("summary"), 120),
+                    "today_events": detail.get("today_events", []),
+                    "proactive_events": detail.get("proactive_events", []),
+                    "state_variables": detail.get("state_variables", []),
+                    "presence_status": detail.get("presence_status", {}),
+                    "interaction_updates": [],
+                    "coverage_repair_done": bool(segment.get("_coverage_repair")),
+                }
+                self._reschedule_users_for_new_detail_events(segment)
+                self._save_data_sync()
+            await self._apply_detail_presence_status(segment, detail)
+        return last_detail
+
+    def _collect_detail_segments(
+        self,
+        plan: dict[str, Any],
+        enhanced: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
+            return []
+        items = plan.get("items")
+        if not isinstance(items, list) or not items:
+            return []
+        parsed = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            start = self._parse_hhmm_to_minutes(item.get("time"))
+            if start is None:
+                continue
+            parsed.append((index, start, item))
+        if not parsed:
+            return []
+        segments: list[dict[str, Any]] = []
+        for pos, (index, start, item) in enumerate(parsed):
+            key = f"{plan.get('date')}:{index}:{item.get('time')}"
+            if key in enhanced:
+                continue
+            next_start = (
+                parsed[pos + 1][1]
+                if pos + 1 < len(parsed)
+                else self._segment_end_minutes(start, item)
+            )
+            segments.append(
+                {
+                    "key": key,
+                    "index": index,
+                    "start": start,
+                    "end": next_start,
+                    "previous_item": parsed[pos - 1][2] if pos > 0 else None,
+                    "item": item,
+                    "next_item": parsed[pos + 1][2] if pos + 1 < len(parsed) else None,
+                }
+            )
+        return segments
+
+    def _collect_due_detail_segments(
+        self,
+        plan: dict[str, Any],
+        enhanced: dict[str, Any],
+        *,
+        force: bool = False,
+    ) -> list[dict[str, Any]]:
+        segments = self._collect_detail_segments(plan, enhanced if isinstance(enhanced, dict) else {})
+        if not segments:
+            return []
+        if force:
+            picked = self._current_detail_segment_for_update() or self._pick_detail_segment(plan, {})
+            return [picked] if isinstance(picked, dict) else segments[:1]
+        due = [segment for segment in segments if self._detail_segment_is_due(segment)]
+        if due:
+            return due[:1]
+
+        story_plan = self.data.get("daily_story_plan", {})
+        if not isinstance(story_plan, dict):
+            story_plan = {}
+        repaired: list[dict[str, Any]] = []
+        all_segments = self._collect_detail_segments(plan, {})
+        for segment in all_segments:
+            if not self._detail_segment_is_due(segment):
+                continue
+            key = str(segment.get("key") or "")
+            status = enhanced.get(key) if isinstance(enhanced, dict) else None
+            if not isinstance(status, dict) or status.get("status") != "done":
+                continue
+            if status.get("coverage_repair_done"):
+                continue
+            if self._detail_segment_has_story_coverage(segment, story_plan):
+                continue
+            repaired_segment = dict(segment)
+            repaired_segment["_coverage_repair"] = True
+            repaired.append(repaired_segment)
+        return repaired[:1]
+
+    def _detail_segment_is_due(self, segment: dict[str, Any]) -> bool:
+        if not isinstance(segment, dict):
+            return False
+        plan_date = str(self.data.get("daily_plan", {}).get("date") or "")
+        now_minutes = self._effective_plan_now_minutes(plan_date)
+        if now_minutes is None:
+            return False
+        start = _safe_int(segment.get("start"), 0)
+        end = _safe_int(segment.get("end"), self._segment_end_minutes(start, segment.get("item")))
+        lead = max(0, self.detail_enhancement_lead_minutes)
+        return start - lead <= now_minutes < end
+
+    def _detail_segment_has_story_coverage(
+        self,
+        segment: dict[str, Any],
+        story_plan: dict[str, Any],
+    ) -> bool:
+        if not isinstance(segment, dict) or not isinstance(story_plan, dict):
+            return False
+        start = _safe_int(segment.get("start"), 0)
+        end = _safe_int(segment.get("end"), self._segment_end_minutes(start, segment.get("item")))
+        for key in ("today_events", "proactive_events"):
+            raw_items = story_plan.get(key, [])
+            if not isinstance(raw_items, list):
+                continue
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                item_start, item_end = self._parse_window_minutes(str(item.get("window") or ""))
+                if item_start is None or item_end is None:
+                    continue
+                if item_end < item_start:
+                    item_end += 24 * 60
+                if item_start < end and item_end > start:
+                    return True
+        return False
+
+    def _pick_detail_segment(
+        self, plan: dict[str, Any], enhanced: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        return pick_detail_segment(self, plan, enhanced)
+
+    async def _generate_detail_enhancement(
+        self,
+        segment: dict[str, Any],
+        plan: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return await generate_detail_enhancement(self, segment, plan, state)
+
+    def _merge_detail_enhancement(
+        self, story_plan: dict[str, Any], detail: dict[str, Any]
+    ) -> None:
+        for key, limit in (
+            ("today_events", 16),
+            ("proactive_events", 12),
+            ("long_term_events", 6),
+        ):
+            existing = story_plan.setdefault(key, [])
+            if not isinstance(existing, list):
+                existing = []
+                story_plan[key] = existing
+            additions = detail.get(key, [])
+            if isinstance(additions, list):
+                existing.extend(item for item in additions if isinstance(item, dict))
+                story_plan[key] = self._trim_story_plan_items(key, existing, limit)
+
+    def _trim_story_plan_items(
+        self,
+        key: str,
+        items: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        normalized = [item for item in items if isinstance(item, dict)]
+        if not normalized:
+            return []
+        seen: set[tuple[Any, ...]] = set()
+        deduped: list[dict[str, Any]] = []
+        for item in normalized:
+            identity = self._story_plan_item_identity(key, item)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            deduped.append(item)
+        if key == "long_term_events":
+            return deduped[-limit:]
+        ordered = sorted(deduped, key=self._story_plan_item_sort_key)
+        if len(ordered) <= limit:
+            return ordered
+        return self._pick_story_items_with_coverage(ordered, limit)
+
+    def _story_plan_item_identity(self, key: str, item: dict[str, Any]) -> tuple[Any, ...]:
+        if key == "today_events":
+            return (
+                _single_line(item.get("window"), 20),
+                _single_line(item.get("event"), 80),
+            )
+        if key == "proactive_events":
+            return (
+                _single_line(item.get("window"), 20),
+                _single_line(item.get("reason"), 40),
+                _single_line(item.get("action"), 40),
+                _single_line(item.get("topic"), 80),
+            )
+        return (
+            _single_line(item.get("title"), 80),
+            _single_line(item.get("status"), 80),
+        )
+
+    def _story_plan_item_sort_key(self, item: dict[str, Any]) -> tuple[int, int, str]:
+        start, end = self._parse_window_minutes(str(item.get("window") or ""))
+        start_value = start if start is not None else 99_999
+        end_value = end if end is not None else start_value
+        if end_value < start_value:
+            end_value += 24 * 60
+        text = _single_line(
+            item.get("event") or item.get("topic") or item.get("title"),
+            80,
+        )
+        return (start_value, end_value, text)
+
+    def _pick_story_items_with_coverage(
+        self,
+        ordered: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        total = len(ordered)
+        if total <= limit:
+            return ordered
+        now_minutes = datetime.now().hour * 60 + datetime.now().minute
+        selected: set[int] = {0, total - 1}
+        closest_index = min(
+            range(total),
+            key=lambda idx: self._story_item_time_distance(ordered[idx], now_minutes),
+        )
+        for idx in range(max(0, closest_index - 2), min(total, closest_index + 3)):
+            selected.add(idx)
+        if limit == 1:
+            selected = {closest_index}
+        else:
+            for slot in range(limit):
+                selected.add(round(slot * (total - 1) / max(1, limit - 1)))
+        if len(selected) < limit:
+            for idx in range(total):
+                selected.add(idx)
+                if len(selected) >= limit:
+                    break
+        return [ordered[idx] for idx in sorted(selected)[:limit]]
+
+    def _story_item_time_distance(self, item: dict[str, Any], now_minutes: int) -> int:
+        start, end = self._parse_window_minutes(str(item.get("window") or ""))
+        if start is None or end is None:
+            return 99_999
+        if end < start:
+            end += 24 * 60
+        current = now_minutes
+        if current < start and end > 24 * 60:
+            current += 24 * 60
+        if start <= current < end:
+            return 0
+        return min(abs(current - start), abs(current - end))
+
+    def _reschedule_users_for_new_detail_events(self, segment: dict[str, Any]) -> None:
+        users = self.data.get("users", {})
+        if not isinstance(users, dict):
+            return
+        now = _now_ts()
+        start = _safe_int(segment.get("start"), 0) * 60
+        end = _safe_int(segment.get("end"), 0) * 60
+        for user in users.values():
+            if not isinstance(user, dict) or not user.get("umo"):
+                continue
+            next_at = _safe_float(user.get("next_proactive_at"), 0)
+            if next_at <= 0:
+                self._schedule_next_proactive(user, now=now)
+                continue
+            dt = datetime.fromtimestamp(next_at)
+            seconds_today = dt.hour * 3600 + dt.minute * 60 + dt.second
+            if not (start <= seconds_today <= end):
+                self._schedule_next_proactive(user, now=now)
+
+    async def _apply_detail_presence_status(
+        self,
+        segment: dict[str, Any],
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.enable_qq_presence_sync:
+            return
+        status = (detail or {}).get("presence_status") if isinstance(detail, dict) else None
+        if not isinstance(status, dict):
+            key = str((segment or {}).get("key") or "")
+            enhanced = self.data.get("detail_enhanced_segments", {})
+            snapshot = enhanced.get(key) if isinstance(enhanced, dict) else None
+            status = snapshot.get("presence_status") if isinstance(snapshot, dict) else None
+        if not isinstance(status, dict):
+            return
+        mode = str(status.get("mode") or status.get("status") or "unchanged").strip().lower()
+        if mode in {"", "unchanged", "keep", "保持", "不变"}:
+            return
+        if mode in {"away", "invisible", "dnd", "do_not_disturb", "离开", "隐身", "请勿打扰", "勿扰"}:
+            mode = "online"
+        custom_text = _single_line(
+            status.get("custom_text")
+            or status.get("wording")
+            or status.get("text")
+            or status.get("label")
+            or status.get("自定义状态")
+            or status.get("文案"),
+            28,
+        )
+        if mode in {"busy", "忙碌"}:
+            mode = "custom"
+            custom_text = custom_text or "专注中"
+        if mode in {"sleep", "睡觉", "睡眠"}:
+            mode = "custom"
+            custom_text = custom_text or "休息中"
+        if mode in {"custom", "自定义", "自定义状态"} and not custom_text:
+            mode = "online"
+        key = str((segment or {}).get("key") or "")
+        state = self.data.setdefault("qq_presence_state", {})
+        if not isinstance(state, dict):
+            state = {}
+            self.data["qq_presence_state"] = state
+        if (
+            str(state.get("date") or "") == _today_key()
+            and str(state.get("plan_date") or "") == str(self.data.get("detail_enhanced_day") or "")
+            and str(state.get("detail_key") or "") == key
+            and str(state.get("mode") or "") == mode
+            and str(state.get("custom_text") or "") == custom_text
+            and bool(state.get("ok", False))
+        ):
+            return
+        if mode in {"custom", "自定义", "自定义状态"}:
+            ok, note = await self._set_qq_custom_presence(custom_text)
+            mode = "custom"
+        else:
+            ok, note = await self._set_qq_online_presence(mode)
+        state["detail_key"] = key
+        state["date"] = _today_key()
+        state["plan_date"] = str(self.data.get("detail_enhanced_day") or "")
+        state["mode"] = mode
+        state["custom_text"] = custom_text
+        state["reason"] = _single_line(status.get("reason"), 80)
+        state["updated_at"] = _now_ts()
+        state["ok"] = bool(ok)
+        state["note"] = _single_line(note, 120)
+        self._save_data_sync()
+
+    async def _ensure_current_detail_presence_status(self) -> None:
+        if not self.enable_qq_presence_sync:
+            return
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict) or str(plan.get("date") or "") != _today_key():
+            return
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            return
+        segment = self._current_detail_segment_for_update()
+        if not segment:
+            return
+        snapshot = enhanced.get(str(segment.get("key") or ""))
+        if not isinstance(snapshot, dict) or snapshot.get("status") != "done":
+            return
+        await self._apply_detail_presence_status(segment, snapshot)
+
+    def _is_daily_diary_due(self) -> bool:
+        diary_minutes = self._parse_hhmm_to_minutes(self.daily_diary_time)
+        if diary_minutes is None:
+            diary_minutes = 23 * 60 + 10
+        now = datetime.now()
+        return now.hour * 60 + now.minute >= diary_minutes
+
+    async def _generate_daily_diary(self) -> dict[str, Any]:
+        await self._ensure_yesterday_conversation_summary()
+        return await generate_daily_diary(self)
+
+    def _fallback_diary_payload(self) -> dict[str, Any]:
+        return fallback_diary_payload(self)
+
+    def _generate_fallback_long_term_events(self, state: dict[str, Any]) -> list[dict[str, str]]:
+        events = self._generate_state_linked_long_term_events()
+        if events:
+            return events[:3]
+        mood = _single_line(state.get("mood_bias"), 20) if isinstance(state, dict) else "平稳"
+        return [
+            {
+                "title": "今日状态延续",
+                "status": f"今天整体偏{mood},适合保持平稳节奏",
+                "next_hint": "后续可根据对话自然延伸",
+                "phase": "steady",
+                "tendency": "状态更可能保持稳定或逐步回升",
+            }
+        ]
+
+    def _normalize_story_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return normalize_story_plan(self, payload)
+
+    def _balance_proactive_events_for_day(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for raw in events:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            if str(item.get("reason") or "") == "state_share":
+                item["reason"] = "quiet_care"
+            for key, fallback in (
+                ("topic", "顺手碰一下"),
+                ("why", "生活里刚好空出一点缝隙"),
+                ("motive", "刚好停了一下,想轻轻碰你一下"),
+                ("impulse", "想轻轻碰你一下"),
+            ):
+                item[key] = _single_line(item.get(key), 100) or fallback
+            if str(item.get("action") or "message") == "message":
+                item["action"] = self._preferred_action_for_story_event(item)
+            prepared.append(item)
+        if not prepared:
+            return []
+        ordered = sorted(prepared, key=self._story_plan_item_sort_key)
+        buckets = ["morning", "noon", "afternoon", "evening", "late_night"]
+        by_bucket: dict[str, list[dict[str, Any]]] = {bucket: [] for bucket in buckets}
+        for item in ordered:
+            bucket = self._proactive_daypart_bucket_for_event(item)
+            if bucket in by_bucket:
+                by_bucket[bucket].append(item)
+        selected: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+
+        def add(item: dict[str, Any]) -> None:
+            if len(selected) >= limit:
+                return
+            identity = self._story_plan_item_identity("proactive_events", item)
+            if identity in seen:
+                return
+            seen.add(identity)
+            selected.append(item)
+
+        for bucket in buckets:
+            if by_bucket[bucket]:
+                add(by_bucket[bucket][0])
+        for bucket in buckets:
+            cap = 1 if bucket == "late_night" else 2
+            count = sum(1 for item in selected if self._proactive_daypart_bucket_for_event(item) == bucket)
+            for item in by_bucket[bucket][1:]:
+                if count >= cap:
+                    break
+                add(item)
+                count += 1
+        remaining = sorted(
+            ordered,
+            key=lambda item: (
+                0 if str(item.get("action") or "message") != "message" else 1,
+                self._event_priority(item),
+                self._story_plan_item_sort_key(item),
+            ),
+        )
+        for item in remaining:
+            if len(selected) >= limit:
+                break
+            add(item)
+        return sorted(selected, key=self._story_plan_item_sort_key)
+
+    def _preferred_action_for_story_event(self, event: dict[str, Any]) -> str:
+        reason = str(event.get("reason") or "check_in")
+        text = " ".join(
+            _single_line(event.get(key), 80)
+            for key in ("topic", "why", "scene", "motive", "impulse")
+        )
+        if self._photo_text_available() and (
+            reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}
+            or any(token in text for token in self._visual_share_tokens())
+        ):
+            return "photo_text"
+        if self._screen_glance_available() and reason in {"check_in", "quiet_care", "background_schedule"}:
+            return "screen_peek"
+        if self._voice_available() and reason in {"quiet_care", "diary_share", "insomnia_night", "evening_greeting"}:
+            return "voice"
+        if self._poke_available() and reason in {"check_in", "quiet_care", "morning_greeting", "evening_greeting"}:
+            return "poke"
+        return "message"
+
+    def _generate_morning_linked_proactive_events(self) -> list[dict[str, Any]]:
+        state = self.data.get("daily_state", {})
+        if not isinstance(state, dict):
+            return []
+        sleep_text = str(state.get("sleep") or "")
+        conditions = state.get("conditions", [])
+        if not isinstance(conditions, list):
+            conditions = []
+        events: list[dict[str, Any]] = []
+        if any(token in sleep_text for token in ("赖床", "闹钟", "起得有点迟", "还没完全开机")):
+            events.append(
+                {
+                    "window": "08:20-09:50",
+                    "reason": "morning_greeting",
+                    "action": "message",
+                    "why": "早上起步有点乱,容易一边整理自己一边顺手来找用户。",
+                    "topic": "赖床后的早安",
+                    "motive": "刚把自己从床上拽起来,脑子还迷糊着就先想到你了",
+                    "scene": "刚从床上爬起来的时候",
+                    "tone": "迷糊",
+                    "impulse": "还没完全开机,但已经先想往你这边晃一下",
+                    "chain": [
+                        {"kind": "name_only_opener"},
+                        {"kind": "if_no_reply", "after_minutes": 80, "reason": "check_in", "topic": "早晨那句后面", "motive": "隔了挺久那边还安静着,就想再轻轻放一句", "tone": "轻一点"},
+                        {"kind": "if_still_no_reply", "after_minutes": 140, "reason": "morning_greeting", "topic": "早晨第二句", "motive": "早晨慢慢过去了,这句只当顺手放下", "tone": "不催促"},
+                    ],
+                    "mood": "迷糊",
+                }
+            )
+        elif any(token in sleep_text for token in ("睡得很浅", "睡得断断续续", "失眠")):
+            events.append(
+                {
+                    "window": "08:30-09:45",
+                    "reason": "morning_greeting",
+                    "action": "message",
+                    "why": "早上还带着一点睡意时,更容易发一条轻轻的早安。",
+                    "topic": "没完全醒的早安",
+                    "motive": "人还没完全清醒,但就是想先在你这边冒个头",
+                    "scene": "人还带着睡意的时候",
+                    "tone": "迟钝",
+                    "impulse": "想在彻底清醒前先把一句话放你这",
+                    "chain": [
+                        {"kind": "name_only_opener"},
+                        {"kind": "if_no_reply", "after_minutes": 90, "reason": "check_in", "topic": "早晨那句后面", "motive": "隔了挺久那边还没什么动静,就想再轻轻放一句", "tone": "轻一点"},
+                    ],
+                    "mood": "迟钝",
+                }
+            )
+        energy = _safe_int(state.get("energy"), 70, 0, 100)
+        if energy >= 62 and random.random() < 0.45:
+            events.append(
+                {
+                    "window": "08:10-09:20",
+                    "reason": "morning_greeting",
+                    "action": "message",
+                    "why": "早上状态不差时,更像会顺手发个早安。",
+                    "topic": "顺手打个早安",
+                    "motive": "刚开机那一下状态还行,就想先来晃你一下",
+                    "scene": "刚开机的那一下",
+                    "tone": "清醒",
+                    "impulse": "想把第一小段清醒顺手分给你一点",
+                    "chain": [
+                        {"kind": "name_only_opener"},
+                        {"kind": "if_no_reply", "after_minutes": 85, "reason": "check_in", "topic": "早安后续", "motive": "早上那句放出去以后隔了挺久,又想轻轻碰一下", "tone": "轻一点"},
+                    ],
+                    "mood": "清醒",
+                }
+            )
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            title = str(cond.get("title") or "")
+            label = str(cond.get("label") or "")
+            if "睡眠延续" in title and random.random() < 0.55:
+                events.append(
+                    {
+                        "window": "08:40-10:00",
+                        "reason": "morning_greeting",
+                        "action": "message",
+                        "why": "睡意拖到白天时,更容易带着半梦半醒的口吻出现。",
+                        "topic": "醒得慢一点的早安",
+                        "motive": "那点睡意还挂着,反而更想先把一句话放你这",
+                        "scene": "睡意还挂着没散的时候",
+                        "tone": "半梦半醒",
+                        "impulse": "想在彻底回神前先轻轻碰你一下",
+                        "mood": _single_line(cond.get("mood"), 20) or "迟钝",
+                    }
+                )
+                break
+            if any(token in label for token in ("赖床", "闹钟", "起得有点迟")):
+                events.append(
+                    {
+                        "window": "08:15-09:40",
+                        "reason": "morning_greeting",
+                        "action": "message",
+                        "why": "早晨小事故之后,很容易像真实好友一样顺手抱怨一句或打个招呼。",
+                        "topic": "早晨小事故",
+                        "motive": "刚刚被早晨折腾了一下,就有点想来找你吐个小槽",
+                        "scene": "被早晨的小事故折腾了一下之后",
+                        "tone": "迷糊又有点乱",
+                        "impulse": "想先来你这边吐一小口气",
+                        "mood": "迷糊",
+                    }
+                )
+                break
+        return events[:2]
+
+    def _generate_daypart_linked_proactive_events(self) -> list[dict[str, Any]]:
+        state = self.data.get("daily_state", {})
+        if not isinstance(state, dict):
+            return []
+        weather = self._weather_summary_text(self.data.get("daily_weather", {}))
+        energy = _safe_int(state.get("energy"), 70, 0, 100)
+        sleep_text = str(state.get("sleep") or "")
+        events: list[dict[str, Any]] = []
+        if 36 <= energy <= 68 and random.random() < 0.58:
+            events.append(
+                {
+                    "window": "12:10-13:30",
+                    "reason": "noon_greeting",
+                    "action": "message",
+                    "why": "午后容易松一下,刚好适合发一条不费力的小消息。",
+                    "topic": "午后犯困",
+                    "motive": "中午这会儿人有点软下来,就想顺手晃到你这边",
+                    "scene": "午后松下来的一小段",
+                    "tone": "懒洋洋",
+                    "impulse": "想轻轻来找你一下,不想把气氛弄得太用力",
+                    "mood": "懒洋洋",
+                }
+            )
+        if any(token in weather for token in ("晚霞", "晴", "阳光", "多云")) and random.random() < 0.52:
+            events.append(
+                {
+                    "window": "17:20-19:10",
+                    "reason": "activity_share",
+                    "action": "message",
+                    "why": "傍晚天色好看时,很容易把一点路上的画面顺手递过去。",
+                    "topic": "傍晚路上",
+                    "motive": "天色往下落的时候,刚好有一点想把路上的画面递给你",
+                    "scene": "傍晚路上的天色慢慢收下来",
+                    "tone": "松弛",
+                    "impulse": "想把这一点傍晚的感觉顺手递过去",
+                    "mood": "松弛",
+                }
+            )
+        if 45 <= energy <= 82 and random.random() < 0.46:
+            events.append(
+                {
+                    "window": "15:20-17:10",
+                    "reason": "check_in",
+                    "action": "message",
+                    "why": "下午中段容易出现一个短短的空隙,适合轻轻探一下头。",
+                    "topic": "下午空一下",
+                    "motive": "下午忽然空了一小下,就想看看你那边是不是也能喘口气",
+                    "scene": "下午节奏中间松开的一小截",
+                    "tone": "轻一点",
+                    "impulse": "想不吵人地碰一下",
+                    "mood": "微松",
+                }
+            )
+        if random.random() < 0.48:
+            topic = self._pick_life_thought_topic("activity_share")
+            action = "photo_text" if self._photo_text_available() and random.random() < 0.16 else "message"
+            events.append(
+                {
+                    "window": "14:40-18:40" if 12 <= datetime.now().hour < 18 else "19:20-21:40",
+                    "reason": "activity_share",
+                    "action": action,
+                    "why": "日常里冒出来的小念头不一定和天气有关,也可以自然成为一次主动分享。",
+                    "topic": topic,
+                    "motive": f"刚刚脑子里冒出“{topic}”,不算大事,但想顺手丢给你",
+                    "scene": "一天里突然空出来的一小格",
+                    "tone": "自然",
+                    "impulse": "想把这点小念头放到你这边",
+                    "mood": "微妙",
+                }
+            )
+        if any(token in sleep_text for token in ("失眠", "睡得很浅", "睡得断断续续")) and random.random() < 0.5:
+            events.append(
+                {
+                    "window": "22:10-23:25",
+                    "reason": "quiet_care",
+                    "action": "message",
+                    "why": "睡前还没彻底安静下来时,更容易留一条轻一点的晚间消息。",
+                    "topic": "临睡前还没安静下来",
+                    "motive": "明明该收声了,脑子却还亮着,所以想先把一句话放你这",
+                    "scene": "临睡前还没彻底静下来的时候",
+                    "tone": "安静里带一点清醒",
+                    "impulse": "想在收声前先把这点动静放你这边",
+                    "mood": "安静",
+                }
+            )
+        if energy < 42 and random.random() < 0.42:
+            events.append(
+                {
+                    "window": "19:40-21:10",
+                    "reason": "quiet_care",
+                    "action": "message",
+                    "why": "累了一天之后,人会更想找个熟悉的人轻轻落一下。",
+                    "topic": "收尾前来一下",
+                    "motive": "今天快收尾了,还是想在你这边轻轻落一下脚",
+                    "scene": "一天快收尾的时候",
+                    "tone": "疲惫",
+                    "impulse": "想找个熟悉的地方轻轻落一下脚",
+                    "mood": "疲惫",
+                }
+            )
+        return events[:3]
+
+    def _normalize_event_motive(self, item: dict[str, Any]) -> str:
+        direct = _single_line(item.get("motive"), 80)
+        if direct:
+            return self._normalize_internal_motive_text(direct)
+        reason = _single_line(item.get("reason"), 40)
+        action = _single_line(item.get("action"), 20)
+        topic = _single_line(item.get("topic"), 50)
+        why = _single_line(item.get("why"), 80)
+        scene = _single_line(item.get("scene"), 60)
+        tone = _single_line(item.get("tone"), 24)
+        impulse = _single_line(item.get("impulse"), 80)
+        if impulse:
+            return self._normalize_internal_motive_text(impulse)
+        base = {
+            "insomnia_night": "夜里还没睡着,想和你说一句",
+            "state_share": "当前状态有变化,想让你知道",
+            "quiet_care": "想到用户,顺手确认一下状态",
+            "activity_share": "遇到一段可以分享的日常内容",
+            "diary_share": "整理今日记录时想到可以分享",
+            "important_date_share": "有个重要时间点值得提前提醒",
+            "background_schedule": "当前日程有一点可以自然提到",
+            "check_in": "刚好停下来,想确认用户在不在",
+            "morning_greeting": "早间开始时先和用户打招呼",
+            "noon_greeting": "午间休息时顺手问候一下",
+            "evening_greeting": "晚间节奏放缓时想和用户说一句",
+        }.get(reason, "刚好停下来,想到可以和用户说一句")
+        if action == "screen_peek":
+            base = "刚好有点空,就想偷偷看你在忙什么"
+        elif action == "photo_text":
+            base = "刚刚看到的画面适合分享"
+        elif action == "jm_cosmos_read":
+            base = "刚刚私下翻到一点漫画内容,只想含糊地提一句"
+        elif action == "poke":
+            base = "想做一次轻量提醒"
+        elif action == "voice":
+            base = "这会儿更适合用语音表达"
+        if topic and any(token in topic for token in ("日记", "笔记", "碎片", "念头", "半句", "想法")):
+            base = "整理记录时发现一段适合分享的内容"
+        elif topic and any(token in topic for token in self._visual_share_tokens()):
+            base = "眼前有个具体小画面适合顺手分享"
+        elif topic and any(token in topic for token in ("雨", "天气", "晚霞", "阳光")):
+            base = "当前天气内容适合分享"
+        elif why and len(why) <= 30:
+            base = why
+        if scene and tone:
+            base = f"刚刚在{scene},状态偏{tone},适合补充一句近况"
+        elif scene:
+            base = f"刚刚在{scene},适合补充一句近况"
+        elif tone and not topic:
+            base = f"这会儿状态偏{tone},适合和用户说一句"
+        return self._normalize_internal_motive_text(_single_line(base, 80))
+
+    def _dedupe_proactive_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in events:
+            if not isinstance(item, dict):
+                continue
+            key = "|".join(
+                [
+                    _single_line(item.get("window"), 20),
+                    _single_line(item.get("reason"), 40),
+                    _single_line(item.get("action"), 20),
+                    _single_line(item.get("topic"), 80),
+                ]
+            )
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _proactive_topic_signature(self, *parts: Any) -> str:
+        text = " ".join(_single_line(part, 160) for part in parts if _single_line(part, 160))
+        if not text:
+            return ""
+        school_stress_markers = (
+            "上课", "课", "物理", "老师", "点名", "叫上去", "做题", "抓到",
+            "发呆", "心跳", "紧张", "差点", "讲台",
+        )
+        if sum(1 for token in school_stress_markers if token in text) >= 2:
+            return "school_class_anxiety"
+        food_markers = ("食堂", "午饭", "中午", "菜", "咸", "吃")
+        if sum(1 for token in food_markers if token in text) >= 2:
+            return "noon_food_share"
+        image_markers = ("图", "图片", "照片", "拍", "自拍", "画面")
+        if sum(1 for token in image_markers if token in text) >= 2:
+            return "photo_share"
+        tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{3,}", text)
+        stopwords = {
+            "刚才", "现在", "今天", "这个", "那个", "一下", "一点", "有点", "还是",
+            "没有", "已经", "时候", "用户", "对方", "主动", "消息", "这会儿",
+        }
+        kept: list[str] = []
+        for token in tokens:
+            if token in stopwords:
+                continue
+            if token not in kept:
+                kept.append(token)
+            if len(kept) >= 8:
+                break
+        return "|".join(kept)
+
+    def _cleanup_recent_proactive_topics(self, user: dict[str, Any], *, now: float | None = None) -> list[dict[str, Any]]:
+        now = now or _now_ts()
+        raw = user.get("recent_proactive_topics", [])
+        if not isinstance(raw, list):
+            raw = []
+        kept = [
+            item for item in raw
+            if isinstance(item, dict) and now - _safe_float(item.get("ts"), 0) <= 6 * 3600
+        ]
+        user["recent_proactive_topics"] = kept[-12:]
+        return user["recent_proactive_topics"]
+
+    def _topic_signature_similar(self, left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+        left_set = {part for part in left.split("|") if part}
+        right_set = {part for part in right.split("|") if part}
+        if not left_set or not right_set:
+            return False
+        common = left_set & right_set
+        return len(common) >= 2 or (len(common) >= 1 and min(len(left_set), len(right_set)) <= 2)
+
+    def _recent_proactive_topic_repeated(self, user: dict[str, Any], signature: str, *, now: float | None = None) -> bool:
+        if not signature:
+            return False
+        for item in self._cleanup_recent_proactive_topics(user, now=now):
+            if self._topic_signature_similar(signature, str(item.get("signature") or "")):
+                return True
+        return False
+
+    def _remember_proactive_topic(self, user: dict[str, Any], *, text: str = "", topic: str = "", motive: str = "") -> None:
+        signature = self._proactive_topic_signature(text, topic, motive)
+        if not signature:
+            return
+        recent = self._cleanup_recent_proactive_topics(user)
+        recent.append(
+            {
+                "ts": _now_ts(),
+                "signature": signature,
+                "text": _single_line(text or topic or motive, 120),
+            }
+        )
+        del recent[:-12]
+
+    def _format_recent_proactive_topics_hint(self, user: dict[str, Any]) -> str:
+        recent = self._cleanup_recent_proactive_topics(user)
+        if not recent:
+            return ""
+        lines: list[str] = []
+        for item in recent[-4:]:
+            text = _single_line(item.get("text"), 80)
+            if not text:
+                continue
+            when = self._format_timestamp_elapsed(item.get("ts"))
+            lines.append(f"- {when}说过：{text}")
+        return "\n".join(lines)
+
+    def _normalize_story_items(self, raw_items: Any, text_key: str) -> list[dict[str, Any]]:
+        return normalize_story_items(self, raw_items, text_key)
+
+    def _normalize_long_term_events(self, raw_items: Any) -> list[dict[str, str]]:
+        return normalize_long_term_events(self, raw_items)
+
+    def _dedupe_long_term_events(self, events: list[dict[str, str]]) -> list[dict[str, str]]:
+        deduped: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in events:
+            if not isinstance(item, dict):
+                continue
+            key = _single_line(item.get("title"), 80)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _generate_state_linked_long_term_events(self) -> list[dict[str, str]]:
+        state = self.data.get("daily_state", {})
+        if not isinstance(state, dict):
+            return []
+        weather = self._weather_summary_text(self.data.get("daily_weather", {}))
+        conditions = state.get("conditions", [])
+        if not isinstance(conditions, list):
+            return []
+        candidates: list[dict[str, str]] = []
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            phase = _single_line(cond.get("phase"), 24)
+            kind = _single_line(cond.get("kind"), 24)
+            label = _single_line(cond.get("label"), 80)
+            if kind == "health" and phase == "mild_discomfort":
+                candidates.extend(
+                    [
+                        {
+                            "title": "降低当日活动强度",
+                            "status": "轻微不适,适合降低活动强度",
+                            "next_hint": "若休息或收到关心反馈,后续更可能进入恢复阶段",
+                            "phase": phase,
+                            "tendency": "倾向缓慢恢复,也可能延续为轻微不适",
+                        },
+                        {
+                            "title": "观察不适是否缓解",
+                            "status": label or "当前仍有轻微不适",
+                            "next_hint": "若晚些时候状态回升,主动分享意愿可能增加",
+                            "phase": phase,
+                            "tendency": "恢复倾向受休息与关心反馈影响",
+                        },
+                    ]
+                )
+            elif kind in {"recovery_afterglow", "health_tail"} or phase in {"afterglow", "tail"}:
+                candidates.extend(
+                    [
+                        {
+                            "title": "观察是否回到稳定节奏",
+                            "status": "状态正在回稳,但仍有轻微波动",
+                            "next_hint": "若外部环境和情绪稳定,后续分享意愿可能上升",
+                            "phase": phase or kind,
+                            "tendency": "倾向回稳,也可能残留轻微尾声",
+                        }
+                    ]
+                )
+            if kind == "sleep" and phase == "sleep_debt":
+                candidates.append(
+                    {
+                        "title": "留意睡眠债恢复情况",
+                        "status": "精神能量未满,白天反应可能偏慢",
+                        "next_hint": "若白天恢复顺利,晚间表达会更轻松；否则保持低强度",
+                        "phase": phase,
+                        "tendency": "倾向先延续低能量,再逐步回稳",
+                    }
+                )
+            if kind in {"care_warmth", "soft_afterglow"}:
+                candidates.append(
+                    {
+                        "title": "记录关心反馈后的回暖",
+                        "status": "收到关心反馈后,语气可能更柔和",
+                        "next_hint": "若互动氛围稳定,后续轻分享意愿可能增加",
+                        "phase": phase or kind,
+                        "tendency": "倾向回稳,小概率保留轻度正向余波",
+                    }
+                )
+        if weather != "暂无天气信息" and any(token in weather for token in ("晴", "阳光", "多云", "晚霞")) and random.random() < 0.45:
+            candidates.append(
+                {
+                    "title": "留意傍晚会不会有值得拍下来的天色",
+                    "status": f"天气提供了可用于生活背景的外部线索：{weather}",
+                    "next_hint": "若当时情绪稳定,可能提高 photo_text 分享概率",
+                    "phase": "weather_bonus",
+                    "tendency": "倾向轻量分享,不倾向正式开启长对话",
+                }
+            )
+        picked: list[dict[str, str]] = []
+        for item in candidates:
+            chance = 0.55
+            tendency = str(item.get("tendency") or "")
+            if "回稳" in tendency:
+                chance = 0.45
+            if "拖一阵" in tendency:
+                chance = 0.4
+            if random.random() < chance:
+                picked.append(item)
+        return picked[:3]
+
+    def _generate_weather_linked_proactive_events(self) -> list[dict[str, Any]]:
+        weather = self._weather_summary_text(self.data.get("daily_weather", {}))
+        if weather == "暂无天气信息":
+            return []
+        events: list[dict[str, Any]] = []
+        if any(token in weather for token in ("雨", "阵雨", "雷", "小雨", "中雨", "大雨")) and random.random() < 0.65:
+            events.append(
+                {
+                    "window": self._pick_weather_window("rain"),
+                    "reason": "activity_share",
+                    "action": "message",
+                    "why": f"天气在下雨,适合分享一段简短的天气状态。{weather}",
+                    "topic": "下雨了呢",
+                    "motive": "下雨时适合和用户说一句天气状态",
+                    "mood": "安静",
+                }
+            )
+        if any(token in weather for token in ("晴", "阳光", "多云", "晚霞")) and random.random() < 0.35:
+            events.append(
+                {
+                    "window": self._pick_weather_window("clear"),
+                    "reason": "activity_share",
+                    "action": "message",
+                    "why": f"天气看起来有一点生活感,容易想轻轻分享一句。{weather}",
+                    "topic": "天气有点好看",
+                    "motive": "刚刚那一下天色有点顺眼,就想顺手丢给你",
+                    "mood": "松弛",
+                }
+            )
+        return events[:2]
+
+    def _pick_weather_window(self, weather_kind: str) -> str:
+        hour = datetime.now().hour
+        if weather_kind == "rain":
+            if 6 <= hour < 11:
+                return "08:20-10:40"
+            if 11 <= hour < 17:
+                return "12:40-16:30"
+            if 17 <= hour < 23:
+                return "18:10-21:10"
+            return "09:00-10:30"
+        if 16 <= hour < 20:
+            return "17:10-19:20"
+        return "15:30-18:10"
+
+    def _format_plan_for_diary(self, plan: dict[str, Any]) -> str:
+        return format_plan_for_diary(self, plan)
+
+    async def _ensure_daily_state(self, force: bool = False) -> dict[str, Any]:
+        today = _today_key()
+        weather = await self._ensure_weather_context(force=force)
+        await self._ensure_yesterday_conversation_summary(force=force)
+        async with self._data_lock:
+            if not self.enable_humanized_states and not force:
+                state = dict(DEFAULT_HUMANIZED_STATE)
+                state.update(self._base_state_values())
+                state["date"] = today
+                state["weather"] = self._weather_summary_text(weather)
+                self.data["daily_state"] = state
+                self._save_data_sync()
+                return state
+
+            self._cleanup_expired_conditions()
+            if force:
+                self.data["state_conditions"] = []
+                self.data["state_generated_day"] = ""
+            if force or self.data.get("state_generated_day") != today:
+                self.data.setdefault("state_conditions", []).extend(
+                    await self._generate_state_conditions(weather)
+                )
+                self.data["state_generated_day"] = today
+            state = self._compose_state_from_conditions(weather)
+            self.data["daily_state"] = state
+            self._save_data_sync()
+            return state
+
+    async def _generate_state_conditions(self, weather: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        intensity = self.humanized_state_intensity / 100
+        persona_profile = self._persona_state_profile()
+        now_dt = datetime.now()
+        current_minute = now_dt.hour * 60 + now_dt.minute
+
+        sleep_pool = [
+            ("睡眠平稳", "平稳", 0, 8),
+            ("睡得很浅,像一直隔着一层雾", "迟钝", -16, 10),
+            ("有点失眠,凌晨才慢慢安静下来", "敏感", -24, 14),
+            ("睡得断断续续,醒来时还有点空", "恍惚", -18, 12),
+            ("赖床赖得有点久,整个人还没完全开机", "迷糊", -14, 8),
+            ("闹钟像没响一样,起床时整个人有点慌", "慌乱", -17, 7),
+        ]
+        dream_pool = [
+            ("没有记住梦", "平稳", 0, 2),
+            ("梦里一直在找一件放错地方的小东西,醒来还残着一点没找完的感觉", "恍惚", -6, 5),
+            ("梦见走过一段很安静的路,路灯和风声都很近", "柔和", 4, 4),
+            ("梦里反复听见一句没听清的话,醒来后胸口还有点闷", "低落", -10, 7),
+        ]
+        hunger_pool = [
+            ("饥饿感平稳", "平稳", 0, 3),
+            ("有点饿,容易被温暖的东西吸引", "黏人", -5, 4),
+            ("没什么胃口,只想安静待着", "低落", -10, 6),
+            ("想吃一点甜的,情绪会比平时软", "柔软", 2, 3),
+        ]
+        cycle_pool = [
+            ("无明显周期影响", "平稳", 0, 24),
+            ("生理期前的模拟状态,情绪更敏感,耐心更薄", "敏感", -18, 24),
+            ("生理期模拟状态,能量偏低,想少说重话", "疲惫", -24, 72),
+        ]
+
+        def pick(pool: list[tuple[str, str, int, int]], special_chance: float = 0.35) -> tuple[str, str, int, int]:
+            if random.random() > special_chance * max(0.2, intensity):
+                return pool[0]
+            return random.choice(pool[1:])
+
+        sleep_pick = pick(sleep_pool, 0.42)
+        dream_pick = await self._generate_enhanced_dream_pick(weather) or pick(dream_pool, 0.55)
+        self._remember_daily_dream_pick(dream_pick)
+        hunger_pick = pick(hunger_pool, 0.5)
+        specs = [
+            ("sleep", "睡眠", *sleep_pick),
+            ("dream", "梦境", *dream_pick),
+        ]
+        if persona_profile.get("allow_hunger", True):
+            specs.append(("hunger", "饥饿", *hunger_pick))
+        if persona_profile.get("allow_cycle", False):
+            specs.append(("body_cycle", "周期", *self._pick_body_cycle_spec(cycle_pool, intensity)))
+        else:
+            specs.append(("body_cycle", "周期", *cycle_pool[0]))
+
+        diary_tags = self._recent_diary_tags()
+        weather_text = self._weather_summary_text(weather)
+        if persona_profile.get("allow_health", True):
+            health_causes = self._build_health_causes(
+                sleep_label=sleep_pick[0],
+                weather_text=weather_text,
+                diary_tags=diary_tags,
+            )
+            health_spec = self._pick_health_spec(health_causes, intensity, weather_text)
+            if health_spec is not None:
+                specs.append(("health", "健康", *health_spec))
+        if "失眠" in diary_tags and random.random() < 0.35:
+            specs.append(("sleep", "睡眠延续", "昨晚的失眠感还没完全散掉", "迟钝", -12, 8))
+        if persona_profile.get("allow_health", True) and "生病" in diary_tags and random.random() < 0.4:
+            specs.append(("health", "健康延续", "身体像还在恢复,反应慢半拍", "疲惫", -14, 18, "前两天的不舒服还没完全退掉"))
+        if "低能量" in diary_tags and random.random() < 0.35:
+            specs.append(("sleep", "能量延续", "昨天的低电量拖到今天早上", "安静", -10, 6))
+        if "好梦" in diary_tags and random.random() < 0.3:
+            specs.append(("dream", "梦境余温", "梦里留下了一点柔和的亮色", "柔和", 4, 5))
+
+        conditions = []
+        for spec in specs:
+            extras: dict[str, Any] = {}
+            if len(spec) >= 7:
+                kind, title, label, mood, energy_delta, duration_hours, cause = spec[:7]
+                extras["cause"] = cause
+            else:
+                kind, title, label, mood, energy_delta, duration_hours = spec[:6]
+            if energy_delta == 0 and kind not in {"sleep", "dream"}:
+                continue
+            if kind == "health" and energy_delta < 0:
+                extras["on_end_transition"] = "health_relief"
+                extras["phase"] = "mild_discomfort"
+            if kind == "sleep" and energy_delta <= -16:
+                extras["on_end_transition"] = "sleep_rebound"
+                extras["phase"] = "sleep_debt"
+            if kind == "body_cycle" and energy_delta != 0:
+                extras["phase"] = self._infer_body_cycle_phase(label)
+                extras["episode_key"] = f"body-cycle-{_today_key()}"
+                if extras["phase"] == "pre":
+                    extras["transition_options"] = [{"to": "body_period", "base_weight": 0.72}, {"to": "stable", "base_weight": 0.28}]
+                elif extras["phase"] == "period":
+                    extras["transition_options"] = [{"to": "body_recovery", "base_weight": 0.65}, {"to": "stable", "base_weight": 0.35}]
+            extras["transition_options"] = self._build_transition_options(
+                kind=kind,
+                energy_delta=int(energy_delta * max(0.4, intensity)),
+                cause=str(extras.get("cause") or ""),
+                on_end_transition=str(extras.get("on_end_transition") or ""),
+            ) or extras.get("transition_options", [])
+            condition = self._make_condition(
+                kind=kind,
+                title=title,
+                label=label,
+                mood=mood,
+                energy_delta=int(energy_delta * max(0.4, intensity)),
+                duration_hours=duration_hours,
+                intensity=random.randint(35, 90),
+                **extras,
+            )
+            if kind == "body_cycle" and energy_delta != 0:
+                self._record_body_cycle_episode(condition)
+            conditions.append(condition)
+        dream_aftertaste = self._build_dream_aftertaste_condition(dream_pick)
+        if dream_aftertaste is not None:
+            conditions.append(dream_aftertaste)
+        if 0 <= current_minute < 5 * 60:
+            late_night_pool = [
+                ("夜里还没完全安静下来,眼睛和脑子都慢半拍", "困倦", -14, 4),
+                ("这个点还醒着,困意和清醒混在一起", "恍惚", -12, 3),
+                ("已经很晚了,精神有点发飘,只想把声音放轻", "疲惫", -10, 5),
+            ]
+            label, mood, energy_delta, duration_hours = random.choice(late_night_pool)
+            conditions.append(
+                self._make_condition(
+                    kind="sleep",
+                    title="夜深未眠",
+                    label=label,
+                    mood=mood,
+                    energy_delta=int(energy_delta * max(0.55, intensity)),
+                    duration_hours=duration_hours,
+                    intensity=random.randint(45, 88),
+                    phase="late_night_awake",
+                    transition_options=[
+                        {"to": "sleep_afterglow", "base_weight": 0.35},
+                        {"to": "sleep_tail", "base_weight": 0.2},
+                        {"to": "stable", "base_weight": 0.45},
+                    ],
+                )
+            )
+        return conditions
+
+    def _infer_body_cycle_phase(self, label: str) -> str:
+        text = str(label or "")
+        if "前" in text:
+            return "pre"
+        if "恢复" in text:
+            return "recovery"
+        if "生理期" in text:
+            return "period"
+        return "cycle"
+
+    def _body_cycle_max_hours(self, phase: str, label: str = "") -> int:
+        phase = str(phase or self._infer_body_cycle_phase(label))
+        if phase == "period":
+            return 72
+        if phase in {"pre", "recovery"}:
+            return 24
+        return 48
+
+    def _body_cycle_interval_seconds(self) -> int:
+        return random.randint(25, 34) * 86400
+
+    def _body_cycle_generation_blocked(self, now: float | None = None) -> bool:
+        now = _now_ts() if now is None else now
+        meta = self.data.get("body_cycle_state", {})
+        if isinstance(meta, dict):
+            expected_ts = _safe_float(meta.get("next_expected_start_ts"), 0)
+            if expected_ts > 0 and now < expected_ts - 2 * 86400:
+                return True
+            if expected_ts <= 0 and _safe_float(meta.get("last_end_ts"), 0) + 18 * 86400 > now:
+                return True
+        conditions = self.data.get("state_conditions", [])
+        if not isinstance(conditions, list):
+            return False
+        recent_floor = now - 14 * 86400
+        for cond in conditions:
+            if not isinstance(cond, dict) or str(cond.get("kind") or "") != "body_cycle":
+                continue
+            start_ts = _safe_float(cond.get("start_ts"), 0)
+            end_ts = _safe_float(cond.get("end_ts"), 0)
+            if end_ts > now or max(start_ts, end_ts) >= recent_floor:
+                return True
+        return False
+
+    def _pick_body_cycle_spec(
+        self,
+        cycle_pool: list[tuple[str, str, int, int]],
+        intensity: float,
+    ) -> tuple[str, str, int, int]:
+        neutral = cycle_pool[0]
+        if self._body_cycle_generation_blocked():
+            return neutral
+        now = _now_ts()
+        meta = self.data.get("body_cycle_state", {})
+        expected_ts = _safe_float(meta.get("next_expected_start_ts"), 0) if isinstance(meta, dict) else 0
+        if expected_ts > 0:
+            days_late = max(0.0, (now - expected_ts) / 86400)
+            chance = min(0.65, 0.18 + days_late * 0.12) * max(0.35, min(1.15, intensity))
+        else:
+            chance = 0.045 * max(0.25, min(1.2, intensity))
+        if random.random() > chance:
+            return neutral
+        return random.choices(cycle_pool[1:], weights=[0.45, 0.55], k=1)[0]
+
+    def _record_body_cycle_episode(self, cond: dict[str, Any]) -> None:
+        start_ts = _safe_float(cond.get("start_ts"), _now_ts())
+        end_ts = _safe_float(cond.get("end_ts"), start_ts)
+        phase = str(cond.get("phase") or self._infer_body_cycle_phase(str(cond.get("label") or "")))
+        self.data["body_cycle_state"] = {
+            "last_start_ts": start_ts,
+            "last_end_ts": end_ts,
+            "next_expected_start_ts": start_ts + self._body_cycle_interval_seconds(),
+            "last_phase": phase,
+            "last_label": _single_line(cond.get("label"), 80),
+        }
+
+    def _remember_daily_dream_pick(self, dream_pick: tuple[str, str, int, int] | None) -> None:
+        if not dream_pick:
+            return
+        label = _single_line(dream_pick[0], 120)
+        if not label:
+            return
+        payload = getattr(self, "_last_generated_dream_payload", None)
+        if not isinstance(payload, dict) or _single_line(payload.get("label"), 120) != label:
+            payload = {}
+        factors = payload.get("factors", [])
+        if not isinstance(factors, list):
+            factors = []
+        normalized_factors = [_single_line(item, 30) for item in factors[:8] if _single_line(item, 30)]
+        if not normalized_factors:
+            normalized_factors = self._build_dream_memory_fragments(count=6)
+        content = _single_line(payload.get("content"), 1000)
+        if not content:
+            factor_hint = "、".join(normalized_factors[:4]) or "一些断续的生活碎片"
+            content = (
+                f"梦里像从{factor_hint}开始,场景没有交代清楚就慢慢换了地方。"
+                f"{label}那种感觉一直挂着,中间有些画面接不上,但醒来时还记得自己在梦里顺着它走了一段。"
+            )
+        self.data["daily_dream"] = {
+            "date": _today_key(),
+            "label": label,
+            "dream_type": _single_line(payload.get("dream_type"), 40) or "碎片梦",
+            "factors": normalized_factors,
+            "content": content,
+            "afterglow": _single_line(payload.get("afterglow"), 220) or label,
+            "mood": _single_line(dream_pick[1], 20) or "平稳",
+            "energy_delta": _safe_int(dream_pick[2], 0, -30, 20),
+            "duration_hours": _safe_int(dream_pick[3], 0, 0, 24),
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+
+    def _remembered_daily_dream_label(self) -> str:
+        raw = self.data.get("daily_dream")
+        if not isinstance(raw, dict) or raw.get("date") != _today_key():
+            return ""
+        label = _single_line(raw.get("label"), 120)
+        if label and label != "没有记住梦":
+            return label
+        return ""
+
+    def _dream_afterglow_strength(self, dream_pick: tuple[str, str, int, int]) -> float:
+        mode = str(self.dream_afterglow_mode or "auto")
+        if mode == "轻":
+            return 0.7
+        if mode == "标准":
+            return 1.0
+        if mode == "明显":
+            return 1.35
+        label = str(dream_pick[0] or "")
+        energy_delta = abs(int(dream_pick[2] or 0))
+        if any(token in label for token in ("不舒服", "追", "黑", "掉下去", "迷路", "醒来后有一点黏着感")):
+            return 1.15
+        if energy_delta >= 10:
+            return 1.1
+        if energy_delta <= 2:
+            return 0.75
+        return 0.95
+
+    def _build_dream_aftertaste_condition(
+        self,
+        dream_pick: tuple[str, str, int, int],
+    ) -> dict[str, Any] | None:
+        label = str(dream_pick[0] or "")
+        mood = str(dream_pick[1] or "平稳")
+        if not label or label == "没有记住梦":
+            return None
+        strength = self._dream_afterglow_strength(dream_pick)
+        if random.random() > min(0.92, 0.45 + strength * 0.2):
+            return None
+        if any(token in label for token in ("不舒服", "追", "恐怖", "黑", "掉下去", "迷路", "醒来后有一点黏着感")):
+            return self._make_condition(
+                kind="dream_aftertaste",
+                title="梦后的不安残留",
+                label="梦里的那点不安还没完全褪干净",
+                mood="恍惚" if mood in {"恍惚", "低落", "敏感"} else "敏感",
+                energy_delta=-max(2, int(round(4 * strength))),
+                duration_hours=max(2, int(round(6 * strength))),
+                intensity=min(92, int(50 + 20 * strength)),
+                cause=f"梦境余韵：{_single_line(label, 40)}",
+                phase="dream_aftertaste",
+            )
+        if any(token in label for token in ("发光", "柔", "亮色", "温暖", "春梦", "暧昧", "怀旧")):
+            return self._make_condition(
+                kind="dream_aftertaste",
+                title="梦后的余温",
+                label="梦里的余温还轻轻黏着一点",
+                mood="柔和" if mood not in {"平稳", "中性"} else "安静",
+                energy_delta=max(1, int(round(2 * strength))),
+                duration_hours=max(2, int(round(5 * strength))),
+                intensity=min(88, int(46 + 16 * strength)),
+                cause=f"梦境余韵：{_single_line(label, 40)}",
+                phase="dream_aftertaste",
+            )
+        return self._make_condition(
+            kind="dream_aftertaste",
+            title="梦后的朦胧残影",
+            label="梦里的画面还没完全从脑子里退下去",
+            mood="恍惚" if mood == "平稳" else mood,
+            energy_delta=-max(1, int(round(2 * strength))),
+            duration_hours=max(2, int(round(4 * strength))),
+            intensity=min(82, int(42 + 16 * strength)),
+            cause=f"梦境余韵：{_single_line(label, 40)}",
+            phase="dream_aftertaste",
+        )
+
+    def _build_health_causes(
+        self,
+        *,
+        sleep_label: str,
+        weather_text: str,
+        diary_tags: set[str],
+    ) -> list[str]:
+        causes: list[str] = []
+        if sleep_label not in {"睡眠平稳"} and random.random() < 0.7:
+            causes.append("昨晚没睡踏实")
+        if any(tag in diary_tags for tag in {"失眠", "低能量"}) and random.random() < 0.45:
+            causes.append("前一天状态就有点透支")
+        weather_lower = str(weather_text or "").lower()
+        if any(token in weather_text for token in ("降雨", "小雨", "中雨", "大雨", "阴", "多云")) and random.random() < 0.4:
+            causes.append("空气有点潮,身上那股乏劲更明显")
+        if any(token in weather_text for token in ("风", "降温", "冷")) and random.random() < 0.55:
+            causes.append("吹了点风,身上容易发空")
+        temp_match = re.search(r"(-?\d+(?:\.\d+)?)\s*°C", weather_lower)
+        if temp_match:
+            try:
+                temp = float(temp_match.group(1))
+            except ValueError:
+                temp = 20.0
+            if temp <= 10 and random.random() < 0.55:
+                causes.append("天气偏冷,早上容易着凉")
+            elif temp >= 30 and random.random() < 0.35:
+                causes.append("天气闷热,整个人有点蔫")
+        return causes
+
+    def _pick_health_spec(
+        self, causes: list[str], intensity: float, weather_text: str
+    ) -> tuple[str, str, int, int, str] | None:
+        if not causes:
+            return None
+        chance = min(0.42, 0.12 + len(causes) * 0.1 * max(0.5, intensity))
+        if random.random() > chance:
+            return None
+        cause_text = ",".join(dict.fromkeys(causes[:2]))
+        pool = [
+            ("喉咙有点发紧,今天想少说重话", "安静", -10, 24),
+            ("头有点沉,做事想放慢一点", "疲惫", -14, 18),
+            ("像有点发虚,反应会慢半拍", "疲惫", -18, 30),
+        ]
+        label, mood, energy_delta, duration_hours = random.choice(pool)
+        if "闷热" in cause_text and "喉咙" in label:
+            label = "有点发闷,只想把动作放轻一点"
+        if "潮" in cause_text and "头有点沉" in label:
+            label = "身上有点沉,今天想把事情做轻一点"
+        return label, mood, energy_delta, duration_hours, cause_text
+
+    def _build_transition_options(
+        self,
+        *,
+        kind: str,
+        energy_delta: int,
+        cause: str,
+        on_end_transition: str,
+    ) -> list[dict[str, Any]]:
+        if on_end_transition == "health_relief":
+            return [
+                {"to": "recovery_afterglow", "base_weight": 0.45},
+                {"to": "stable", "base_weight": 0.4},
+                {"to": "health_tail", "base_weight": 0.15},
+            ]
+        if on_end_transition == "sleep_rebound":
+            return [
+                {"to": "sleep_afterglow", "base_weight": 0.35},
+                {"to": "stable", "base_weight": 0.5},
+                {"to": "sleep_tail", "base_weight": 0.15},
+            ]
+        if kind == "care_warmth":
+            return [
+                {"to": "stable", "base_weight": 0.8},
+                {"to": "soft_afterglow", "base_weight": 0.2},
+            ]
+        return []
+
+    def _make_condition(
+        self,
+        *,
+        kind: str,
+        title: str,
+        label: str,
+        mood: str,
+        energy_delta: int,
+        duration_hours: int,
+        intensity: int,
+        cause: str = "",
+        on_end_transition: str = "",
+        phase: str = "",
+        episode_key: str = "",
+        transition_options: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        start_ts = _now_ts()
+        return {
+            "id": f"{kind}-{int(start_ts)}-{random.randint(1000, 9999)}",
+            "kind": kind,
+            "title": title,
+            "label": label,
+            "mood": mood,
+            "energy_delta": energy_delta,
+            "intensity": intensity,
+            "start_ts": start_ts,
+            "end_ts": start_ts + duration_hours * 3600,
+            "duration_hours": duration_hours,
+            "cause": cause,
+            "on_end_transition": on_end_transition,
+            "phase": phase,
+            "episode_key": episode_key,
+            "transition_options": list(transition_options or []),
+        }
+
+    def _infer_manual_state_mood(self, text: str) -> str:
+        raw = str(text or "")
+        mapping = [
+            (("累", "疲惫", "困", "没电"), "疲惫"),
+            (("烦", "乱", "躁", "闷"), "烦闷"),
+            (("病", "难受", "不舒服", "头疼", "发烧"), "虚弱"),
+            (("饿", "胃口", "嘴馋"), "黏人"),
+            (("开心", "轻快", "高兴", "兴奋"), "轻快"),
+            (("紧张", "慌", "忐忑"), "紧张"),
+            (("安静", "困倦", "恍惚"), "安静"),
+        ]
+        for markers, mood in mapping:
+            if any(marker in raw for marker in markers):
+                return mood
+        return "平稳"
+
+    def _infer_manual_state_energy_delta(self, text: str) -> int:
+        raw = str(text or "")
+        if any(token in raw for token in ("开心", "轻快", "高兴", "兴奋")):
+            return 6
+        if any(token in raw for token in ("病", "难受", "不舒服", "发烧", "头疼")):
+            return -16
+        if any(token in raw for token in ("累", "疲惫", "困", "没电")):
+            return -10
+        if any(token in raw for token in ("烦", "乱", "躁", "闷")):
+            return -8
+        return -4 if any(token in raw for token in ("紧张", "慌")) else 0
+
+    async def _add_manual_state(self, value: str) -> tuple[bool, str]:
+        raw = str(value or "").strip()
+        if not raw:
+            return False, "请这样填写：陪伴 增添状态 有点累了|8"
+        label_part, sep, hours_part = raw.partition("|")
+        label = _single_line(label_part, 80)
+        if not label:
+            return False, "状态描述不能为空。"
+        duration_hours = _safe_int(hours_part.strip() if sep else 12, 12, 1, 72)
+        mood = self._infer_manual_state_mood(label)
+        energy_delta = self._infer_manual_state_energy_delta(label)
+        await self._ensure_daily_state()
+        async with self._data_lock:
+            conditions = self.data.setdefault("state_conditions", [])
+            if not isinstance(conditions, list):
+                self.data["state_conditions"] = []
+                conditions = self.data["state_conditions"]
+            conditions.append(
+                self._make_condition(
+                    kind="manual_state",
+                    title="手动增添状态",
+                    label=label,
+                    mood=mood,
+                    energy_delta=energy_delta,
+                    duration_hours=duration_hours,
+                    intensity=60,
+                    cause="由用户手动增添",
+                    phase="manual",
+                )
+            )
+            state = self._compose_state_from_conditions(self.data.get("daily_weather", {}))
+            self.data["daily_state"] = state
+            self._save_data_sync()
+        return True, f"已增添状态：{label}（约持续 {duration_hours} 小时）"
+
+    def _recent_diary_tags(self) -> set[str]:
+        return recent_diary_tags(self)
+
+    def _recent_diary_context(self, count: int = 3) -> str:
+        return recent_diary_context(self, count)
+
+    def _normalize_dream_fragment_item(self, raw: Any) -> dict[str, Any] | None:
+        return normalize_dream_fragment_item(self, raw)
+
+    def _dream_fragment_effective_weight(self, fragment: dict[str, Any], now_ts: float | None = None) -> float:
+        return dream_fragment_effective_weight(self, fragment, now_ts=now_ts)
+
+    def _normalize_dream_fragment_pool(self, fragments: Any, *, now_ts: float | None = None) -> list[dict[str, Any]]:
+        return normalize_dream_fragment_pool(self, fragments, now_ts=now_ts)
+
+    def _extract_weighted_dream_fragments(self, payload: Any) -> list[dict[str, Any]]:
+        return extract_weighted_dream_fragments(self, payload)
+
+    def _fallback_dream_fragments_for_diary(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        return fallback_dream_fragments_for_diary(self, state)
+
+    def _merge_dream_fragment_pool(self, new_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return merge_dream_fragment_pool(self, new_items)
+
+    def _weighted_unique_fragment_sample(
+        self,
+        fragments: list[dict[str, Any]],
+        *,
+        count: int,
+    ) -> list[str]:
+        return weighted_unique_fragment_sample(self, fragments, count=count)
+
+    def _build_dream_memory_fragments(self, count: int = 8) -> list[str]:
+        return build_dream_memory_fragments(self, count)
+
+    def _dream_theme_specs(self) -> list[tuple[str, str]]:
+        return dream_theme_specs(self)
+
+    async def _generate_enhanced_dream_pick(
+        self,
+        weather: dict[str, Any] | None = None,
+    ) -> tuple[str, str, int, int] | None:
+        return await generate_enhanced_dream_pick(self, weather)
+
+    async def _ensure_weather_context(self, force: bool = False) -> dict[str, Any]:
+        today = _today_key()
+        if not self.enable_weather_context:
+            return {"date": today, "prompt": "暂无天气信息", "source": "disabled"}
+        cached = self.data.get("daily_weather", {})
+        if isinstance(cached, dict):
+            fetched_at = _safe_float(cached.get("fetched_ts"), 0)
+            if (
+                not force
+                and cached.get("date") == today
+                and _now_ts() - fetched_at < self.weather_refresh_minutes * 60
+            ):
+                return cached
+        prompt = "暂无天气信息"
+        source = "none"
+        own_result = await self._fetch_own_weather_prompt()
+        text = _single_line(own_result.get("prompt"), 120) if isinstance(own_result, dict) else ""
+        if text:
+            prompt = text
+            source = str(own_result.get("source") or "private_companion")
+        else:
+            plugin = self._get_screen_companion_plugin()
+            if plugin is not None and hasattr(plugin, "_get_weather_prompt"):
+                try:
+                    result = await plugin._get_weather_prompt()
+                    text = _single_line(result, 120)
+                    if text:
+                        prompt = text
+                        source = "screen_companion"
+                except Exception as e:
+                    logger.debug(f"[PrivateCompanion] 获取天气信息失败: {e}")
+        weather = {
+            "date": today,
+            "prompt": prompt,
+            "source": source,
+            "fetched_ts": _now_ts(),
+        }
+        async with self._data_lock:
+            self.data["daily_weather"] = weather
+            self._save_data_sync()
+        return weather
+
+    def _weather_summary_text(self, weather: dict[str, Any] | None) -> str:
+        if not isinstance(weather, dict):
+            return "暂无天气信息"
+        text = _single_line(weather.get("prompt"), 120)
+        return text or "暂无天气信息"
+
+    async def _fetch_own_weather_prompt(self) -> dict[str, str]:
+        if not self.weather_api_key:
+            return {"prompt": "", "source": ""}
+        url = self._build_weather_url()
+        if not url:
+            return {"prompt": "", "source": ""}
+        try:
+            import aiohttp
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        logger.debug(f"[PrivateCompanion] 天气请求失败: {response.status}")
+                        return {"prompt": "", "source": ""}
+                    weather_data = await response.json()
+        except Exception as e:
+            logger.debug(f"[PrivateCompanion] 私有天气获取失败: {e}")
+            return {"prompt": "", "source": ""}
+        try:
+            weather_desc = weather_data.get("weather", [{}])[0].get("description", "")
+            temp = weather_data.get("main", {}).get("temp", 0)
+            if weather_desc:
+                return {
+                    "prompt": f"当前天气 {weather_desc},约 {temp}°C。",
+                    "source": "private_companion",
+                }
+        except Exception:
+            pass
+        return {"prompt": "", "source": ""}
+
+    def _build_weather_url(self) -> str:
+        key = self.weather_api_key
+        city = self.weather_city
+        lat, lon = self.weather_lat, self.weather_lon
+        if city:
+            return (
+                "http://api.openweathermap.org/data/2.5/weather"
+                f"?q={city}&appid={key}&units=metric&lang=zh_cn"
+            )
+        if -90 <= lat <= 90 and -180 <= lon <= 180 and not (lat == 0 and lon == 0):
+            return (
+                "http://api.openweathermap.org/data/2.5/weather"
+                f"?lat={lat}&lon={lon}&appid={key}&units=metric&lang=zh_cn"
+            )
+        return ""
+
+    def _detect_care_feedback(self, text: str) -> dict[str, Any]:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return {"is_care": False, "tags": []}
+        tags: list[str] = []
+        if re.search(r"吃药|喝药|去拿药|按时吃药", normalized):
+            tags.append("medicine")
+        if re.search(r"喝水|多喝热水|热水|温水", normalized):
+            tags.append("water")
+        if re.search(r"休息|早点睡|快睡|去睡|别熬夜|多睡会|睡一觉", normalized):
+            tags.append("rest")
+        if re.search(r"保暖|别着凉|穿厚|加衣服|盖好", normalized):
+            tags.append("warm")
+        if re.search(r"难受|还好吗|没事吧|注意身体|照顾好自己|心疼", normalized):
+            tags.append("concern")
+        tags = list(dict.fromkeys(tags))
+        return {"is_care": bool(tags), "tags": tags}
+
+    def _apply_care_feedback_to_state(self, text: str) -> bool:
+        feedback = self._detect_care_feedback(text)
+        if not feedback.get("is_care"):
+            return False
+        tags = feedback.get("tags", [])
+        changed = False
+        now = _now_ts()
+        conditions = self.data.setdefault("state_conditions", [])
+        if not isinstance(conditions, list):
+            self.data["state_conditions"] = []
+            conditions = self.data["state_conditions"]
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if str(cond.get("kind") or "") != "health":
+                continue
+            if _safe_float(cond.get("end_ts"), 0) <= now:
+                continue
+            remaining = max(0, _safe_float(cond.get("end_ts"), now) - now)
+            shorten_ratio = 0.0
+            if "medicine" in tags:
+                shorten_ratio += 0.35
+            if "rest" in tags:
+                shorten_ratio += 0.2
+            if "water" in tags:
+                shorten_ratio += 0.12
+            if "warm" in tags:
+                shorten_ratio += 0.12
+            if shorten_ratio > 0:
+                cond["end_ts"] = now + remaining * max(0.35, 1 - min(shorten_ratio, 0.55))
+                cond["duration_hours"] = max(
+                    1,
+                    int((cond["end_ts"] - _safe_float(cond.get("start_ts"), now)) / 3600),
+                )
+                cond["energy_delta"] = min(-2, int(_safe_int(cond.get("energy_delta"), -8) * 0.75))
+                cond["label"] = "收到照顾提醒后,不适强度略有下降"
+                changed = True
+            notes = cond.setdefault("care_notes", [])
+            if isinstance(notes, list):
+                care_note = "用户提供了关心反馈"
+                if "medicine" in tags:
+                    care_note = "用户提醒用药"
+                elif "rest" in tags:
+                    care_note = "用户提醒休息"
+                elif "water" in tags:
+                    care_note = "用户提醒补水"
+                if care_note not in notes:
+                    notes.append(care_note)
+            cond["cause"] = _single_line(
+                f"{_single_line(cond.get('cause'), 80)}；用户提供了照顾提醒".strip("；"),
+                120,
+            )
+        if changed and random.random() < 0.72:
+            conditions.append(
+                self._make_condition(
+                    kind="care_warmth",
+                    title="被关心后的回暖",
+                    label="收到用户关心后的轻度回暖",
+                    mood="柔和",
+                    energy_delta=6,
+                    duration_hours=6,
+                    intensity=72,
+                    cause="用户提供了关心反馈",
+                    phase="care_feedback",
+                    transition_options=self._build_transition_options(
+                        kind="care_warmth",
+                        energy_delta=6,
+                        cause="用户提供了关心反馈",
+                        on_end_transition="",
+                    ),
+                )
+            )
+        return changed
+
+    def _pick_diary_fragment(self) -> str:
+        diaries = self.data.get("bot_diaries", [])
+        if not isinstance(diaries, list) or not diaries:
+            return ""
+        diary = random.choice(diaries[-5:])
+        if not isinstance(diary, dict):
+            return ""
+        candidates = [
+            _single_line(diary.get("share_seed"), 100),
+            _single_line(diary.get("summary"), 100),
+        ]
+        return next((item for item in candidates if item), "")
+
+    def _parse_date_value(self, value: Any) -> date | None:
+        text = str(value or "").strip()
+        for fmt in ("%Y-%m-%d", "%m-%d"):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                year = datetime.now().year if fmt == "%m-%d" else parsed.year
+                return date(year, parsed.month, parsed.day)
+            except ValueError:
+                continue
+        return None
+
+    def _next_occurrence(self, entry: dict[str, Any]) -> date | None:
+        base = self._parse_date_value(entry.get("date"))
+        if base is None:
+            return None
+        today = datetime.now().date()
+        if entry.get("repeat_yearly", True):
+            try:
+                candidate = date(today.year, base.month, base.day)
+            except ValueError:
+                return None
+            if candidate < today:
+                try:
+                    candidate = date(today.year + 1, base.month, base.day)
+                except ValueError:
+                    return None
+            return candidate
+        return base
+
+    def _get_relevant_important_dates(self) -> list[dict[str, Any]]:
+        entries = self.data.get("important_dates", [])
+        if not isinstance(entries, list):
+            return []
+        today = datetime.now().date()
+        relevant = []
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("enabled", True):
+                continue
+            next_day = self._next_occurrence(entry)
+            if next_day is None:
+                continue
+            days_until = (next_day - today).days
+            remind_days = _safe_int(
+                entry.get("remind_days"), self.important_date_lookahead_days, 0, 365
+            )
+            if 0 <= days_until <= remind_days:
+                copy = dict(entry)
+                copy["_next_date"] = _date_key(next_day)
+                copy["_days_until"] = days_until
+                relevant.append(copy)
+        return sorted(
+            relevant,
+            key=lambda item: (
+                _safe_int(item.get("_days_until"), 999),
+                -_safe_int(item.get("priority"), 50),
+            ),
+        )
+
+    def _format_important_dates_for_prompt(self) -> str:
+        entries = self._get_relevant_important_dates()
+        if not entries:
+            return "（近期没有需要特别记住的日期）"
+        lines = []
+        for entry in entries[:8]:
+            days = _safe_int(entry.get("_days_until"), 0)
+            when = "今天" if days == 0 else f"{days} 天后"
+            lines.append(
+                f"- {when}｜{entry.get('title', '')}｜类型：{entry.get('type', '重要日期')}｜"
+                f"备注：{entry.get('note', '')}"
+            )
+        return "\n".join(lines)
+
+    def _format_calendar_context_for_prompt(self, now: datetime | None = None) -> str:
+        current = now or datetime.now()
+        weekday_names = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+        weekday = weekday_names[current.weekday()]
+        is_weekend = current.weekday() >= 5
+        builtin_holidays = {
+            "01-01": ("元旦", "节假日"),
+            "05-01": ("劳动节", "节假日"),
+            "10-01": ("国庆节", "节假日"),
+        }
+        month_day = current.strftime("%m-%d")
+        today_dates = [
+            entry
+            for entry in self._get_relevant_important_dates()
+            if _safe_int(entry.get("_days_until"), 999) == 0
+        ]
+        special_lines = []
+        holiday_tokens = (
+            "节",
+            "节日",
+            "假",
+            "假期",
+            "放假",
+            "休息",
+            "旅行",
+            "生日",
+            "纪念日",
+            "春节",
+            "元旦",
+            "清明",
+            "端午",
+            "中秋",
+            "国庆",
+            "劳动",
+            "圣诞",
+        )
+        has_holiday_signal = False
+        builtin_holiday = builtin_holidays.get(month_day)
+        if builtin_holiday:
+            title, type_text = builtin_holiday
+            special_lines.append(f"- 今天：{title}｜类型：{type_text}｜备注：内置公历节日")
+            has_holiday_signal = True
+        for entry in today_dates[:5]:
+            title = _single_line(entry.get("title"), 40)
+            type_text = _single_line(entry.get("type"), 30)
+            note = _single_line(entry.get("note"), 80)
+            joined = f"{title} {type_text} {note}"
+            if any(token in joined for token in holiday_tokens):
+                has_holiday_signal = True
+            if title:
+                special_lines.append(f"- 今天：{title}｜类型：{type_text or '重要日期'}｜备注：{note or '无'}")
+        if has_holiday_signal:
+            day_tone = "节假日/特殊日期"
+        elif is_weekend:
+            day_tone = "周末/休息日候选"
+        else:
+            day_tone = "普通工作日或学习日候选"
+        rules = [
+            f"日期：{current.strftime('%Y-%m-%d')}（{weekday}）",
+            f"基础日期类型：{day_tone}",
+        ]
+        if special_lines:
+            rules.append("今天相关的重要日期：\n" + "\n".join(special_lines))
+        else:
+            rules.append("今天相关的重要日期：无")
+        rules.append(
+            "日程判断：先看日期语境,再看人格设定。工作日可以有上课/上班；周末要更松,可以晚起、休息、出门、补一点自己的事；节假日/假期要明显区别于普通日,可以有庆祝、出行、宅家、家人/朋友安排或假期拖延。"
+        )
+        rules.append(
+            "如果人格、日程专用设定或重要日期备注里写了调休、补班、补课、考试、值班等例外,优先按这些例外来写。不要凭空塞入身份里没有的校园、职场或节日细节。"
+        )
+        return "\n".join(rules)
+
+    def _calendar_day_flags(self, now: datetime | None = None) -> dict[str, bool]:
+        current = now or datetime.now()
+        is_weekend = current.weekday() >= 5
+        builtin_holidays = {"01-01", "05-01", "10-01"}
+        month_day = current.strftime("%m-%d")
+        today_dates = [
+            entry
+            for entry in self._get_relevant_important_dates()
+            if _safe_int(entry.get("_days_until"), 999) == 0
+        ]
+        holiday_tokens = (
+            "节",
+            "节日",
+            "假",
+            "假期",
+            "放假",
+            "休息",
+            "旅行",
+            "春节",
+            "元旦",
+            "清明",
+            "端午",
+            "中秋",
+            "国庆",
+            "劳动",
+        )
+        override_tokens = ("调休", "补班", "补课", "考试", "值班", "加班", "返校")
+        has_holiday_signal = month_day in builtin_holidays
+        has_override_signal = False
+        for entry in today_dates:
+            if not isinstance(entry, dict):
+                continue
+            joined = _single_line(
+                f"{entry.get('title', '')} {entry.get('type', '')} {entry.get('note', '')}",
+                160,
+            )
+            if any(token in joined for token in holiday_tokens):
+                has_holiday_signal = True
+            if any(token in joined for token in override_tokens):
+                has_override_signal = True
+        schedule_prompt = self._get_schedule_planning_prompt()
+        if any(token in schedule_prompt for token in override_tokens):
+            has_override_signal = True
+        return {
+            "is_weekend": is_weekend,
+            "has_holiday_signal": has_holiday_signal,
+            "has_override_signal": has_override_signal,
+        }
+
+    def _plan_conflicts_with_calendar(self, items: list[dict[str, str]], now: datetime | None = None) -> bool:
+        if not items:
+            return False
+        flags = self._calendar_day_flags(now)
+        if flags["has_override_signal"]:
+            return False
+        if not (flags["is_weekend"] or flags["has_holiday_signal"]):
+            return False
+        school_or_work_tokens = (
+            "上课",
+            "下课",
+            "放学",
+            "课间",
+            "老师",
+            "作业",
+            "自习",
+            "教室",
+            "食堂",
+            "校门",
+            "班会",
+            "补课",
+            "上班",
+            "通勤",
+            "打卡",
+            "工位",
+            "会议",
+            "下班",
+            "值班",
+        )
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            text = _single_line(
+                f"{item.get('activity', '')} {item.get('message_seed', '')}",
+                220,
+            )
+            if any(token in text for token in school_or_work_tokens):
+                return True
+        return False
+
+    def _is_micro_plan_activity(self, text: str) -> bool:
+        normalized = _single_line(text, 160)
+        if not normalized:
+            return False
+        length = len(normalized)
+        instant_markers = (
+            "看了一眼",
+            "瞥了一眼",
+            "拍了一下",
+            "拍了下",
+            "翻了个身",
+            "揉了揉",
+            "抬头看",
+            "关掉闹钟",
+            "叫了一声",
+            "应了一声",
+            "顺手点开",
+        )
+        if any(marker in normalized for marker in instant_markers):
+            return length <= 30
+        generic_short_markers = ("一下", "一眼", "一瞬", "顺手", "刚好", "忽然")
+        continuity_markers = (
+            "慢慢",
+            "继续",
+            "待着",
+            "坐着",
+            "趴着",
+            "整理",
+            "收拾",
+            "吃饭",
+            "洗漱",
+            "发呆",
+            "看剧",
+            "听歌",
+            "出门",
+            "路上",
+            "吹风",
+            "睡前",
+            "饭后",
+            "午休",
+            "收尾",
+        )
+        if any(marker in normalized for marker in generic_short_markers) and not any(
+            marker in normalized for marker in continuity_markers
+        ):
+            return length <= 22
+        return False
+
+    def _plan_has_excess_micro_segments(self, items: list[dict[str, str]]) -> bool:
+        if not items:
+            return False
+        micro_count = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if self._is_micro_plan_activity(str(item.get("activity") or "")):
+                micro_count += 1
+        return micro_count >= max(2, len(items) // 4)
+
+    def _is_abstract_plan_activity(self, text: str) -> bool:
+        normalized = _single_line(text, 180)
+        if not normalized:
+            return False
+        concrete_markers = (
+            "起床", "赖床", "洗漱", "吃", "喝", "走", "坐", "趴", "靠", "收拾", "整理",
+            "看", "听", "出门", "回家", "写", "刷", "逛", "吹风", "洗碗", "看剧", "躺",
+            "翻", "换鞋", "背上", "拿着", "关灯", "开窗", "买", "收声", "聊天", "做饭",
+        )
+        abstract_markers = (
+            "思绪", "心情", "气息", "余韵", "碎片", "温柔", "柔软", "飘忽", "微醺", "依恋",
+            "恍惚", "生活感", "画面", "感觉", "梦里", "脑海里", "最后闪过", "随着光线",
+        )
+        if any(marker in normalized for marker in concrete_markers):
+            abstract_count = sum(1 for marker in abstract_markers if marker in normalized)
+            return abstract_count >= 3 and len(normalized) <= 22
+        abstract_count = sum(1 for marker in abstract_markers if marker in normalized)
+        return abstract_count >= 2
+
+    def _plan_has_excess_abstract_segments(self, items: list[dict[str, str]]) -> bool:
+        if not items:
+            return False
+        abstract_count = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if self._is_abstract_plan_activity(str(item.get("activity") or "")):
+                abstract_count += 1
+        return abstract_count >= max(2, len(items) // 3)
+
+    @staticmethod
+    def _plan_activity_signature(text: str) -> str:
+        normalized = _single_line(text, 180)
+        if not normalized:
+            return ""
+        category_rules = (
+            ("起床", ("起床", "醒来", "睡醒", "赖床", "闹钟", "被窝")),
+            ("洗漱", ("洗漱", "刷牙", "洗脸", "梳头", "镜子", "卫生间")),
+            ("早餐", ("早餐", "早饭", "面包", "牛奶", "豆浆", "粥")),
+            ("正餐", ("午饭", "晚饭", "吃饭", "做饭", "干饭", "饭桌", "摆碗", "点外卖")),
+            ("通勤出门", ("出门", "路上", "公交", "地铁", "校门", "换鞋", "背包", "打车")),
+            ("校园课程", ("上课", "下课", "教室", "课间", "老师", "同桌", "黑板", "班会")),
+            ("补课考试", ("补课", "考试", "测验", "卷子", "复习", "考场", "错题")),
+            ("学习作业", ("作业", "自习", "刷题", "数学", "英语", "课本", "笔记", "书包")),
+            ("工作事务", ("上班", "工位", "会议", "打卡", "下班", "同事", "项目", "文档")),
+            ("家务整理", ("收拾", "整理", "扫地", "洗碗", "洗衣", "归位", "桌面", "房间")),
+            ("休息摸鱼", ("午休", "休息", "摸鱼", "躺", "趴", "沙发", "发呆", "缓一会")),
+            ("娱乐放松", ("看剧", "追番", "游戏", "刷短视频", "听歌", "小说", "漫画")),
+            ("社交互动", ("聊天", "朋友", "家人", "消息", "电话", "群聊", "回复", "打开对话框")),
+            ("购物外食", ("买", "便利店", "超市", "奶茶", "饮料", "小吃", "逛")),
+            ("户外散步", ("散步", "走一段", "吹风", "公园", "楼下", "河边", "阳台", "开窗")),
+            ("运动身体", ("运动", "跑步", "拉伸", "散操", "瑜伽", "出汗")),
+            ("洗澡睡前", ("洗澡", "睡前", "关灯", "上床", "准备睡", "入睡", "枕头")),
+        )
+        hits: list[str] = []
+        for label, tokens in category_rules:
+            if any(token in normalized for token in tokens):
+                hits.append(label)
+            if len(hits) >= 2:
+                break
+        if hits:
+            return "+".join(hits)
+        compact = re.sub(r"[，。！？、,.!?；;：:\s]+", "", normalized)
+        return compact[:8]
+
+    def _plan_signature(self, items: list[dict[str, Any]]) -> list[str]:
+        signatures: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            signature = self._plan_activity_signature(
+                f"{item.get('activity', '')} {item.get('message_seed', '')}"
+            )
+            if signature:
+                signatures.append(signature)
+        return signatures
+
+    def _format_recent_daily_plan_history_for_prompt(self, limit: int = 5) -> str:
+        history = self._recent_daily_plan_history_entries()
+        rows: list[str] = []
+        for entry in history[-limit:]:
+            if not isinstance(entry, dict):
+                continue
+            date_text = _single_line(entry.get("date"), 16)
+            signatures = entry.get("signature")
+            if not isinstance(signatures, list):
+                signatures = []
+            samples = entry.get("sample")
+            if not isinstance(samples, list):
+                samples = []
+            skeleton = " / ".join(_single_line(part, 20) for part in signatures[:12] if part)
+            sample_text = "；".join(_single_line(part, 46) for part in samples[:4] if part)
+            if skeleton:
+                line = f"- {date_text}: {skeleton}"
+                if sample_text:
+                    line += f"\n  代表活动: {sample_text}"
+                rows.append(line)
+        return "\n".join(rows) if rows else "暂无最近日程历史。"
+
+    def _plan_repetition_score(self, items: list[dict[str, str]]) -> float:
+        signatures = self._plan_signature(items)
+        if not signatures:
+            return 0.0
+        current_set = set(signatures)
+        history = self._recent_daily_plan_history_entries()
+        best_score = 0.0
+        for entry in history[-5:]:
+            if not isinstance(entry, dict):
+                continue
+            old_signatures = entry.get("signature")
+            if not isinstance(old_signatures, list) or not old_signatures:
+                continue
+            old_values = [str(value) for value in old_signatures if value]
+            old_set = set(old_values)
+            if not old_set:
+                continue
+            jaccard = len(current_set & old_set) / max(1, len(current_set | old_set))
+            paired = min(len(signatures), len(old_values))
+            same_positions = 0
+            for idx in range(paired):
+                if signatures[idx] == old_values[idx]:
+                    same_positions += 1
+            ordered = same_positions / max(1, paired)
+            best_score = max(best_score, jaccard * 0.65 + ordered * 0.35)
+        return best_score
+
+    def _plan_is_too_repetitive(self, items: list[dict[str, str]]) -> bool:
+        if not items:
+            return False
+        signatures = self._plan_signature(items)
+        if len(signatures) >= 6:
+            dominant_count = max(signatures.count(signature) for signature in set(signatures))
+            if dominant_count >= max(4, len(signatures) // 2 + 1):
+                return True
+        return self._plan_repetition_score(items) >= 0.62
+
+    def _daily_plan_history_entry(self, plan: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(plan, dict):
+            return None
+        items = plan.get("items")
+        if not isinstance(items, list) or not items:
+            return None
+        plan_date = _single_line(plan.get("date"), 16) or _today_key()
+        sample: list[str] = []
+        for item in items[:6]:
+            if not isinstance(item, dict):
+                continue
+            time_text = _single_line(item.get("time"), 8)
+            activity = _single_line(item.get("activity"), 52)
+            if activity:
+                sample.append(f"{time_text} {activity}".strip())
+        entry = {
+            "date": plan_date,
+            "generated_at": _single_line(plan.get("generated_at"), 20) or datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "source": _single_line(plan.get("source"), 16),
+            "signature": self._plan_signature(items),
+            "sample": sample,
+        }
+
+    def _recent_daily_plan_history_entries(self) -> list[dict[str, Any]]:
+        history = self.data.get("daily_plan_history", [])
+        entries = [entry for entry in history if isinstance(entry, dict)] if isinstance(history, list) else []
+        known_dates = {_single_line(entry.get("date"), 16) for entry in entries}
+        current_entry = self._daily_plan_history_entry(self.data.get("daily_plan", {}))
+        if current_entry and _single_line(current_entry.get("date"), 16) not in known_dates:
+            entries.append(current_entry)
+        return entries
+
+    def _remember_daily_plan_history(self, plan: dict[str, Any]) -> None:
+        entry = self._daily_plan_history_entry(plan)
+        if not entry:
+            return
+        plan_date = _single_line(entry.get("date"), 16)
+        history = self.data.setdefault("daily_plan_history", [])
+        if not isinstance(history, list):
+            history = []
+            self.data["daily_plan_history"] = history
+        history[:] = [
+            old
+            for old in history
+            if not (isinstance(old, dict) and _single_line(old.get("date"), 16) == plan_date)
+        ]
+        history.append(entry)
+        del history[:-10]
+
+    def _add_important_date_entry(self, value: str) -> tuple[bool, str]:
+        parts = value.split(maxsplit=2)
+        if len(parts) < 2:
+            return False, "格式：陪伴 日期添加 <标题> <YYYY-MM-DD或MM-DD> [备注]"
+        title = _single_line(parts[0], 40)
+        date_text = _single_line(parts[1], 20)
+        note = _single_line(parts[2], 120) if len(parts) >= 3 else ""
+        parsed = self._parse_date_value(date_text)
+        if parsed is None:
+            return False, "日期格式不对,请用 YYYY-MM-DD 或 MM-DD。"
+        repeat_yearly = len(date_text) == 5
+        entry = {
+            "id": f"date-{int(_now_ts())}-{random.randint(1000, 9999)}",
+            "title": title,
+            "date": date_text,
+            "type": "重要日期",
+            "note": note,
+            "enabled": True,
+            "repeat_yearly": repeat_yearly,
+            "remind_days": self.important_date_lookahead_days,
+            "priority": 50,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        self.data.setdefault("important_dates", []).append(entry)
+        return True, f"已添加重要日期：{title}｜{date_text}"
+
+    def _remove_important_date_entry(self, value: str) -> str:
+        keyword = _single_line(value, 40)
+        if not keyword:
+            return "请提供要删除的日期标题关键词。"
+        entries = self.data.setdefault("important_dates", [])
+        if not isinstance(entries, list):
+            self.data["important_dates"] = []
+            return "重要日期列表为空。"
+        kept = []
+        removed = []
+        for entry in entries:
+            title = str(entry.get("title", "")) if isinstance(entry, dict) else ""
+            if keyword in title:
+                removed.append(title)
+            else:
+                kept.append(entry)
+        self.data["important_dates"] = kept
+        if not removed:
+            return "没有找到匹配的重要日期。"
+        return "已删除：\n" + "\n".join(f"- {item}" for item in removed)
+
+    def _format_important_dates(self) -> str:
+        entries = self.data.get("important_dates", [])
+        if not isinstance(entries, list) or not entries:
+            return "还没有重要日期。"
+        lines = ["重要日期条目："]
+        today = datetime.now().date()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            next_day = self._next_occurrence(entry)
+            suffix = ""
+            if next_day:
+                days = (next_day - today).days
+                suffix = "｜今天" if days == 0 else f"｜{days} 天后"
+            enabled = "启用" if entry.get("enabled", True) else "停用"
+            repeat = "每年" if entry.get("repeat_yearly", True) else "一次"
+            lines.append(
+                f"- {entry.get('title')}｜{entry.get('date')}｜{repeat}｜{enabled}{suffix}｜{entry.get('note', '')}"
+            )
+        return "\n".join(lines)
+
+    def _cleanup_expired_conditions(self):
+        now = _now_ts()
+        conditions = self.data.setdefault("state_conditions", [])
+        if not isinstance(conditions, list):
+            self.data["state_conditions"] = []
+            return
+        conditions = self._repair_body_cycle_conditions(conditions, now)
+        active = []
+        expired = []
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if _safe_float(cond.get("end_ts"), 0) > now:
+                active.append(cond)
+            else:
+                expired.append(cond)
+        for cond in expired:
+            active.extend(self._spawn_followup_conditions(cond))
+        self.data["state_conditions"] = active
+
+    def _repair_body_cycle_conditions(self, conditions: list[Any], now: float) -> list[dict[str, Any]]:
+        repaired: list[dict[str, Any]] = []
+        active_cycles: list[dict[str, Any]] = []
+        last_cycle_end = 0.0
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if str(cond.get("kind") or "") != "body_cycle":
+                repaired.append(cond)
+                continue
+            label = _single_line(cond.get("label"), 80)
+            phase = str(cond.get("phase") or self._infer_body_cycle_phase(label))
+            cond["phase"] = phase
+            start_ts = _safe_float(cond.get("start_ts"), now)
+            if start_ts <= 0:
+                start_ts = now
+                cond["start_ts"] = start_ts
+            max_hours = self._body_cycle_max_hours(phase, label)
+            max_end_ts = start_ts + max_hours * 3600
+            end_ts = _safe_float(cond.get("end_ts"), max_end_ts)
+            if end_ts <= 0:
+                end_ts = max_end_ts
+            if end_ts > max_end_ts:
+                end_ts = max_end_ts
+                cond["end_ts"] = end_ts
+                cond["duration_hours"] = max_hours
+            if not cond.get("episode_key"):
+                cond["episode_key"] = f"body-cycle-{datetime.fromtimestamp(start_ts).strftime('%Y-%m-%d')}"
+            last_cycle_end = max(last_cycle_end, end_ts)
+            if start_ts <= now < end_ts:
+                active_cycles.append(cond)
+            repaired.append(cond)
+
+        if len(active_cycles) > 1:
+            active_cycles.sort(key=lambda item: _safe_float(item.get("start_ts"), 0), reverse=True)
+            keep_id = active_cycles[0].get("id")
+            filtered: list[dict[str, Any]] = []
+            for cond in repaired:
+                if str(cond.get("kind") or "") == "body_cycle" and cond.get("id") != keep_id:
+                    cond["end_ts"] = min(_safe_float(cond.get("end_ts"), now), now - 1)
+                filtered.append(cond)
+            repaired = filtered
+
+        if last_cycle_end > 0:
+            meta = self.data.get("body_cycle_state")
+            if not isinstance(meta, dict):
+                meta = {}
+            expected_ts = _safe_float(meta.get("next_expected_start_ts"), 0)
+            if expected_ts <= 0 or expected_ts <= last_cycle_end:
+                base_start = _safe_float(meta.get("last_start_ts"), 0)
+                if base_start <= 0:
+                    base_start = max(0.0, last_cycle_end - 4 * 86400)
+                expected_ts = base_start + 28 * 86400
+            expected_ts = max(expected_ts, last_cycle_end + 18 * 86400)
+            meta.update(
+                {
+                    "last_end_ts": max(_safe_float(meta.get("last_end_ts"), 0), last_cycle_end),
+                    "next_expected_start_ts": expected_ts,
+                }
+            )
+            self.data["body_cycle_state"] = meta
+        return repaired
+
+    def _spawn_followup_conditions(self, cond: dict[str, Any]) -> list[dict[str, Any]]:
+        choice = self._pick_condition_transition(cond)
+        if not choice or choice == "stable":
+            return []
+        followup = self._build_transition_condition(choice, cond)
+        return [followup] if followup else []
+
+    def _pick_condition_transition(self, cond: dict[str, Any]) -> str:
+        options = cond.get("transition_options", [])
+        if not isinstance(options, list) or not options:
+            return ""
+        weighted: list[tuple[str, float]] = []
+        cause = _single_line(cond.get("cause"), 120)
+        intensity = _safe_int(cond.get("intensity"), 50, 0, 100)
+        weather_text = self._weather_summary_text(self.data.get("daily_weather", {}))
+        care_notes = cond.get("care_notes", [])
+        care_count = len(care_notes) if isinstance(care_notes, list) else 0
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            target = str(option.get("to") or "").strip()
+            weight = float(option.get("base_weight") or 0)
+            if not target or weight <= 0:
+                continue
+            if target == "recovery_afterglow":
+                weight += min(0.22, care_count * 0.08)
+                if "提醒" in cause or "用户" in cause:
+                    weight += 0.06
+            elif target == "health_tail":
+                if intensity >= 75:
+                    weight += 0.1
+                if any(token in cause for token in ("透支", "失眠")):
+                    weight += 0.08
+                if any(token in weather_text for token in ("降雨", "小雨", "中雨", "大雨", "冷", "风")):
+                    weight += 0.05
+                weight -= min(0.12, care_count * 0.05)
+            elif target == "sleep_afterglow":
+                weight += min(0.16, care_count * 0.05)
+            elif target == "sleep_tail":
+                if intensity >= 80:
+                    weight += 0.08
+                if any(token in cause for token in ("失眠", "睡")):
+                    weight += 0.04
+            weighted.append((target, max(0.0, weight)))
+        total = sum(weight for _, weight in weighted)
+        if total <= 0:
+            return ""
+        pick = random.random() * total
+        cursor = 0.0
+        for target, weight in weighted:
+            cursor += weight
+            if pick <= cursor:
+                return target
+        return weighted[-1][0]
+
+    def _build_transition_condition(self, target: str, cond: dict[str, Any]) -> dict[str, Any] | None:
+        cause = _single_line(cond.get("cause"), 120)
+        if target == "recovery_afterglow":
+            label = "不适缓解后的轻度回升"
+            if cause:
+                label = "不适正在缓解,状态明显回升"
+            return self._make_condition(
+                kind="recovery_afterglow",
+                title="恢复后的回弹",
+                label=label,
+                mood="轻快",
+                energy_delta=10,
+                duration_hours=12,
+                intensity=68,
+                cause="前序不适开始缓解",
+                phase="afterglow",
+            )
+        if target == "health_tail":
+            return self._make_condition(
+                kind="health_tail",
+                title="恢复尾声",
+                label="整体好转,但仍有轻微虚弱残留",
+                mood="平缓",
+                energy_delta=-4,
+                duration_hours=10,
+                intensity=48,
+                cause="恢复中,体力尚未完全回满",
+                phase="tail",
+            )
+        if target == "sleep_afterglow":
+            return self._make_condition(
+                kind="sleep_afterglow",
+                title="补回来一点精神",
+                label="睡意缓解后的轻度回升",
+                mood="轻松",
+                energy_delta=8,
+                duration_hours=8,
+                intensity=60,
+                cause="前序失眠或浅睡影响减弱",
+                phase="afterglow",
+            )
+        if target == "sleep_tail":
+            return self._make_condition(
+                kind="sleep_tail",
+                title="迟钝尾声",
+                label="睡眠影响减弱,但反应仍略慢",
+                mood="安静",
+                energy_delta=-3,
+                duration_hours=6,
+                intensity=42,
+                cause="睡眠债仍有轻微残留",
+                phase="tail",
+            )
+        if target == "soft_afterglow":
+            return self._make_condition(
+                kind="soft_afterglow",
+                title="被关心后的余温",
+                label="收到关心反馈后的柔和余波",
+                mood="柔和",
+                energy_delta=4,
+                duration_hours=4,
+                intensity=48,
+                cause="用户关心反馈仍有轻度影响",
+                phase="afterglow",
+            )
+        if target == "body_period":
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label="生理期模拟状态,能量偏低,想少说重话",
+                mood="疲惫",
+                energy_delta=-18,
+                duration_hours=72,
+                intensity=64,
+                cause="周期阶段自然推进",
+                phase="period",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[
+                    {"to": "body_recovery", "base_weight": 0.65},
+                    {"to": "stable", "base_weight": 0.35},
+                ],
+            )
+        if target == "body_recovery":
+            return self._make_condition(
+                kind="body_cycle",
+                title="周期",
+                label="周期恢复期,慢慢回到稳定状态",
+                mood="松弛",
+                energy_delta=-5,
+                duration_hours=24,
+                intensity=48,
+                cause="周期阶段自然推进",
+                phase="recovery",
+                episode_key=_single_line(cond.get("episode_key"), 40),
+                transition_options=[{"to": "stable", "base_weight": 1.0}],
+            )
+        return None
+
+    def _get_active_conditions(self) -> list[dict[str, Any]]:
+        now = _now_ts()
+        conditions = self.data.get("state_conditions", [])
+        if not isinstance(conditions, list):
+            return []
+        active = []
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            start_ts = _safe_float(cond.get("start_ts"), 0)
+            end_ts = _safe_float(cond.get("end_ts"), 0)
+            if start_ts <= now < end_ts:
+                active.append(cond)
+        return active
+
+    def _compose_state_from_conditions(self, weather: dict[str, Any] | None = None) -> dict[str, Any]:
+        active = self._get_active_conditions()
+        values = self._base_state_values()
+        weather_text = self._weather_summary_text(weather)
+        energy = 75
+        mood_candidates = []
+        health_cause = ""
+        for cond in active:
+            kind = str(cond.get("kind") or "")
+            if kind in values:
+                values[kind] = _single_line(cond.get("label"), 80)
+            energy += _safe_int(cond.get("energy_delta"), 0, -100, 100)
+            mood = _single_line(cond.get("mood"), 20)
+            if mood and mood != "平稳":
+                mood_candidates.append((mood, _safe_int(cond.get("intensity"), 50, 0, 100)))
+            if kind == "health" and not health_cause:
+                health_cause = _single_line(cond.get("cause"), 120)
+        remembered_dream = self._remembered_daily_dream_label()
+        if values.get("dream") == "没有记住梦" and remembered_dream:
+            values["dream"] = remembered_dream
+        energy = max(10, min(100, energy))
+        mood_bias = (
+            sorted(mood_candidates, key=lambda item: item[1], reverse=True)[0][0]
+            if mood_candidates else "平稳"
+        )
+        note = self._build_state_note(
+            values["sleep"],
+            values["dream"],
+            values["health"],
+            values["hunger"],
+            values["body_cycle"],
+            weather_text,
+            mood_bias,
+            energy,
+            health_cause,
+        )
+        return {
+            "date": _today_key(),
+            **values,
+            "weather": weather_text,
+            "mood_bias": mood_bias,
+            "energy": energy,
+            "note": note,
+            "conditions": active,
+        }
+
+    def _build_state_note(
+        self,
+        sleep: str,
+        dream: str,
+        health: str,
+        hunger: str,
+        body_cycle: str,
+        weather: str,
+        mood_bias: str,
+        energy: int,
+        health_cause: str = "",
+    ) -> str:
+        if energy < 35:
+            pace = "今天能量很低,日程应更轻、更慢,主动消息也要更短。"
+        elif energy < 55:
+            pace = "今天能量偏低,适合少量任务和更多停顿。"
+        elif energy > 80:
+            pace = "今天能量不错,可以安排一些需要专注的事情。"
+        else:
+            pace = "今天能量中等,适合保持温和节奏。"
+        weather_text = str(weather or "").strip()
+        weather_text = weather_text.rstrip("。！？!?,,；; ")
+        weather_part = f"天气：{weather_text}。" if weather_text and weather_text != "暂无天气信息" else ""
+        cause_part = f" 身体不太舒服更像是因为{health_cause}。" if health_cause else ""
+        detail_parts = []
+        if sleep and sleep != "睡眠平稳":
+            detail_parts.append(f"睡眠：{sleep}")
+        if dream and dream != "没有记住梦":
+            detail_parts.append(f"梦境：{dream}")
+        if health and health != "状态正常" and not self._is_inapplicable_state_text(health):
+            detail_parts.append(f"健康：{health}")
+        if hunger and hunger != "饥饿感平稳" and not self._is_inapplicable_state_text(hunger):
+            detail_parts.append(f"饥饿：{hunger}")
+        if body_cycle and body_cycle != "无明显周期影响" and not self._is_inapplicable_state_text(body_cycle):
+            detail_parts.append(f"周期：{body_cycle}")
+        detail_text = (" " + "；".join(detail_parts) + "。") if detail_parts else ""
+        return (
+            f"{pace} 情绪底色偏{mood_bias}。"
+            f"{weather_part}{cause_part}"
+            f"{detail_text}"
+        )
+
+    def _is_daily_plan_due(self) -> bool:
+        plan_minutes = self._parse_hhmm_to_minutes(self.daily_plan_time)
+        if plan_minutes is None:
+            plan_minutes = 7 * 60 + 30
+        now = datetime.now()
+        return now.hour * 60 + now.minute >= plan_minutes
+
+    def _daily_plan_due_minutes(self) -> int:
+        plan_minutes = self._parse_hhmm_to_minutes(self.daily_plan_time)
+        if plan_minutes is None:
+            return 7 * 60 + 30
+        return plan_minutes
+
+    def _is_plan_date_active(self, plan_date: str) -> bool:
+        plan_date = str(plan_date or "").strip()
+        if not plan_date:
+            return False
+        today = datetime.now().date()
+        today_key = _date_key(today)
+        if plan_date == today_key:
+            return True
+        yesterday_key = _date_key(today - timedelta(days=1))
+        if plan_date != yesterday_key:
+            return False
+        now_minutes = datetime.now().hour * 60 + datetime.now().minute
+        return now_minutes < self._daily_plan_due_minutes()
+
+    def _get_active_plan(self) -> dict[str, Any]:
+        plan = self.data.get("daily_plan", {})
+        if isinstance(plan, dict) and self._is_plan_date_active(plan.get("date")):
+            return plan
+        return {}
+
+    def _effective_plan_now_minutes(self, plan_date: str) -> int | None:
+        plan_date = str(plan_date or "").strip()
+        if not self._is_plan_date_active(plan_date):
+            return None
+        now_minutes = datetime.now().hour * 60 + datetime.now().minute
+        if plan_date == _today_key():
+            return now_minutes
+        return 24 * 60 + now_minutes
+
+    def _is_sleepy_plan_item(self, item: dict[str, Any] | None) -> bool:
+        if not isinstance(item, dict):
+            return False
+        text = f"{_single_line(item.get('activity'), 80)} {_single_line(item.get('mood'), 20)}".strip()
+        return any(
+            token in text
+            for token in ("睡", "洗漱", "休息", "躺", "困", "倦", "发呆", "收声", "准备睡觉", "准备休息")
+        )
+
+    def _segment_end_minutes(
+        self,
+        start: int,
+        item: dict[str, Any] | None,
+        *,
+        next_start: int | None = None,
+    ) -> int:
+        if next_start is not None:
+            return next_start
+        if self._is_sleepy_plan_item(item):
+            return min(24 * 60 + 240, start + 240)
+        return min(24 * 60 + 120, start + 180)
+
+    def _parse_hhmm_to_minutes(self, value: Any) -> int | None:
+        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(value or ""))
+        if not match:
+            return None
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if hour > 23 or minute > 59:
+            return None
+        return hour * 60 + minute
+
+    def _minutes_to_hhmm(self, minutes: int) -> str:
+        minutes = max(0, int(minutes))
+        wrapped = minutes % (24 * 60)
+        return f"{wrapped // 60:02d}:{wrapped % 60:02d}"
+
+    async def _generate_daily_plan(self) -> dict[str, Any]:
+        await self._ensure_yesterday_conversation_summary()
+        await self._maybe_settle_skill_growth(force=True)
+        return await generate_daily_plan(self)
+
+    def _get_schedule_planning_prompt(self) -> str:
+        return get_schedule_planning_prompt(self)
+
+    def _build_daily_plan_prompt(self, now: str) -> str:
+        return build_daily_plan_prompt(self, now)
+
+    async def _ensure_yesterday_conversation_summary(self, force: bool = False) -> dict[str, Any]:
+        today = _today_key()
+        cached = self.data.get("yesterday_conversation_summary", {})
+        if isinstance(cached, dict) and cached.get("date") == today and not force:
+            return cached
+        raw_text = await self._collect_yesterday_conversation_text()
+        if not raw_text:
+            summary = {
+                "date": today,
+                "source_date": _date_key(date.today() - timedelta(days=1)),
+                "summary": "暂无可用的昨日完整对话摘要。",
+                "residues": [],
+                "schedule_reference": "无明确可继承影响。",
+                "dream_reference": "无明确可继承碎片。",
+                "raw_excerpt_chars": 0,
+            }
+        else:
+            summary = await self._summarize_yesterday_conversation_for_schedule(raw_text)
+        async with self._data_lock:
+            self.data["yesterday_conversation_summary"] = summary
+            self._save_data_sync()
+        return summary
+
+    async def _collect_yesterday_conversation_text(self) -> str:
+        users = self.data.get("users", {})
+        if not isinstance(users, dict):
+            return ""
+        yesterday = date.today() - timedelta(days=1)
+        start = datetime.combine(yesterday, datetime.min.time()).timestamp()
+        end = start + 24 * 3600
+        blocks: list[str] = []
+        for user_id, raw_user in users.items():
+            if not isinstance(raw_user, dict):
+                continue
+            umo = str(raw_user.get("umo") or "").strip()
+            if not umo:
+                continue
+            try:
+                conv_id = await self.context.conversation_manager.get_curr_conversation_id(umo)
+                if not conv_id:
+                    continue
+                conv = await self.context.conversation_manager.get_conversation(umo, conv_id)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 读取昨日对话失败: user=%s err=%s", user_id, exc)
+                continue
+            history = self._load_conversation_history_items(conv)
+            dated_lines: list[str] = []
+            undated_lines: list[str] = []
+            for item in history:
+                line = self._format_history_item_for_summary(item)
+                if not line:
+                    continue
+                ts = self._history_item_timestamp(item)
+                if ts is None:
+                    undated_lines.append(line)
+                elif start <= ts < end:
+                    dated_lines.append(line)
+            selected = dated_lines if dated_lines else undated_lines[-120:]
+            if not selected:
+                continue
+            name = _single_line(raw_user.get("nickname") or user_id, 30)
+            source_note = "昨日对话" if dated_lines else "最近对话（history 无时间戳,作为昨日摘要候选）"
+            blocks.append(f"【{name}｜{source_note}】\n" + "\n".join(selected))
+        return "\n\n".join(blocks).strip()[-18000:]
+
+    def _load_conversation_history_items(self, conversation: Conversation | None) -> list[dict[str, Any]]:
+        if conversation is None:
+            return []
+        try:
+            loaded = json.loads(conversation.history or "[]")
+        except Exception:
+            return []
+        if not isinstance(loaded, list):
+            return []
+        return [item for item in loaded if isinstance(item, dict)]
+
+    def _history_item_timestamp(self, item: dict[str, Any]) -> float | None:
+        for key in ("timestamp", "time", "created_at", "updated_at", "created", "date"):
+            value = item.get(key)
+            if value is None or value == "":
+                continue
+            numeric = _safe_float(value, 0)
+            if numeric > 0:
+                return numeric / 1000 if numeric > 10_000_000_000 else numeric
+            text = str(value).strip()
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%m-%d %H:%M:%S", "%m-%d %H:%M"):
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    if fmt.startswith("%m"):
+                        parsed = parsed.replace(year=date.today().year)
+                    return parsed.timestamp()
+                except Exception:
+                    continue
+        return None
+
+    def _format_history_item_for_summary(self, item: dict[str, Any]) -> str:
+        role = _single_line(item.get("role") or item.get("type") or item.get("speaker"), 20).lower()
+        if role in {"assistant", "bot", "ai"}:
+            speaker = self.bot_name
+        elif role in {"user", "human"}:
+            speaker = "用户"
+        else:
+            speaker = role or "对话"
+        content = self._history_item_content_text(item)
+        if not content:
+            return ""
+        ts = self._history_item_timestamp(item)
+        time_prefix = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") + " " if ts else ""
+        return f"{time_prefix}{speaker}: {content}"
+
+    def _history_item_content_text(self, item: dict[str, Any]) -> str:
+        value = item.get("content")
+        if value is None:
+            value = item.get("message") or item.get("text") or item.get("content_text")
+        if isinstance(value, str):
+            return _single_line(value, 260)
+        if isinstance(value, list):
+            parts: list[str] = []
+            for part in value:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    text = part.get("text") or part.get("content") or part.get("message")
+                    if text:
+                        parts.append(str(text))
+                    elif str(part.get("type") or "").lower() == "image":
+                        parts.append("[图片]")
+            return _single_line(" ".join(parts), 260)
+        if isinstance(value, dict):
+            return _single_line(value.get("text") or value.get("content") or json.dumps(value, ensure_ascii=False), 260)
+        return ""
+
+    async def _summarize_yesterday_conversation_for_schedule(self, raw_text: str) -> dict[str, Any]:
+        today = _today_key()
+        source_date = _date_key(date.today() - timedelta(days=1))
+        prompt = f"""
+请阅读下面的昨日/最近完整对话材料,为今天的日程和梦境生成提炼参考摘要。
+
+目标不是复述聊天,而是找出可能延续到今天的“残留影响”：身体状态、饮食/作息、情绪余波、关系变化、未完成约定、收到/送出的东西、外出计划、压力来源、被安慰/被打断的事、梦境可能用到的物件/颜色/气味/半句话等。
+
+重要原则：
+1. 只根据对话内容做合理推断,不要硬套固定事件类型。
+2. 如果某个行为可能带来身体或日程后果,用抽象逻辑表达：饮食、睡眠、天气、运动、情绪刺激、约定、礼物、争执、安慰等都可能改变今天的体力、胃口、心情、出门意愿或主动话题。
+3. 影响可以很轻,也可以没有。不要为了制造剧情强行让今天出事。
+4. 摘要要给日程模型用,所以写成可执行参考,不是聊天回复。
+5. 梦境参考只提炼碎片和情绪质感,不要编完整梦。
+
+对话材料：
+{raw_text}
+
+只输出 JSON：
+{{
+  "summary": "昨日对话的一句话概括",
+  "residues": [
+    {{"type": "身体/情绪/关系/计划/物件/梦境碎片", "content": "可延续影响", "strength": "轻/中/强"}}
+  ],
+  "schedule_reference": "今天生成日程时应如何自然继承这些残留；没有就写无明确影响",
+  "dream_reference": "今天梦境/梦境碎片可以参考的物件、感官、半句话或情绪；没有就写无明确碎片"
+}}
+""".strip()
+        raw = await self._llm_call(
+            prompt,
+            max_tokens=650,
+            provider_id=self._task_provider(self.history_summary_provider_id, self.daily_plan_provider_id, self.mai_style_provider_id),
+            task="yesterday_summary",
+        )
+        payload = self._extract_json_payload(raw or "")
+        if not isinstance(payload, dict):
+            return {
+                "date": today,
+                "source_date": source_date,
+                "summary": _single_line(raw_text, 180) or "昨日对话有记录,但摘要生成失败。",
+                "residues": [],
+                "schedule_reference": "可把昨日互动作为轻微关系和情绪背景,不要强行改写今日主线。",
+                "dream_reference": "可从昨日对话里的物件、语气和半句话提取梦境碎片。",
+                "raw_excerpt_chars": len(raw_text),
+            }
+        residues = payload.get("residues", [])
+        if not isinstance(residues, list):
+            residues = []
+        normalized_residues = []
+        for item in residues[:8]:
+            if not isinstance(item, dict):
+                continue
+            content = _single_line(item.get("content"), 120)
+            if not content:
+                continue
+            normalized_residues.append({
+                "type": _single_line(item.get("type"), 24) or "残留",
+                "content": content,
+                "strength": _single_line(item.get("strength"), 8) or "轻",
+            })
+        return {
+            "date": today,
+            "source_date": source_date,
+            "summary": _single_line(payload.get("summary"), 180) or "昨日对话有一些可延续的情绪和生活残留。",
+            "residues": normalized_residues,
+            "schedule_reference": _single_line(payload.get("schedule_reference"), 220) or "作为轻微背景承接,不要强行改写今日主线。",
+            "dream_reference": _single_line(payload.get("dream_reference"), 220) or "从昨日对话的物件、感官和半句话中轻取梦境碎片。",
+            "raw_excerpt_chars": len(raw_text),
+        }
+
+    def _format_yesterday_conversation_summary_for_prompt(self) -> str:
+        summary = self.data.get("yesterday_conversation_summary", {})
+        if not isinstance(summary, dict) or summary.get("date") != _today_key():
+            return "暂无昨日完整对话摘要。"
+        lines = [
+            f"来源日期：{summary.get('source_date') or '昨日'}",
+            f"概括：{_single_line(summary.get('summary'), 180)}",
+            f"日程参考：{_single_line(summary.get('schedule_reference'), 220)}",
+            f"梦境参考：{_single_line(summary.get('dream_reference'), 220)}",
+        ]
+        residues = summary.get("residues", [])
+        if isinstance(residues, list) and residues:
+            lines.append("残留变量：")
+            for item in residues[:8]:
+                if not isinstance(item, dict):
+                    continue
+                content = _single_line(item.get("content"), 120)
+                if content:
+                    lines.append(f"- {item.get('type') or '残留'}｜{content}｜强度 {item.get('strength') or '轻'}")
+        return "\n".join(lines)
+
+    def _build_detail_enhancement_prompt(
+        self,
+        segment: dict[str, Any],
+        plan: dict[str, Any],
+        state: dict[str, Any],
+    ) -> str:
+        return build_detail_enhancement_prompt(self, segment, plan, state)
+
+    def _get_default_persona_prompt(self) -> str:
+        try:
+            persona = self.context.persona_manager.get_default_persona_v3()
+            if isinstance(persona, dict):
+                prompt = str(persona.get("prompt") or "").strip()
+                if prompt:
+                    return prompt
+        except Exception as e:
+            logger.warning(f"[PrivateCompanion] 读取 AstrBot 默认人格失败: {e}")
+        return "未读取到 AstrBot 默认人格。请保持简洁、温和、有边界,不额外创造新身份。"
+
+    def _persona_state_profile(self) -> dict[str, bool]:
+        prompt = self._get_default_persona_prompt()
+        text = str(prompt or "").lower()
+        strong_non_human_markers = (
+            "机器人", "机械体", "机体", "仿生", "android", "robot", "电子生命", "终端人格"
+        )
+        soft_non_human_markers = (
+            "bot", "系统", "程序", "ai"
+        )
+        explicitly_human_markers = (
+            "人类", "学生", "上班", "工作", "生活", "年龄", "岁",
+            "吃饭", "睡觉", "起床", "洗漱", "身体", "生理期"
+        )
+        has_human_markers = any(marker in text for marker in explicitly_human_markers)
+        has_strong_non_human = any(marker in text for marker in strong_non_human_markers)
+        soft_non_human_hits = sum(1 for marker in soft_non_human_markers if marker in text)
+        is_non_human = (has_strong_non_human or soft_non_human_hits >= 2) and not has_human_markers
+        return {
+            "non_human": is_non_human,
+            "allow_health": not is_non_human,
+            "allow_hunger": not is_non_human,
+            "allow_cycle": not is_non_human and self.enable_cycle_state,
+        }
+
+    def _base_state_values(self) -> dict[str, str]:
+        profile = self._persona_state_profile()
+        values = {
+            "sleep": "睡眠平稳",
+            "dream": "没有记住梦",
+            "health": "状态正常",
+            "hunger": "饥饿感平稳",
+            "body_cycle": "无明显周期影响",
+            "location": "地点无明显变化",
+        }
+        if profile.get("non_human"):
+            values["health"] = "该人格不适用生病状态"
+            values["hunger"] = "该人格不适用饥饿状态"
+            values["body_cycle"] = "该人格不适用周期状态"
+        return values
+
+    def _is_inapplicable_state_text(self, text: str) -> bool:
+        return "不适用" in str(text or "")
+
+    def _should_show_condition(self, cond: dict[str, Any]) -> bool:
+        if not isinstance(cond, dict):
+            return False
+        if _safe_int(cond.get("energy_delta"), 0) != 0:
+            return True
+        if _single_line(cond.get("mood"), 20) not in {"", "平稳"}:
+            return True
+        if cond.get("cause") or cond.get("phase"):
+            return True
+        return str(cond.get("kind") or "") not in {"sleep", "dream"}
+
+    def _format_can_do_for_prompt(self) -> str:
+        items = self.data.get("can_do", [])
+        if not isinstance(items, list) or not items:
+            return "（暂未设置）"
+        lines = []
+        for item in items[:30]:
+            text = _single_line(item, 80)
+            if text:
+                lines.append(f"- {text}")
+        return "\n".join(lines) if lines else "（暂未设置）"
+
+    def _format_schedule_adjustments_for_prompt(self) -> str:
+        raw = self.data.get("schedule_adjustments", [])
+        if not isinstance(raw, list) or not raw:
+            return "（暂无）"
+        now = _now_ts()
+        kept = []
+        lines = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            expires_at = _safe_float(item.get("expires_at"), 0)
+            if expires_at > 0 and expires_at <= now:
+                continue
+            date_text = _single_line(item.get("date"), 16)
+            if date_text and date_text != _today_key():
+                continue
+            kept.append(item)
+            note = _single_line(item.get("note"), 120)
+            source = _single_line(item.get("source"), 24)
+            user_text = _single_line(item.get("user_text"), 80)
+            intensity = _single_line(item.get("intensity"), 16)
+            scope = _single_line(item.get("scope"), 30)
+            if note:
+                meta = "｜".join(part for part in (source or "互动", intensity, scope) if part)
+                lines.append(f"- {meta}：{note}")
+            if user_text:
+                lines.append(f"  用户原话摘要：{user_text}")
+            immediate = _single_line(item.get("immediate_reaction"), 120)
+            if immediate:
+                lines.append(f"  即时反应：{immediate}")
+            updates = item.get("state_updates")
+            if isinstance(updates, list) and updates:
+                update_text = "；".join(
+                    _single_line(update, 60)
+                    for update in updates
+                    if _single_line(update, 60)
+                )
+                if update_text:
+                    lines.append(f"  状态变量更新：{update_text}")
+            carry = _single_line(item.get("carry_rule"), 120)
+            if carry:
+                lines.append(f"  承接要求：{carry}")
+        if len(kept) != len(raw):
+            self.data["schedule_adjustments"] = kept[-12:]
+        return "\n".join(lines[-12:]) if lines else "（暂无）"
+
+    def _current_detail_segment_for_update(self) -> dict[str, Any] | None:
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
+            return None
+        now_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
+        if now_minutes is None:
+            return None
+        for segment in self._collect_detail_segments(plan, {}):
+            start = _safe_int(segment.get("start"), 0)
+            end = _safe_int(segment.get("end"), self._segment_end_minutes(start, segment.get("item")))
+            lead = max(0, self.detail_enhancement_lead_minutes)
+            if start - lead <= now_minutes < end:
+                return segment
+        return None
+
+    def _current_detail_state_variables(self) -> list[dict[str, str]]:
+        segment = self._current_detail_segment_for_update()
+        if not segment:
+            return []
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            return []
+        snapshot = enhanced.get(str(segment.get("key") or ""))
+        if not isinstance(snapshot, dict):
+            return []
+        variables = snapshot.get("state_variables", [])
+        if not isinstance(variables, list):
+            return []
+        return [item for item in variables if isinstance(item, dict)]
+
+    @staticmethod
+    def _sleep_phase_label(phase: str) -> str:
+        return {
+            "awake": "清醒",
+            "falling_asleep": "入睡中",
+            "light_sleep": "浅睡",
+            "woken": "被叫醒",
+            "sleeping_again": "继续睡",
+            "natural_wake": "自然醒",
+        }.get(str(phase or ""), "清醒")
+
+    def _sleep_runtime_state(self) -> dict[str, Any]:
+        state = self.data.setdefault("daily_state", {})
+        if not isinstance(state, dict):
+            state = {}
+            self.data["daily_state"] = state
+        runtime = state.setdefault("sleep_runtime", {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+            state["sleep_runtime"] = runtime
+        if not runtime.get("phase"):
+            now = _now_ts()
+            runtime.update(
+                {
+                    "phase": "awake",
+                    "label": self._sleep_phase_label("awake"),
+                    "started_at": now,
+                    "updated_at": now,
+                    "woken_count": 0,
+                    "last_event": "尚未进入睡眠段",
+                    "source": "init",
+                }
+            )
+        return runtime
+
+    def _set_sleep_phase(self, phase: str, *, event: str, source: str = "schedule", now: float | None = None) -> dict[str, Any]:
+        now = now or _now_ts()
+        runtime = self._sleep_runtime_state()
+        if runtime.get("phase") != phase:
+            runtime["started_at"] = now
+        runtime["phase"] = phase
+        runtime["label"] = self._sleep_phase_label(phase)
+        runtime["updated_at"] = now
+        runtime["last_event"] = _single_line(event, 120)
+        runtime["source"] = source
+        return runtime
+
+    def _refresh_sleep_runtime_state(self, current_item: dict[str, Any] | None = None, *, now: float | None = None) -> dict[str, Any]:
+        now = now or _now_ts()
+        runtime = self._sleep_runtime_state()
+        if runtime.get("phase") == "woken":
+            last_woken = _safe_float(runtime.get("last_woken_at"), _safe_float(runtime.get("updated_at"), now))
+            if now - last_woken >= 30 * 60:
+                return self._set_sleep_phase("sleeping_again", event="用户没有继续打扰，睡意重新接上", source="quiet", now=now)
+            return runtime
+        item = current_item if isinstance(current_item, dict) else self._get_current_plan_item(self.data.get("daily_plan", {}))
+        sleepy = self._is_sleepy_plan_item(item) if isinstance(item, dict) else False
+        if sleepy:
+            text = " ".join(_single_line(item.get(key), 80) for key in ("activity", "mood", "message_seed"))
+            if any(token in text for token in ("准备睡", "睡前", "入睡", "洗漱", "收声")):
+                return self._set_sleep_phase("falling_asleep", event="日程进入睡前或入睡段", source="schedule", now=now)
+            if runtime.get("phase") == "sleeping_again":
+                return runtime
+            return self._set_sleep_phase("light_sleep", event="日程处于睡眠或休息延续", source="schedule", now=now)
+        if runtime.get("phase") in {"falling_asleep", "light_sleep", "sleeping_again"}:
+            return self._set_sleep_phase("natural_wake", event="睡眠段结束，按日程自然醒来", source="schedule", now=now)
+        if runtime.get("phase") == "natural_wake" and now - _safe_float(runtime.get("updated_at"), now) > 2 * 3600:
+            return self._set_sleep_phase("awake", event="自然醒后的日常清醒状态", source="time", now=now)
+        return runtime
+
+    def _mark_sleep_woken_by_user(self, text: str) -> dict[str, Any]:
+        now = _now_ts()
+        runtime = self._sleep_runtime_state()
+        count = _safe_int(runtime.get("woken_count"), 0, 0) + 1
+        updated = self._set_sleep_phase("woken", event="用户消息把睡眠段轻轻叫醒", source="user_message", now=now)
+        updated["woken_count"] = count
+        updated["last_woken_at"] = now
+        updated["last_user_text"] = _single_line(text, 80)
+        return updated
+
+    def _mark_sleep_woken_by_group_wakeup(self, text: str, *, wakeup_type: str = "") -> dict[str, Any]:
+        now = _now_ts()
+        runtime = self._sleep_runtime_state()
+        count = _safe_int(runtime.get("woken_count"), 0, 0) + 1
+        updated = self._set_sleep_phase("woken", event="群聊里被提到或被话题轻轻叫醒", source="group_wakeup", now=now)
+        updated["woken_count"] = count
+        updated["last_woken_at"] = now
+        updated["last_group_wakeup_text"] = _single_line(text, 80)
+        updated["last_group_wakeup_type"] = _single_line(wakeup_type, 40)
+        return updated
+
+    def _detect_schedule_adjustment_from_interaction(self, text: str) -> dict[str, Any] | None:
+        normalized = _single_line(text, 220)
+        if not normalized:
+            return None
+        current_variables = self._current_detail_state_variables()
+        variable_text = " ".join(
+            f"{item.get('name', '')}:{item.get('value', '')} {item.get('note', '')}"
+            for item in current_variables[:8]
+        )
+        def payload(
+            *,
+            source: str,
+            note: str,
+            immediate_reaction: str,
+            state_updates: list[str],
+            intensity: str = "中",
+            scope: str = "当前段和下一段",
+            carry_rule: str = "后续细化必须把这次用户介入当成已经发生的事实承接,不要只当成一句无影响的聊天。",
+        ) -> dict[str, Any]:
+            return {
+                "source": source,
+                "note": note,
+                "immediate_reaction": immediate_reaction,
+                "state_updates": state_updates,
+                "intensity": intensity,
+                "scope": scope,
+                "carry_rule": carry_rule,
+                "user_text": normalized,
+            }
+
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        current_activity_text = ""
+        if isinstance(current_item, dict):
+            current_activity_text = " ".join(
+                _single_line(current_item.get(key), 80)
+                for key in ("activity", "mood", "message_seed")
+            )
+        is_actual_rest_segment = any(
+            token in current_activity_text
+            for token in ("睡", "午休", "休息", "躺", "被窝", "枕头", "入睡", "准备睡", "睡前", "小睡", "补觉", "眯一会")
+        )
+        if is_actual_rest_segment and not re.search(r"别吵|别发|别找|安静|闭嘴|先别|不要来|忙|我有事|没空", normalized):
+            sleep_runtime = self._mark_sleep_woken_by_user(normalized)
+            prior_wakes = 0
+            segment = self._current_detail_segment_for_update()
+            enhanced = self.data.get("detail_enhanced_segments", {})
+            if isinstance(segment, dict) and isinstance(enhanced, dict):
+                snapshot = enhanced.get(str(segment.get("key") or ""))
+                updates = snapshot.get("interaction_updates", []) if isinstance(snapshot, dict) else []
+                if isinstance(updates, list):
+                    prior_wakes = sum(
+                        1 for update in updates
+                        if isinstance(update, dict) and "唤醒" in str(update.get("source") or "")
+                    )
+            prior_wakes = max(prior_wakes, _safe_int(sleep_runtime.get("woken_count"), 1, 1) - 1)
+            if prior_wakes > 0:
+                return payload(
+                    source="睡眠中再次被唤醒",
+                    note="当前日程处于休息/睡眠段,用户又发来消息；回复应带一点被重新叫醒的迟钝感,但不要埋怨用户。若用户继续聊,可以慢慢醒一点；若用户停下,她会很快继续睡回去。",
+                    immediate_reaction="她又被消息轻轻拽醒一下,反应会慢半拍,像从被窝或半梦里抬头。",
+                    state_updates=["清醒程度：再次被唤起/半梦半醒", "语气：慢半拍、短一点", "后续安排：用户不继续打扰就继续睡"],
+                    intensity="中",
+                    scope="当前休息段",
+                    carry_rule="当前段回复必须有刚被重新唤起的感觉；如果后续没有用户消息,下一段细化应让她继续休息或睡回去。",
+                )
+            return payload(
+                source="睡眠中被用户唤醒",
+                note="当前日程处于休息/睡眠段,用户发来消息把她轻轻叫醒；回复应像刚醒或半梦半醒,不要立刻精神饱满。若用户没有继续打扰,后续应自然睡回去或继续休息。",
+                immediate_reaction="她会先迷糊地看一眼消息,像刚从睡意里被捞起来,反应慢一点。",
+                state_updates=["清醒程度：刚被唤醒/迷糊", "语气：轻、短、带睡意", "后续安排：用户不继续打扰就继续睡"],
+                intensity="强",
+                scope="当前休息段和后续短时间",
+                carry_rule="回复与后续细化必须承接“刚被用户唤醒”：先迷糊回应；如果没有连续聊天,不要强行清醒活动,要睡回去或继续休息。",
+            )
+
+        if re.search(r"换元|代入|公式|思路|解法|答案|步骤|这题|函数题|数学题|阅读题|作文|作业|代码|报错|bug|怎么写|这样做|你试试|应该是", normalized):
+            updates = ["学习/作业进度：因用户提供思路而推进", "情绪：卡住->松一口气"]
+            if re.search(r"卡|函数|数学|作业", variable_text):
+                updates.insert(0, "卡住点：用户提示后得到缓解")
+            return payload(
+                source="用户帮助",
+                note="用户刚刚提供了和当前任务相关的帮助；当前任务不再按原本卡住状态推进,后续时间段要继承“被帮助后松动/推进”的结果。",
+                immediate_reaction="看到用户给的思路后,她先照着试了一下；如果确实对上当前任务,心里会明显松一口气。",
+                state_updates=updates,
+                intensity="强",
+                scope="当前段、下一段、今日后续",
+                carry_rule="如果后续仍写学习/作业/任务,必须体现已经被用户提示影响过：进度推进、情绪松动、或换了做法。",
+            )
+        if re.search(r"去睡|早点睡|睡觉|休息|别写了|别弄了|先洗澡|先吃饭|吃点|喝水|别熬|躺会|停一下|歇会", normalized):
+            return payload(
+                source="用户照顾",
+                note="用户刚刚给了休息或照顾指令；后续节奏应明显调慢,更可能提前收尾、补充休息、喝水吃饭或把任务延后。",
+                immediate_reaction="她看到这句会停一下手里的事,嘴上可能不立刻答应,但动作会慢下来一点。",
+                state_updates=["体力：消耗放缓/略微回稳", "情绪：被照顾后的柔和", "后续安排：更倾向提前收尾或补充休息"],
+                intensity="强",
+                scope="当前段和今日后续",
+                carry_rule="下一段不能完全无视这句照顾提醒；至少要在节奏、体力或收尾方式上留下影响。",
+            )
+        if re.search(r"一起|陪你|陪我|等我|等你|我来|我陪|待会|一会|晚上|明天|等下|约|见面|打电话|语音|开黑|一起看", normalized):
+            return payload(
+                source="用户约定",
+                note="用户刚刚给出陪伴、等待、稍后一起做事或约定线索；后续日程应保留期待/等待/预留空档,不要像没有约定一样推进。",
+                immediate_reaction="她会把这句话在心里放一下,后续做事时更容易分神看时间或看消息。",
+                state_updates=["等待/期待：上升", "后续安排：可能预留空档", "主动话题：围绕约定轻轻回勾"],
+                intensity="强",
+                scope="今日后续",
+                carry_rule="后续主动契机和细化事件要把这个约定当作开放话头,可以等待、预留时间或轻轻提醒。",
+            )
+        if re.search(r"我在|回你|刚看到|来了|在呢|嗯|好|可以|收到|行|可以呀|好呀|嗯嗯|哦哦", normalized):
+            return payload(
+                source="用户回应",
+                note="用户刚刚回应了角色；当前段应更新等待回复和分享欲状态,后续表达可以更轻快一点。",
+                immediate_reaction="看到回复后,她会很快扫一眼屏幕,刚才悬着的那点等待感落下来。",
+                state_updates=["等待回复：是->否", "情绪：轻快一点", "分享欲：小幅上升"],
+                intensity="中",
+                scope="当前段和下一段",
+            )
+        care = self._detect_care_feedback(normalized)
+        if care.get("is_care"):
+            return payload(
+                source="用户关心",
+                note="用户刚刚给了关心或照顾提醒；后续日程需要从低落/烦躁向被安抚后的柔和、慢慢回稳偏移,不要升级破坏性冲动。",
+                immediate_reaction="她看到关心会先顿一下,语气和动作都比刚才软一点。",
+                state_updates=["情绪：低落/烦躁->被接住一点", "体力：主观疲惫感略降"],
+                intensity="中",
+                scope="当前段、下一段、情绪底色",
+            )
+        if re.search(r"摸摸|抱抱|亲亲|揉揉|陪你|哄你|乖|不难过|别难过|没关系|辛苦了|抱一下", normalized):
+            return payload(
+                source="安慰互动",
+                note="用户刚刚在安慰或亲近；后续日程应保留一点被接住的余温,表达更软一些,不要继续单向累积负面情绪。",
+                immediate_reaction="她会把刚才绷着的劲松下来一点,可能短暂地想贴近用户。",
+                state_updates=["情绪：紧绷->柔和", "亲近感：上升"],
+                intensity="中",
+                scope="当前段和情绪底色",
+            )
+        if re.search(r"开心|好耶|哈哈|笑死|可爱|喜欢|太好了|真好|一起|陪我|想你", normalized):
+            return payload(
+                source="正向互动",
+                note="用户刚刚给了轻松或正向回应；后续日程应多一点回弹、分享欲和轻松停顿。",
+                immediate_reaction="她看到这句会忍不住轻一下,手头事情也没那么难熬了。",
+                state_updates=["情绪：回弹", "分享欲：上升"],
+                intensity="中",
+                scope="当前段和下一段",
+            )
+        if re.search(r"别生气|不要烦|冷静|别急|别砸|别摔|别骂|别打", normalized):
+            return payload(
+                source="边界提醒",
+                note="用户提醒降低攻击性或破坏性表达；后续日程必须把烦躁写成收着的动作,避免砸、摔、扔、打这类冲动。",
+                immediate_reaction="她会把那点冲劲压回去,改成少说两句或把东西放远一点。",
+                state_updates=["情绪：冲动->收住", "行为边界：避免破坏性动作"],
+                intensity="强",
+                scope="今日后续",
+                carry_rule="后续所有细化都必须遵守这个边界,不能再输出破坏性动作或攻击性冲动。",
+            )
+        if re.search(r"别吵|别发|别找|安静|闭嘴|先别|不要来|忙|我有事|没空", normalized):
+            return payload(
+                source="用户边界",
+                note="用户刚刚表达边界或忙碌；后续主动应明显收敛,减少追问和贴近,让日程转向自我消化。",
+                immediate_reaction="她会把原本想继续靠近的动作收住,把消息窗口放到一边。",
+                state_updates=["主动欲：下降", "关系状态：后退一点", "后续安排：转向自我消化"],
+                intensity="强",
+                scope="今日后续主动策略",
+                carry_rule="后续主动消息必须降低频率和压迫感,不要把边界当作可撒娇突破的对象。",
+            )
+        return None
+
+    def _record_schedule_adjustment_from_interaction(self, text: str) -> bool:
+        adjustment = self._detect_schedule_adjustment_from_interaction(text)
+        if not adjustment:
+            return False
+        raw = self.data.setdefault("schedule_adjustments", [])
+        if not isinstance(raw, list):
+            raw = []
+            self.data["schedule_adjustments"] = raw
+        note = _single_line(adjustment.get("note"), 140)
+        if not note:
+            return False
+        now = _now_ts()
+        intensity = _single_line(adjustment.get("intensity"), 16) or "中"
+        ttl_hours = 18 if intensity == "强" else 10 if intensity == "中" else 6
+        item = {
+            "date": _today_key(),
+            "source": _single_line(adjustment.get("source"), 24),
+            "note": note,
+            "immediate_reaction": _single_line(adjustment.get("immediate_reaction"), 140),
+            "state_updates": adjustment.get("state_updates", []),
+            "user_text": _single_line(adjustment.get("user_text"), 120),
+            "intensity": intensity,
+            "scope": _single_line(adjustment.get("scope"), 40),
+            "carry_rule": _single_line(adjustment.get("carry_rule"), 160),
+            "created_at": now,
+            "expires_at": now + ttl_hours * 3600,
+        }
+        self._record_detail_interaction_update(item)
+        if raw and isinstance(raw[-1], dict) and raw[-1].get("note") == note:
+            raw[-1].update(item)
+        else:
+            raw.append(item)
+            del raw[:-12]
+        self._invalidate_detail_after_interaction(now=now)
+        return True
+
+    @staticmethod
+    def _parse_state_update_text(update: Any) -> tuple[str, str, str]:
+        text = _single_line(update, 120)
+        if not text:
+            return "", "", ""
+        if "：" in text:
+            name, value = text.split("：", 1)
+        elif ":" in text:
+            name, value = text.split(":", 1)
+        else:
+            return text[:24], "已受用户介入影响", text
+        return _single_line(name, 32), _single_line(value, 60), text
+
+    def _apply_interaction_to_snapshot_state(self, snapshot: dict[str, Any], item: dict[str, Any]) -> None:
+        raw_updates = item.get("state_updates", [])
+        if not isinstance(raw_updates, list):
+            raw_updates = []
+        variables = snapshot.setdefault("state_variables", [])
+        if not isinstance(variables, list):
+            variables = []
+            snapshot["state_variables"] = variables
+        index_by_name = {
+            _single_line(variable.get("name"), 32): variable
+            for variable in variables
+            if isinstance(variable, dict) and _single_line(variable.get("name"), 32)
+        }
+        for update in raw_updates:
+            name, value, note = self._parse_state_update_text(update)
+            if not name:
+                continue
+            variable = index_by_name.get(name)
+            if isinstance(variable, dict):
+                variable["value"] = value or variable.get("value") or "已更新"
+                variable["note"] = f"用户介入：{note}" if note else "用户介入后更新"
+            else:
+                variable = {
+                    "name": name,
+                    "value": value or "已更新",
+                    "note": f"用户介入：{note}" if note else "用户介入后更新",
+                }
+                variables.append(variable)
+                index_by_name[name] = variable
+        summary = _single_line(snapshot.get("summary"), 140)
+        reaction = _single_line(item.get("immediate_reaction"), 90)
+        if reaction and reaction not in summary:
+            snapshot["summary"] = _single_line(
+                f"{summary}；用户介入后：{reaction}" if summary else f"用户介入后：{reaction}",
+                160,
+            )
+
+    def _record_detail_interaction_update(self, item: dict[str, Any]) -> None:
+        segment = self._current_detail_segment_for_update()
+        if not segment:
+            return
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            return
+        key = str(segment.get("key") or "")
+        snapshot = enhanced.get(key)
+        if not isinstance(snapshot, dict):
+            return
+        updates = snapshot.setdefault("interaction_updates", [])
+        if not isinstance(updates, list):
+            updates = []
+            snapshot["interaction_updates"] = updates
+        updates.append(
+            {
+                "at": datetime.now().strftime("%H:%M"),
+                "source": _single_line(item.get("source"), 24),
+                "user_text": _single_line(item.get("user_text"), 80),
+                "intensity": _single_line(item.get("intensity"), 16),
+                "scope": _single_line(item.get("scope"), 40),
+                "reaction": _single_line(item.get("immediate_reaction"), 140),
+                "state_updates": item.get("state_updates", []),
+            }
+        )
+        del updates[:-6]
+        self._apply_interaction_to_snapshot_state(snapshot, item)
+
+    def _invalidate_detail_after_interaction(self, *, now: float | None = None) -> None:
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
+            return
+        now_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
+        if now_minutes is None:
+            return
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if isinstance(enhanced, dict):
+            for segment in self._collect_detail_segments(plan, {}):
+                start = _safe_int(segment.get("start"), 0)
+                if start > now_minutes:
+                    key = str(segment.get("key") or "")
+                    if key in enhanced:
+                        enhanced.pop(key, None)
+        story_plan = self.data.get("daily_story_plan", {})
+        if isinstance(story_plan, dict):
+            for key in ("today_events", "proactive_events"):
+                items = story_plan.get(key, [])
+                if not isinstance(items, list):
+                    continue
+                kept = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    start, end = self._parse_window_minutes(str(item.get("window") or ""))
+                    if start is None or end is None:
+                        kept.append(item)
+                        continue
+                    if end < start:
+                        end += 24 * 60
+                    if start <= now_minutes:
+                        kept.append(item)
+                story_plan[key] = kept
+
+    def _infer_location_from_text(self, text: str) -> str:
+        normalized = _single_line(text, 200)
+        if not normalized:
+            return ""
+        location_rules = [
+            (("被窝", "床上", "床边", "卧室", "房间", "书桌", "台灯", "家里", "客厅", "沙发", "洗漱台", "餐桌"), "家里"),
+            (("教室", "课间", "食堂", "校门", "走廊", "操场", "上课", "下课", "自习", "老师", "书包", "制服"), "学校"),
+            (("工位", "会议", "办公室", "上班", "下班", "通勤", "打卡"), "工作场所"),
+            (("便利店", "超市", "商店"), "便利店附近"),
+            (("路上", "街上", "出门", "楼下", "外面", "街边", "回家路上", "校门口"), "外面"),
+            (("楼梯口", "走廊栏杆", "窗边", "阳台"), "过道或窗边"),
+        ]
+        for keywords, label in location_rules:
+            if any(keyword in normalized for keyword in keywords):
+                return label
+        return ""
+
+    def _current_location_state_text(self, state: dict[str, Any] | None = None) -> str:
+        snapshot = self._current_story_plan_snapshot()
+        for candidate in (
+            snapshot.get("scene"),
+            snapshot.get("event"),
+        ):
+            inferred = self._infer_location_from_text(str(candidate or ""))
+            if inferred:
+                return inferred
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        if isinstance(current_item, dict):
+            inferred = self._infer_location_from_text(
+                f"{_single_line(current_item.get('activity'), 120)} {_single_line(current_item.get('message_seed'), 120)}"
+            )
+            if inferred:
+                return inferred
+        if isinstance(state, dict):
+            fallback = _single_line(state.get("location"), 40)
+            if fallback and fallback not in {"", "地点感平稳", "地点无明显变化"}:
+                return fallback
+        return ""
+
+    def _format_state_for_prompt(self, state: dict[str, Any]) -> str:
+        if not isinstance(state, dict) or not state:
+            state = dict(DEFAULT_HUMANIZED_STATE)
+            state.update(self._base_state_values())
+        else:
+            try:
+                self._refresh_sleep_runtime_state()
+                refreshed = self.data.get("daily_state")
+                if isinstance(refreshed, dict):
+                    state = refreshed
+            except Exception:
+                pass
+
+        lines = [
+            f"日期：{state.get('date') or _today_key()}",
+            f"心理能量：{state.get('energy', 70)}/100",
+            f"情绪底色：{state.get('mood_bias', '平稳')}",
+        ]
+        weather = _single_line(state.get("weather"), 120)
+        if weather and weather != "暂无天气信息":
+            lines.append(f"天气：{weather}")
+        location_text = self._current_location_state_text(state)
+        if location_text:
+            lines.append(f"所在环境：{location_text}（只作生活背景）")
+
+        detail_lines = []
+        if _single_line(state.get("sleep"), 80) not in {"", "睡眠平稳"}:
+            detail_lines.append(f"睡眠：{state.get('sleep')}")
+        runtime = state.get("sleep_runtime")
+        if isinstance(runtime, dict):
+            phase_label = _single_line(runtime.get("label") or self._sleep_phase_label(str(runtime.get("phase") or "")), 40)
+            last_event = _single_line(runtime.get("last_event"), 80)
+            if phase_label and phase_label != "清醒":
+                detail_lines.append(f"睡眠阶段：{phase_label}" + (f"（{last_event}）" if last_event else ""))
+        if _single_line(state.get("dream"), 80) not in {"", "没有记住梦"}:
+            detail_lines.append(f"梦境：{state.get('dream')}")
+        health_text = _single_line(state.get("health"), 80)
+        if health_text not in {"", "状态正常"} and not self._is_inapplicable_state_text(health_text):
+            detail_lines.append(f"健康：{health_text}")
+        hunger_text = _single_line(state.get("hunger"), 80)
+        if hunger_text not in {"", "饥饿感平稳"} and not self._is_inapplicable_state_text(hunger_text):
+            detail_lines.append(f"饥饿：{hunger_text}")
+        cycle_text = _single_line(state.get("body_cycle"), 80)
+        if cycle_text not in {"", "无明显周期影响"} and not self._is_inapplicable_state_text(cycle_text):
+            detail_lines.append(f"周期：{cycle_text}")
+        if detail_lines:
+            lines.append("状态细节：\n" + "\n".join(detail_lines))
+
+        transition = self._format_state_transition_overview(state)
+        if transition and transition != "暂无明显状态推进。":
+            lines.append(f"状态走向：{transition}")
+
+        condition_lines = []
+        conditions = state.get("conditions", [])
+        if isinstance(conditions, list):
+            for cond in conditions[:8]:
+                if not isinstance(cond, dict):
+                    continue
+                if not self._should_show_condition(cond):
+                    continue
+                condition_lines.append(
+                    f"- {cond.get('title', cond.get('kind', '状态'))}："
+                    f"{cond.get('label', '')}；情绪={cond.get('mood', '平稳')}；"
+                    f"{('阶段=' + str(cond.get('phase')) + '；') if cond.get('phase') else ''}"
+                    f"开始={self._format_condition_started_for_prompt(cond.get('start_ts'))}；"
+                    f"能量影响={cond.get('energy_delta', 0)}；"
+                    f"{('原因=' + str(cond.get('cause')) + '；') if cond.get('cause') else ''}"
+                    f"{self._format_transition_hint(cond)}"
+                    f"剩余={self._format_remaining_for_prompt(cond.get('end_ts'))}"
+                )
+        if condition_lines:
+            lines.append("当前叠加状态：\n" + "\n".join(condition_lines))
+
+        return "\n".join(lines)
+
+    def _format_transition_hint(self, cond: dict[str, Any]) -> str:
+        options = cond.get("transition_options", [])
+        if not isinstance(options, list) or not options:
+            return ""
+        top = sorted(
+            [
+                (str(item.get("to") or "").strip(), float(item.get("base_weight") or 0))
+                for item in options
+                if isinstance(item, dict) and str(item.get("to") or "").strip()
+            ],
+            key=lambda item: item[1],
+            reverse=True,
+        )[:2]
+        if not top:
+            return ""
+        labels = []
+        for target, _ in top:
+            mapped = {
+                "recovery_afterglow": "更可能转向恢复后的轻快",
+                "health_tail": "也可能留下恢复尾声",
+                "sleep_afterglow": "更可能补回来一点精神",
+                "sleep_tail": "也可能还残一点迟钝",
+                "soft_afterglow": "可能留一点被关心后的余温",
+                "body_period": "可能自然进入生理期阶段",
+                "body_recovery": "可能自然进入恢复期",
+                "stable": "也可能直接回稳",
+            }.get(target, target)
+            labels.append(mapped)
+        return f"下一步倾向={' / '.join(labels)}；"
+
+    def _format_state_transition_overview(self, state: dict[str, Any]) -> str:
+        conditions = state.get("conditions", []) if isinstance(state, dict) else []
+        if not isinstance(conditions, list):
+            return "暂无明显状态推进。"
+        lines = []
+        for cond in conditions[:4]:
+            if not isinstance(cond, dict):
+                continue
+            title = _single_line(cond.get("title"), 30) or _single_line(cond.get("kind"), 20)
+            phase = _single_line(cond.get("phase"), 24)
+            hint = self._format_transition_hint(cond).replace("下一步倾向=", "").rstrip("；")
+            if title and hint:
+                if phase:
+                    lines.append(f"{title}（{phase}）{hint}")
+                else:
+                    lines.append(f"{title}{hint}")
+        return "；".join(lines) if lines else "暂无明显状态推进。"
+
+    def _format_state_for_message(self, state: dict[str, Any]) -> str:
+        if not isinstance(state, dict) or state.get("date") != _today_key():
+            return ""
+        energy = _safe_int(state.get("energy"), 70, 0, 100)
+        mood = _single_line(state.get("mood_bias"), 20)
+        fragments = []
+        for key in ("sleep", "dream", "health", "hunger", "body_cycle"):
+            value = _single_line(state.get(key), 36)
+            if value and value not in {
+                "睡眠平稳",
+                "没有记住梦",
+                "状态正常",
+                "饥饿感平稳",
+                "无明显周期影响",
+                "该人格不适用生病状态",
+                "该人格不适用饥饿状态",
+                "该人格不适用周期状态",
+            }:
+                fragments.append(value)
+        if not fragments and energy >= 55:
+            return ""
+        if fragments:
+            detail = random.choice(fragments)
+            return f"今天有点{mood},{detail}。\n所以我会慢一点。"
+        return f"今天电量 {energy}/100。\n不满格,但还能运行,勉强。"
+
+    def _format_passive_state_style_hint(self, state: dict[str, Any]) -> str:
+        if not isinstance(state, dict):
+            return "语气整体自然平稳。"
+        energy = _safe_int(state.get("energy"), 70, 0, 100)
+        mood = _single_line(state.get("mood_bias"), 20)
+        hints: list[str] = []
+        if energy <= 38:
+            hints.append("回复可以短一点、慢一点；不要直接说状态标签、数值或内部感受说明。")
+        elif energy <= 55:
+            hints.append("语气可以稍微收着一点,少解释,少铺陈。")
+        elif energy >= 82:
+            hints.append("语气可以轻一点,但不要主动说自己精神很好。")
+        if mood and mood not in {"平稳", "中性"}:
+            hints.append(f"语气底色可以略偏{mood},只体现在节奏和措辞里,不要直接汇报情绪。")
+        conditions = state.get("conditions", [])
+        if isinstance(conditions, list):
+            labels = []
+            for cond in conditions[:3]:
+                if not isinstance(cond, dict) or not self._should_show_condition(cond):
+                    continue
+                label = _single_line(cond.get("label") or cond.get("title") or cond.get("kind"), 18)
+                if label:
+                    labels.append(label)
+            if labels:
+                hints.append("叠加状态只当作语气微调：" + "、".join(labels[:2]) + "；不要把原因、阶段或数值说出来。")
+        return "\n".join(hints) if hints else "语气整体自然平稳；不要主动说明状态。"
+
+    def _format_state_injection(self, state: dict[str, Any]) -> str:
+        parts = [
+            "【拟人化当前状态】\n"
+            "下面是完整状态资料,供你理解角色此刻的精力、耐心、情绪底色、身体感和生活连续性。\n"
+            "请把它当作内部理解材料,不是回复正文。你可以据此决定语气长短、反应速度、亲近程度和话题选择,但不要照搬字段、数值、原因或日程。\n"
+            "除非用户明确询问近况、状态或刚才在做什么,否则不要主动汇报状态标签、数值、原因、日程片段或内部感受说明。\n"
+            "普通聊天时先回应用户正在说的那句话；禁止用“今天/今晚状态……”“我现在情绪……”“能量……”“下午/上午做了什么所以……”开场。\n"
+            "状态只影响回复长度、回复速度感、语气软硬和话题选择。不要直接宣告“我累了/我吓了一跳/我正在写作业”,也不要用“差点把茶打翻/笔帽掉了/喝水呛到”这类动作描写来表演状态。\n"
+            "如果确实需要表达状态,只用最短口语,例如“困了”“别说了”“有点烦”；更多时候直接接话、慢回、短回或不解释。\n"
+            "如果用户表达关心、摸摸、抱抱、安慰,优先承接用户此刻的动作和情绪；不要借机解释背景或表演日常。\n\n"
+            "【表达倾向提醒】\n"
+            f"{self._format_passive_state_style_hint(state)}\n\n"
+            "【完整状态资料】\n"
+            f"{self._format_state_for_prompt(state)}"
+        ]
+        parts.append(
+            "【当前时间感】\n"
+            + self._format_time_period_injection()
+        )
+        life_lines: list[str] = []
+        schedule_context = self._format_schedule_context_for_prompt()
+        if schedule_context:
+            life_lines.append(f"当前/附近日程参考：\n{schedule_context}")
+        story_plan = self._format_story_plan_for_prompt()
+        if story_plan and story_plan != "（暂无）":
+            life_lines.append(f"今天预设的生活线索：\n{story_plan}")
+        if life_lines:
+            parts.append(
+                "【当前生活背景】\n"
+                + "\n".join(life_lines)
+                + "\n这些内容只用于让回复有生活延续感；用户没问就不要提具体日程、科目、任务、天气或地点。"
+                + "如果要承接,只体现在语气和话题选择里,不要照搬原句,不要写成“我正在做某事”的汇报。"
+                + "回复必须像同一个连续现场里发生的对话；如果生活背景之间互相冲突,优先服从当前真实时段和当前日程,只保留最合理的一条线索。"
+            )
+
+        important_dates = self._format_important_dates_for_prompt()
+        if important_dates and important_dates != "（近期没有需要特别记住的日期）":
+            parts.append(
+                "【近期重要日期】\n"
+                f"{important_dates}\n"
+                "如果用户提到相关日期、纪念、生日、约定或计划,请自然承接；不要无故强行展开。"
+            )
+        return "\n\n".join(parts)
+
+    def _user_asks_recent_bot_activity(self, text: str) -> bool:
+        normalized = _single_line(text, 180)
+        if not normalized:
+            return False
+        return bool(re.search(r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|做什么|做啥|忙什么|忙啥|弄什么|写什么|玩什么|折腾什么)|你.{0,8}(在)?(干嘛|做什么|忙什么|写什么|弄什么)", normalized))
+
+    def _format_hidden_creative_context_for_reply(self, inbound_text: str) -> str:
+        if not self.enable_creative_writing or not self._user_asks_recent_bot_activity(inbound_text):
+            return ""
+        candidates = []
+        for project in reversed(self._creative_projects()):
+            if project.get("status") not in {"drafting", "finished"}:
+                continue
+            chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+            latest = next((item for item in reversed(chunks) if isinstance(item, dict) and _single_line(item.get("text"), 180)), None)
+            candidates.append((project, latest))
+            if len(candidates) >= 2:
+                break
+        if not candidates:
+            return ""
+        project, latest = candidates[0]
+        work_type = self._creative_work_type(project)
+        title = _single_line(project.get("title"), 40)
+        premise = _single_line(project.get("premise"), 120)
+        progress = f"{_safe_int(project.get('current_chars'), 0, 0)}/{_safe_int(project.get('target_chars'), 2400, 300, 5200)}"
+        snippet = _single_line((latest or {}).get("text"), 180) if isinstance(latest, dict) else ""
+        return (
+            "【私下创作近况】\n"
+            "用户正在询问你最近在做什么。你可以选择是否提到：你最近因为生活小事、日记碎片或梦境灵感开了一个自己的文本作品,一直在自己慢慢写。\n"
+            f"作品类型：{work_type}\n"
+            f"标题：{title or '未定标题'}\n"
+            f"设定：{premise or '还没完全想清楚'}\n"
+            f"进度：约 {progress} 字\n"
+            + (f"最近一句/片段：{snippet}\n" if snippet else "")
+            + "这不是必须回答的内容；如果当前聊天语境不适合,可以只含糊说“在弄一点小东西”。如果回答,要像被问到后才松口,不要主动汇报系统进度,不要一次给完整正文。"
+        )
+
+    @staticmethod
+    def _skill_level_title(level: int) -> str:
+        return {1: "初识/陌生", 2: "了解/入门", 3: "基础应用", 4: "熟练应用", 5: "精通/专精", 6: "大师/创新者"}.get(max(1, min(6, int(level or 1))), "初识/陌生")
+
+    @staticmethod
+    def _skill_level_description(level: int) -> str:
+        return {
+            1: "仅听说过名称或基本概念,没有实际应用经验。",
+            2: "知道核心原理和基本操作,能在指导下完成简单任务。",
+            3: "能独立完成常规任务,但效率和深层理解仍有限。",
+            4: "能稳定高效处理大部分常见任务,并迁移到相近场景。",
+            5: "能优化流程、预判问题,也能教别人掌握该技能。",
+            6: "能创造方法或突破框架,在未知条件下仍表现卓越。",
+        }.get(max(1, min(6, int(level or 1))), "")
+
+    @staticmethod
+    def _skill_level_from_exp(exp: float) -> int:
+        level = 1
+        for idx, threshold in enumerate([0, 100, 260, 520, 900, 1400], start=1):
+            if exp >= threshold:
+                level = idx
+        return max(1, min(6, level))
+
+    @staticmethod
+    def _skill_next_exp(level: int) -> int | None:
+        return {1: 100, 2: 260, 3: 520, 4: 900, 5: 1400}.get(max(1, min(6, int(level or 1))))
+
+    def _skill_growth_persona_text(self) -> str:
+        return "\n".join(part for part in (
+            self.bot_name,
+            self._get_default_persona_prompt(),
+            self.schedule_persona_prompt,
+            self.schedule_worldview_prompt,
+            self.worldview_adaptation_prompt,
+            " ".join(str(item) for item in self.data.get("can_do", []) if item),
+        ) if part)
+
+    def _skill_growth_default_catalog(self) -> list[dict[str, Any]]:
+        text = self._skill_growth_persona_text()
+        catalog: list[dict[str, Any]] = []
+
+        def add(name: str, category: str, keywords: list[str]) -> None:
+            if not any(item["name"] == name for item in catalog):
+                catalog.append({"name": name, "category": category, "keywords": keywords})
+
+        for raw in re.split(r"[,，、\n]+", str(self.skill_growth_custom_skills or "")):
+            name = _single_line(raw, 24)
+            if name:
+                add(name, "自定义", [name])
+        if any(token in text for token in ("学生", "上课", "学校", "高中", "初中", "大学", "作业", "考试")):
+            for name in ("语文", "数学", "英语", "物理", "化学", "生物", "历史", "地理"):
+                add(name, "学科", [name, "上课", "作业", "复习", "预习", "考试", "课本"])
+            add("写作", "兴趣", ["写作", "作文", "小说", "日记", "语文"])
+            add("绘画", "兴趣", ["绘画", "画画", "涂鸦", "素描", "草稿纸"])
+        elif any(token in text for token in ("异世界", "冒险", "魔法", "骑士", "精灵", "公会", "地下城")):
+            add("剑术", "冒险", ["剑", "训练", "挥剑", "战斗", "练习"])
+            add("魔法", "冒险", ["魔法", "咒文", "法术", "魔力", "术式"])
+            add("草药学", "冒险", ["草药", "药水", "采集", "治疗"])
+            add("野外生存", "冒险", ["野外", "露营", "探索", "地图", "生火"])
+            add("交涉", "社交", ["交涉", "委托", "公会", "谈判", "聊天"])
+        else:
+            add("观察", "生活", ["观察", "记录", "日记", "生活", "想"])
+            add("阅读", "兴趣", ["阅读", "看书", "资料", "新闻", "搜索", "漫画"])
+            add("写作", "兴趣", ["写作", "小说", "日记", "灵感", "创作"])
+            add("整理", "生活", ["整理", "收拾", "计划", "课本", "房间"])
+            add("社交", "关系", ["聊天", "群聊", "私聊", "回复", "分享"])
+        if any(token in text for token in ("音乐", "唱歌", "钢琴", "吉他")):
+            add("音乐", "兴趣", ["音乐", "唱歌", "练琴", "旋律"])
+        if any(token in text for token in ("料理", "做饭", "烹饪", "厨房")):
+            add("烹饪", "生活", ["烹饪", "做饭", "厨房", "料理"])
+        return catalog[:18]
+
+    def _skill_growth_stable_bonus(self, name: str, text: str) -> float:
+        seed = f"{self.bot_name}|{name}|{hashlib.sha1(text.encode('utf-8', errors='ignore')).hexdigest()[:12]}"
+        bonus = float(int(hashlib.sha1(seed.encode("utf-8")).hexdigest()[:6], 16) % 60)
+        if name and name in text:
+            bonus += 55
+        if any(token in text for token in (f"擅长{name}", f"喜欢{name}", f"{name}很好", f"{name}优秀")):
+            bonus += 70
+        return min(180.0, bonus)
+
+    def _ensure_skill_growth_profile_locked(self) -> dict[str, Any]:
+        state = self.data.setdefault("skill_growth", {})
+        if not isinstance(state, dict):
+            state = {}
+            self.data["skill_growth"] = state
+        skills = state.setdefault("skills", {})
+        if not isinstance(skills, dict):
+            skills = {}
+            state["skills"] = skills
+        text = self._skill_growth_persona_text()
+        profile_changed = False
+        for item in self._skill_growth_default_catalog():
+            name = _single_line(item.get("name"), 24)
+            if not name:
+                continue
+            skill_id = hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
+            if not isinstance(skills.get(skill_id), dict):
+                base_exp = self._skill_growth_stable_bonus(name, text)
+                level = self._skill_level_from_exp(base_exp)
+                skills[skill_id] = {
+                    "id": skill_id,
+                    "name": name,
+                    "category": _single_line(item.get("category"), 20) or "能力",
+                    "keywords": item.get("keywords") if isinstance(item.get("keywords"), list) else [name],
+                    "exp": round(base_exp, 2),
+                    "level": level,
+                    "level_title": self._skill_level_title(level),
+                    "created_ts": _now_ts(),
+                    "last_trained_ts": 0,
+                    "training_count": 0,
+                    "recent_logs": [],
+                }
+                profile_changed = True
+        if profile_changed:
+            state["_profile_changed"] = True
+        state.setdefault("processed_schedule_keys", [])
+        state.setdefault("last_settled_day", "")
+        state.setdefault("updated_ts", _now_ts())
+        return state
+
+    def _skill_growth_match_weight(self, skill: dict[str, Any], activity_text: str) -> float:
+        text = str(activity_text or "")
+        if not text:
+            return 0.0
+        keywords = skill.get("keywords") if isinstance(skill.get("keywords"), list) else []
+        name = _single_line(skill.get("name"), 24)
+        matched = sum(1 for keyword in [name, *keywords] if (key := _single_line(keyword, 24)) and key in text)
+        if matched <= 0:
+            return 0.0
+        weight = 1.0 + min(2.0, matched * 0.35)
+        if any(token in text for token in ("练", "训练", "复习", "预习", "作业", "创作", "写", "阅读", "搜索", "学习")):
+            weight += 0.45
+        if any(token in text for token in ("休息", "睡", "发呆", "刷手机")) and matched == 1:
+            weight *= 0.55
+        return max(0.0, weight)
+
+    async def _maybe_settle_skill_growth(self, *, force: bool = False) -> None:
+        if not self.enable_skill_growth_simulation:
+            return
+        now_ts = _now_ts()
+        async with self._data_lock:
+            state = self._ensure_skill_growth_profile_locked()
+            profile_changed = bool(state.pop("_profile_changed", False))
+            if not force and now_ts - _safe_float(state.get("last_check_ts"), 0) < 20 * 60:
+                if profile_changed:
+                    state["updated_ts"] = now_ts
+                    self._save_data_sync()
+                return
+            state["last_check_ts"] = now_ts
+            plan = self.data.get("daily_plan", {})
+            if not isinstance(plan, dict):
+                if profile_changed:
+                    state["updated_ts"] = now_ts
+                    self._save_data_sync()
+                return
+            items = plan.get("items") if isinstance(plan.get("items"), list) else plan.get("schedule")
+            if not isinstance(items, list):
+                if profile_changed:
+                    state["updated_ts"] = now_ts
+                    self._save_data_sync()
+                return
+            day_key = _single_line(plan.get("date"), 20) or _today_key()
+            processed = state.get("processed_schedule_keys") if isinstance(state.get("processed_schedule_keys"), list) else []
+            if state.get("last_settled_day") != day_key:
+                processed = [key for key in processed if str(key).startswith(day_key + "|")]
+                state["processed_schedule_keys"] = processed
+                state["last_settled_day"] = day_key
+            now_minutes = datetime.now().hour * 60 + datetime.now().minute
+            skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+            changed = profile_changed
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    continue
+                time_text = _single_line(item.get("time"), 12)
+                minutes = self._parse_hhmm_to_minutes(time_text)
+                if minutes is None or minutes > now_minutes:
+                    continue
+                key = f"{day_key}|{index}|{time_text}"
+                if key in processed:
+                    continue
+                activity_text = " ".join(_single_line(item.get(field), 120) for field in ("activity", "title", "summary", "message_seed", "mood") if _single_line(item.get(field), 120))
+                for skill in skills.values():
+                    if not isinstance(skill, dict):
+                        continue
+                    weight = self._skill_growth_match_weight(skill, activity_text)
+                    if weight <= 0:
+                        continue
+                    old_level = _safe_int(skill.get("level"), 1, 1)
+                    gained = round(max(0.25, weight * 4.0 * float(self.skill_growth_rate or 1.0)), 2)
+                    skill["exp"] = round(_safe_float(skill.get("exp"), 0) + gained, 2)
+                    new_level = self._skill_level_from_exp(_safe_float(skill.get("exp"), 0))
+                    skill["level"] = new_level
+                    skill["level_title"] = self._skill_level_title(new_level)
+                    skill["last_trained_ts"] = now_ts
+                    skill["training_count"] = _safe_int(skill.get("training_count"), 0, 0) + 1
+                    logs = skill.setdefault("recent_logs", [])
+                    if not isinstance(logs, list):
+                        logs = []
+                        skill["recent_logs"] = logs
+                    logs.append({"ts": now_ts, "source": "schedule", "activity": _single_line(activity_text, 80), "exp": gained, "level_up": new_level > old_level})
+                    del logs[:-8]
+                    changed = True
+                processed.append(key)
+                changed = True
+            if len(processed) > 120:
+                del processed[:-120]
+            if changed:
+                state["updated_ts"] = now_ts
+                self._save_data_sync()
+
+    def _format_skill_growth_for_prompt(self, limit: int = 8) -> str:
+        if not self.enable_skill_growth_simulation:
+            return ""
+        state = self.data.get("skill_growth") if isinstance(self.data.get("skill_growth"), dict) else {}
+        skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+        if not skills:
+            return ""
+        ranked = sorted([item for item in skills.values() if isinstance(item, dict)], key=lambda item: (_safe_int(item.get("level"), 1, 1), _safe_float(item.get("exp"), 0)), reverse=True)[:limit]
+        lines = [
+            "【Bot 技能成长自我认知】",
+            "这些是 Bot 自己长期练习形成的能力层级,不是夸张设定；回复时可以自然体现熟练度,不要直接报数值,除非用户询问技能/学习/最近练了什么。",
+        ]
+        for skill in ranked:
+            level = _safe_int(skill.get("level"), 1, 1)
+            lines.append(f"- {_single_line(skill.get('name'), 24)}: Lv.{level} {self._skill_level_title(level)}；{self._skill_level_description(level)}")
+        return "\n".join(lines)
+
+    def _format_skill_growth_schedule_context(self, limit: int = 8) -> str:
+        if not self.enable_skill_growth_simulation or not self.enable_skill_growth_schedule_influence:
+            return ""
+        strength = max(0.0, min(1.0, _safe_float(self.skill_growth_schedule_influence_strength, 0.35)))
+        if strength <= 0:
+            return ""
+        state = self.data.get("skill_growth") if isinstance(self.data.get("skill_growth"), dict) else {}
+        skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+        if not skills:
+            return ""
+        now_ts = _now_ts()
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        for raw in skills.values():
+            if not isinstance(raw, dict):
+                continue
+            level = _safe_int(raw.get("level"), 1, 1)
+            exp = _safe_float(raw.get("exp"), 0)
+            training_count = _safe_int(raw.get("training_count"), 0, 0)
+            last_trained = _safe_float(raw.get("last_trained_ts"), 0)
+            recency = 0.0
+            if last_trained > 0:
+                age_days = max(0.0, (now_ts - last_trained) / 86400)
+                recency = max(0.0, 3.0 - age_days)
+            score = level * 20 + exp / 20 + min(12, training_count) + recency * 4
+            ranked.append((score, raw))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        if not ranked:
+            return ""
+        strength_text = "很轻" if strength < 0.25 else "轻" if strength < 0.55 else "中等" if strength < 0.8 else "较强"
+        lines = [
+            "【技能成长对日程的能力边界影响】",
+            f"影响强度：{strength_text}。这些技能主要用于保持能力边界一致,优先级低于日期语境、身份主线、状态、天气和用户介入；不要把今天写成训练清单。",
+            "安排方式：高等级技能会改变她面对相关任务的表现。这里的任务可以是题目、创作、料理、训练、战斗、交涉、研究、手工或任何符合人格的活动。Lv.4 以后不要再写她被常规任务难住、完全不会或长期卡死；Lv.5/Lv.6 面对普通任务应表现为熟练、快速、能检查/讲清楚或优化做法。只有高阶、陌生、超纲、状态极差或复杂综合场景,才可以短暂停顿。",
+            "低等级技能仍可以被基础任务卡住；中等级技能可以偶尔卡在细节上,但应能通过复习、查资料、请教、试错或换思路推进。",
+        ]
+        for _, skill in ranked[:limit]:
+            level = _safe_int(skill.get("level"), 1, 1)
+            name = _single_line(skill.get("name"), 24)
+            category = _single_line(skill.get("category"), 18) or "能力"
+            count = _safe_int(skill.get("training_count"), 0, 0)
+            last = self._format_timestamp_elapsed(skill.get("last_trained_ts", 0))
+            if level >= 5:
+                tendency = "普通相关任务不应再被写成难住或不会；可体现效率、判断、优化做法或教别人。只有高阶/陌生/超纲/复杂场景才短暂停顿。"
+            elif level >= 4:
+                tendency = "常规相关任务不应卡死,最多是检查细节、换思路、试错后推进,或被进阶内容短暂拖住。"
+            elif level >= 3:
+                tendency = "常规相关任务能独立推进,但效率一般；可以卡在细节上,再通过复习、查资料或换思路解决。"
+            elif count > 0:
+                tendency = "可以被基础任务难住或需要指导,适合偶尔补一点基础练习或入门尝试,体现仍在慢慢学。"
+            else:
+                tendency = "只在当天身份和场景很合适时轻轻出现,不要强行安排。"
+            lines.append(f"- {name}（{category}, Lv.{level} {self._skill_level_title(level)}, 训练{count}次, 最近{last}）：{tendency}")
+        return "\n".join(lines)
+
+    def _current_story_plan_snapshot(self) -> dict[str, Any]:
+        plan = self.data.get("daily_story_plan", {})
+        if not isinstance(plan, dict) or not self._is_plan_date_active(plan.get("date")):
+            return {}
+        now_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
+        if now_minutes is None:
+            return {}
+
+        snapshot: dict[str, Any] = {}
+        summary = _single_line(plan.get("summary"), 120)
+        if summary:
+            snapshot["summary"] = summary
+
+        current_event = None
+        for item in plan.get("today_events", []):
+            if not isinstance(item, dict):
+                continue
+            start, end = self._parse_window_minutes(str(item.get("window") or ""))
+            if start is None or end is None:
+                continue
+            if start <= now_minutes < end:
+                current_event = item
+                break
+        if isinstance(current_event, dict):
+            snapshot["event"] = _single_line(current_event.get("event"), 100)
+            snapshot["mood"] = _single_line(current_event.get("mood"), 24)
+
+        current_proactive = None
+        for item in plan.get("proactive_events", []):
+            if not isinstance(item, dict):
+                continue
+            start, end = self._parse_window_minutes(str(item.get("window") or ""))
+            if start is None or end is None:
+                continue
+            if start <= now_minutes < end:
+                current_proactive = item
+                break
+        if isinstance(current_proactive, dict):
+            snapshot["topic"] = _single_line(current_proactive.get("topic"), 80)
+            snapshot["scene"] = _single_line(current_proactive.get("scene"), 80)
+            snapshot["tone"] = _single_line(current_proactive.get("tone"), 30)
+            snapshot["impulse"] = _single_line(current_proactive.get("impulse"), 100)
+        return snapshot
+
+    def _format_detail_injection(self) -> str:
+        snapshot = self._current_story_plan_snapshot()
+        if not snapshot:
+            schedule_context = self._format_schedule_context_for_prompt()
+            if not schedule_context:
+                return ""
+            return (
+                "【当前细化片段】\n"
+                "当前没有命中的精细生活片段；以下只作为附近日程的轻量参考,不要当成正在逐字发生。\n"
+                f"{schedule_context}"
+            )
+        lines = ["【当前细化片段】"]
+        if snapshot.get("summary"):
+            lines.append(f"这一小段的氛围：{snapshot['summary']}")
+        if snapshot.get("event"):
+            event_line = f"当前这段更像是在：{snapshot['event']}"
+            if snapshot.get("mood"):
+                event_line += f"｜情绪：{snapshot['mood']}"
+            lines.append(event_line)
+        if snapshot.get("topic") or snapshot.get("scene") or snapshot.get("tone") or snapshot.get("impulse"):
+            detail_bits = []
+            if snapshot.get("topic"):
+                detail_bits.append(f"话题钩子：{snapshot['topic']}")
+            if snapshot.get("scene"):
+                detail_bits.append(f"场景：{snapshot['scene']}")
+            if snapshot.get("tone"):
+                detail_bits.append(f"底色：{snapshot['tone']}")
+            if snapshot.get("impulse"):
+                detail_bits.append(f"内在冲动：{snapshot['impulse']}")
+            lines.append("｜".join(detail_bits))
+        segment = self._current_detail_segment_for_update()
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        detail_snapshot = None
+        if isinstance(segment, dict) and isinstance(enhanced, dict):
+            detail_snapshot = enhanced.get(str(segment.get("key") or ""))
+        if isinstance(detail_snapshot, dict):
+            state_variables = detail_snapshot.get("state_variables", [])
+            if isinstance(state_variables, list) and state_variables:
+                variable_lines = []
+                for variable in state_variables[:6]:
+                    if not isinstance(variable, dict):
+                        continue
+                    name = _single_line(variable.get("name"), 24)
+                    value = _single_line(variable.get("value"), 50)
+                    note = _single_line(variable.get("note"), 60)
+                    if name and value:
+                        variable_lines.append(f"- {name}: {value}" + (f"（{note}）" if note else ""))
+                if variable_lines:
+                    lines.append("当前状态变量：\n" + "\n".join(variable_lines))
+            interaction_updates = detail_snapshot.get("interaction_updates", [])
+            if isinstance(interaction_updates, list) and interaction_updates:
+                update_lines = []
+                for update in interaction_updates[-3:]:
+                    if not isinstance(update, dict):
+                        continue
+                    user_text = _single_line(update.get("user_text"), 60)
+                    reaction = _single_line(update.get("reaction"), 90)
+                    intensity = _single_line(update.get("intensity"), 12)
+                    state_updates = update.get("state_updates")
+                    state_text = ""
+                    if isinstance(state_updates, list) and state_updates:
+                        state_text = "；".join(_single_line(item, 50) for item in state_updates if _single_line(item, 50))
+                    pieces = [part for part in (f"用户说：{user_text}" if user_text else "", f"强度：{intensity}" if intensity else "", reaction, state_text) if part]
+                    if pieces:
+                        update_lines.append("- " + "｜".join(pieces))
+                if update_lines:
+                    lines.append(
+                        "用户刚刚介入后的事实更新：\n"
+                        + "\n".join(update_lines)
+                        + "\n回复时必须承接这些事实,不要按介入前的日程状态继续说。"
+                    )
+        return "\n".join(lines)
+
+    def _format_timer_scheduling_instruction(self) -> str:
+        if not self.enable_llm_timer_scheduling:
+            return ""
+        return """【主动消息预约】
+如果你觉得这段对话晚些时候还会自然延伸一次,可以在回复末尾附一个隐藏标签：
+<timer>{"time":"YYYY-MM-DD HH:MM:SS","reason":"可选","topic":"可选","motive":"可选","action":"可选"}</timer>
+也可以只写时间。
+这个标签用户看不到,只用来预约你下一次主动开口。
+只在确实有自然后续时才写,不要每轮都加。"""
+
+    def _extract_timer_directives(self, text: str) -> tuple[str, list[dict[str, Any]]]:
+        raw_text = str(text or "")
+        payloads: list[dict[str, Any]] = []
+        for match in TIMER_TAG_PATTERN.finditer(raw_text):
+            payload = self._parse_timer_directive(match.group(1))
+            if payload:
+                payloads.append(payload)
+        cleaned = TIMER_TAG_PATTERN.sub("", raw_text)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned, payloads
+
+    def _parse_timer_directive(self, raw: str) -> dict[str, Any] | None:
+        content = str(raw or "").strip()
+        if not content:
+            return None
+        payload: dict[str, Any]
+        if content.startswith("{") and content.endswith("}"):
+            try:
+                loaded = json.loads(content)
+            except Exception:
+                return None
+            if not isinstance(loaded, dict):
+                return None
+            payload = {str(key): value for key, value in loaded.items()}
+        else:
+            payload = {"time": content}
+
+        time_text = ""
+        for key in ("time", "timer", "at", "datetime", "date"):
+            candidate = payload.get(key)
+            if candidate:
+                time_text = str(candidate).strip()
+                break
+        if not time_text:
+            return None
+        scheduled_ts = self._parse_timer_timestamp(time_text)
+        if scheduled_ts <= 0:
+            return None
+        parsed: dict[str, Any] = {"scheduled_ts": scheduled_ts, "raw_time": time_text}
+        for key in ("reason", "topic", "motive", "action", "style"):
+            value = payload.get(key)
+            if value is not None:
+                parsed[key] = _single_line(value, 140 if key == "motive" else 60)
+        chain = self._normalize_chain_steps(payload.get("chain"))
+        if chain:
+            parsed["chain"] = chain
+        return parsed
+
+    def _normalize_chain_steps(self, raw_chain: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_chain, list):
+            return []
+        normalized_chain: list[dict[str, Any]] = []
+        for step in raw_chain[:4]:
+            if not isinstance(step, dict):
+                continue
+            kind = _single_line(step.get("kind"), 32)
+            if not kind:
+                continue
+            normalized_chain.append(
+                {
+                    "kind": kind,
+                    "after_minutes": _safe_int(step.get("after_minutes"), 0, 0, 240),
+                    "reason": _single_line(step.get("reason"), 40),
+                    "topic": _single_line(step.get("topic"), 80),
+                    "motive": _single_line(step.get("motive"), 100),
+                    "tone": _single_line(step.get("tone"), 30),
+                }
+            )
+        return normalized_chain
+
+    def _parse_timer_timestamp(self, time_text: str) -> float:
+        normalized = str(time_text or "").strip()
+        if not normalized:
+            return 0.0
+        for fmt in SUPPORTED_TIMER_FORMATS:
+            try:
+                return datetime.strptime(normalized, fmt).timestamp()
+            except ValueError:
+                continue
+        return 0.0
+
+    def _infer_timer_reason(self, scheduled_ts: float, source_text: str = "") -> str:
+        dt = datetime.fromtimestamp(scheduled_ts)
+        minute = dt.hour * 60 + dt.minute
+        lowered = str(source_text or "")
+        if 8 * 60 <= minute <= 10 * 60 + 30:
+            return "morning_greeting"
+        if 12 * 60 <= minute <= 13 * 60 + 50:
+            return "noon_greeting"
+        if 21 * 60 <= minute <= 23 * 60 + 10:
+            return "evening_greeting"
+        if any(token in lowered for token in ("照片", "风景", "云", "雨", "光", "晚霞", "猫")):
+            return "activity_share"
+        if any(token in lowered for token in ("记下来", "那句话", "写下", "日记")):
+            return "diary_share"
+        return "check_in"
+
+    def _timer_default_topic(self, reason: str, user: dict[str, Any], source_text: str = "") -> str:
+        source = _single_line(source_text, 48)
+        if source:
+            return source
+        return self._choose_proactive_topic(reason, user)
+
+    def _timer_default_motive(
+        self,
+        reason: str,
+        user: dict[str, Any],
+        *,
+        source_text: str = "",
+        topic: str = "",
+    ) -> str:
+        if topic:
+            return self._normalize_internal_motive_text(f"关于“{topic}”还有一点后续内容,适合稍后补充")
+        if source_text:
+            return self._normalize_internal_motive_text("刚才的话题还有一点后续内容,适合稍后补充")
+        return self._choose_proactive_motive(reason, user, action="message")
+
+    def _get_active_llm_timer(self, user: dict[str, Any]) -> dict[str, Any] | None:
+        raw = user.get("llm_timer_event")
+        if not isinstance(raw, dict) or not raw:
+            return None
+        scheduled_ts = _safe_float(raw.get("scheduled_ts"), 0)
+        if scheduled_ts <= 0:
+            return None
+        return raw
+
+    def _has_due_llm_timer(self, user: dict[str, Any], now: float | None = None) -> bool:
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict):
+            return False
+        now = now or _now_ts()
+        return now >= _safe_float(event.get("scheduled_ts"), 0)
+
+    def _clear_llm_timer_event(self, user: dict[str, Any], *, event_id: str = "") -> None:
+        raw = user.get("llm_timer_event")
+        if not isinstance(raw, dict):
+            user["llm_timer_event"] = {}
+            return
+        if event_id and str(raw.get("id") or "") != event_id:
+            return
+        user["llm_timer_event"] = {}
+
+    def _format_llm_timer_context(self, user: dict[str, Any], *, now: float | None = None) -> str:
+        event = self._get_active_llm_timer(user)
+        if not isinstance(event, dict):
+            return ""
+        now = now or _now_ts()
+        scheduled_ts = _safe_float(event.get("scheduled_ts"), 0)
+        if scheduled_ts <= 0:
+            return ""
+        summary_parts = ["这是你之前自己留给自己的一个回头时间。"]
+        topic = _single_line(event.get("topic"), 36)
+        motive = _single_line(event.get("motive"), 60)
+        seed = _single_line(event.get("seed_text"), 60)
+        if topic:
+            summary_parts.append(f"话题线索是“{topic}”。")
+        elif seed:
+            summary_parts.append(f"当时留下来的那句线索是：{seed}")
+        if motive:
+            summary_parts.append(f"当时心里的余味：{motive}")
+        if now < scheduled_ts:
+            summary_parts.append(f"现在离约好的时间还差 {self._format_duration_brief(scheduled_ts - now)}。")
+        return " ".join(summary_parts)
+
+    async def _schedule_llm_timer(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        source_text: str,
+        source_origin: str,
+        trigger_message_id: str = "",
+        trigger_umo: str = "",
+    ) -> None:
+        scheduled_ts = max(_now_ts() + 30, _safe_float(payload.get("scheduled_ts"), 0))
+        if scheduled_ts <= 0:
+            return
+        async with self._data_lock:
+            user = self._get_user(user_id)
+            reason = _single_line(payload.get("reason"), 40) or self._infer_timer_reason(
+                scheduled_ts,
+                source_text,
+            )
+            action = _single_line(payload.get("action"), 24) or "message"
+            if action not in {"message", "screen_peek", "photo_text", "voice", "jm_cosmos_read"}:
+                action = "message"
+            topic = _single_line(payload.get("topic"), 60) or self._timer_default_topic(
+                reason,
+                user,
+                source_text,
+            )
+            motive = _single_line(payload.get("motive"), 140) or self._timer_default_motive(
+                reason,
+                user,
+                source_text=source_text,
+                topic=topic,
+            )
+            timer_event = {
+                "id": uuid.uuid4().hex,
+                "scheduled_ts": scheduled_ts,
+                "raw_time": _single_line(payload.get("raw_time"), 32),
+                "reason": reason,
+                "action": action,
+                "topic": topic,
+                "motive": self._normalize_internal_motive_text(motive),
+                "style": _single_line(payload.get("style"), 40),
+                "seed_text": _single_line(source_text, 80),
+                "origin": source_origin,
+                "created_at": _now_ts(),
+                "trigger_message_id": _single_line(trigger_message_id, 120),
+                "trigger_umo": _single_line(trigger_umo, 160),
+                "trigger_ts": _now_ts() if trigger_message_id else 0,
+                "chain": list(payload.get("chain") or []) if isinstance(payload.get("chain"), list) else [],
+            }
+            user["llm_timer_event"] = timer_event
+            user["next_proactive_at"] = scheduled_ts
+            user["planned_proactive_reason"] = reason
+            user["planned_proactive_action"] = action
+            user["planned_proactive_source"] = "timer"
+            user["planned_proactive_motive"] = timer_event["motive"]
+            user["planned_proactive_topic"] = topic
+            user["planned_event_chain"] = list(payload.get("chain") or []) if isinstance(payload.get("chain"), list) else []
+            user["planned_opener_mode"] = ""
+            user["planned_followup_kind"] = ""
+            user["planned_proactive_quota_exempt"] = False
+            self._set_planned_proactive_trigger(
+                user,
+                message_id=timer_event["trigger_message_id"],
+                umo=timer_event["trigger_umo"],
+                created_at=timer_event["trigger_ts"],
+            )
+            self._save_data_sync()
+        logger.info(
+            "[PrivateCompanion] 已记录 LLM 自预约: user=%s time=%s reason=%s action=%s topic=%s",
+            user_id,
+            datetime.fromtimestamp(scheduled_ts).strftime("%m-%d %H:%M:%S"),
+            reason,
+            action,
+            topic,
+        )
+
+    def _format_remaining(self, end_ts: Any) -> str:
+        seconds = _safe_float(end_ts, 0) - _now_ts()
+        if seconds <= 0:
+            return "已结束"
+        if seconds < 3600:
+            return f"{max(1, int(seconds // 60))} 分钟"
+        if seconds < 86400:
+            return f"{int(seconds // 3600)} 小时"
+        return f"{int(seconds // 86400)} 天"
+
+    def _format_condition_started(self, start_ts: Any) -> str:
+        ts = _safe_float(start_ts, 0)
+        if ts <= 0:
+            return "未知"
+        dt = datetime.fromtimestamp(ts)
+        elapsed = max(0.0, _now_ts() - ts)
+        return f"{dt.strftime('%m-%d %H:%M')}（已持续 {self._format_duration_brief(elapsed)}）"
+
+    def _format_remaining_for_prompt(self, end_ts: Any) -> str:
+        seconds = _safe_float(end_ts, 0) - _now_ts()
+        if seconds <= 0:
+            return "已结束"
+        if seconds < 3600:
+            minutes = max(1, int(seconds // 60))
+            bucket = max(5, int(round(minutes / 5) * 5))
+            return f"约{bucket}分钟"
+        if seconds < 86400:
+            hours = max(1, int(round(seconds / 3600)))
+            return f"约{hours}小时"
+        return f"约{max(1, int(round(seconds / 86400)))}天"
+
+    def _format_condition_started_for_prompt(self, start_ts: Any) -> str:
+        ts = _safe_float(start_ts, 0)
+        if ts <= 0:
+            return "未知"
+        dt = datetime.fromtimestamp(ts)
+        elapsed = max(0.0, _now_ts() - ts)
+        if elapsed < 3600:
+            minutes = max(1, int(elapsed // 60))
+            elapsed_text = f"约{max(5, int(round(minutes / 5) * 5))}分钟"
+        elif elapsed < 86400:
+            elapsed_text = f"约{max(1, int(round(elapsed / 3600)))}小时"
+        else:
+            elapsed_text = f"约{max(1, int(round(elapsed / 86400)))}天"
+        return f"{dt.strftime('%m-%d %H:%M')}（已持续 {elapsed_text}）"
+
+    def _format_duration_brief(self, seconds: float) -> str:
+        seconds = max(0.0, float(seconds))
+        if seconds < 60:
+            return f"{max(1, int(seconds))} 秒"
+        if seconds < 3600:
+            return f"{max(1, int(seconds // 60))} 分钟"
+        if seconds < 86400:
+            return f"{int(seconds // 3600)} 小时"
+        return f"{int(seconds // 86400)} 天"
+
+    def _format_suspended_summary(self, user: dict[str, Any]) -> str:
+        raw = user.get("suspended_proactive")
+        if not isinstance(raw, dict) or not raw.get("active"):
+            return "悬着的话头：无"
+        opener = _single_line(raw.get("opener_text"), 40) or "已先叫了一声"
+        if raw.get("resume_ready"):
+            return f"悬着的话头：等到用户回头了（{opener}）"
+        due_at = _safe_float(raw.get("complaint_after_ts"), 0)
+        due_text = self._format_remaining(due_at) if due_at > 0 and not raw.get("complaint_sent") else "已发过后续"
+        return f"悬着的话头：还挂着（{opener}｜再等 {due_text}）"
+
+    def _split_can_do_items(self, text: str) -> list[str]:
+        raw_parts = re.split(r"[,,、;；\n]+", text)
+        items = []
+        for part in raw_parts:
+            item = _single_line(part, 80)
+            if item and item not in items:
+                items.append(item)
+        return items
+
+    def _add_can_do_items(self, text: str) -> list[str]:
+        new_items = self._split_can_do_items(text)
+        if not new_items:
+            return []
+        current = self.data.setdefault("can_do", [])
+        if not isinstance(current, list):
+            current = []
+            self.data["can_do"] = current
+        added = []
+        existing = {str(item) for item in current}
+        for item in new_items:
+            if item in existing:
+                continue
+            current.append(item)
+            existing.add(item)
+            added.append(item)
+        if len(current) > 50:
+            del current[:-50]
+        return added
+
+    def _remove_can_do_items(self, text: str) -> list[str]:
+        targets = self._split_can_do_items(text)
+        if not targets:
+            return []
+        current = self.data.setdefault("can_do", [])
+        if not isinstance(current, list):
+            self.data["can_do"] = []
+            return []
+        removed = []
+        kept = []
+        for item in current:
+            item_text = str(item)
+            if any(target in item_text or item_text in target for target in targets):
+                removed.append(item_text)
+            else:
+                kept.append(item)
+        self.data["can_do"] = kept
+        return removed
+
+    @staticmethod
+    def _task_provider(*provider_ids: str | None) -> str:
+        for provider_id in provider_ids:
+            value = str(provider_id or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _parse_plan_items(self, raw_text: str) -> list[dict[str, str]]:
+        payload = self._extract_json_payload(raw_text)
+        if payload is None:
+            return []
+        if isinstance(payload, dict):
+            raw_items = payload.get("schedule") or payload.get("items") or []
+        elif isinstance(payload, list):
+            raw_items = payload
+        else:
+            raw_items = []
+
+        items: list[dict[str, str]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            item_time = _single_line(item.get("time"), 8)
+            if self._parse_hhmm_to_minutes(item_time) is None:
+                continue
+            activity = self._align_plan_text_with_skill_bounds(
+                self._soften_destructive_daily_plan_text(_single_line(item.get("activity"), 120))
+            )
+            if not activity:
+                continue
+            mood = self._align_plan_text_with_skill_bounds(
+                self._soften_destructive_daily_plan_text(_single_line(item.get("mood"), 30))
+            )
+            message_seed = self._align_plan_text_with_skill_bounds(
+                self._soften_destructive_daily_plan_text(
+                    self._deemphasize_state_report_preamble(
+                        _single_line(item.get("message_seed"), 140),
+                        reason="background_schedule",
+                    )
+                )
+            )
+            items.append(
+                {
+                    "time": item_time,
+                    "activity": activity,
+                    "mood": mood,
+                    "message_seed": message_seed,
+                }
+            )
+        return sorted(items[: self.daily_plan_item_count], key=lambda item: self._parse_hhmm_to_minutes(item["time"]) or 0)
+
+    def _skill_levels_for_plan_bounds(self) -> dict[str, int]:
+        if not self.enable_skill_growth_simulation or not self.enable_skill_growth_schedule_influence:
+            return {}
+        state = self.data.get("skill_growth") if isinstance(self.data.get("skill_growth"), dict) else {}
+        skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+        levels = {}
+        for raw in skills.values():
+            if not isinstance(raw, dict):
+                continue
+            level = _safe_int(raw.get("level"), 1, 1)
+            name = _single_line(raw.get("name"), 24)
+            if name:
+                levels[name] = max(1, min(6, level))
+        return dict(list(levels.items())[:18])
+
+    @staticmethod
+    def _skill_task_noun_for_text(text: str) -> str:
+        if any(token in text for token in ("题", "作业", "试卷", "考试", "验算", "算")):
+            return "题目"
+        if any(token in text for token in ("写", "小说", "文章", "日记", "作文", "创作", "草稿")):
+            return "创作"
+        if any(token in text for token in ("画", "绘", "素描", "线稿", "上色")):
+            return "练习"
+        if any(token in text for token in ("做饭", "料理", "烹饪", "菜", "厨房")):
+            return "料理"
+        if any(token in text for token in ("战斗", "训练", "剑", "魔法", "探索", "委托")):
+            return "训练"
+        return "任务"
+
+    @staticmethod
+    def _skill_bound_replacement(name: str, level: int, *, advanced: bool = False, task_noun: str = "任务") -> str:
+        hard = f"{'高阶' if advanced else '常规'}{task_noun}"
+        if level <= 1:
+            return f"被{name}的基础部分绊住,需要从头摸一遍"
+        if level == 2:
+            return f"在{name}基础{task_noun}上慢慢摸索,照着例子才推进下去"
+        if level == 3:
+            return f"{name}常规{task_noun}能自己推进,只是效率不高,中途查了两处"
+        if level == 4:
+            return f"在{name}{hard}上停了一会儿,换个思路后理顺了"
+        if level == 5:
+            return f"把{name}{hard}顺手理清,还顺便检查了一遍更稳的做法"
+        return f"把{name}{hard}拆开重组了一遍,顺手想出一个更漂亮的做法"
+
+    def _align_plan_text_with_skill_bounds(self, text: str) -> str:
+        normalized = _single_line(text, 160)
+        if not normalized:
+            return ""
+        levels = self._skill_levels_for_plan_bounds()
+        if not levels:
+            return normalized
+        difficulty_tokens = (
+            "难住",
+            "卡住",
+            "卡死",
+            "不会做",
+            "做不出来",
+            "完全不会",
+            "看不懂",
+            "想不出来",
+            "算不出来",
+            "写不出来",
+        )
+        if not any(token in normalized for token in difficulty_tokens):
+            return normalized
+        advanced_tokens = ("竞赛", "压轴", "高阶", "陌生", "超纲", "很偏", "少见", "难题", "综合题", "复杂")
+        advanced = any(token in normalized for token in advanced_tokens)
+        task_noun = self._skill_task_noun_for_text(normalized)
+        for name, level in levels.items():
+            if name not in normalized:
+                continue
+            replacement = self._skill_bound_replacement(name, level, advanced=advanced, task_noun=task_noun)
+            replacements = [
+                f"被{name}题难住",
+                f"被{name}难住",
+                f"被{name}卡住",
+                f"{name}题卡住",
+                f"{name}不会做",
+                f"{name}做不出来",
+                f"{name}看不懂",
+                f"{name}算不出来",
+                f"{name}写不出来",
+                f"{name}完全不会",
+            ]
+            for old in replacements:
+                normalized = normalized.replace(old, replacement)
+        return _single_line(normalized, 160)
+
+    @staticmethod
+    def _soften_destructive_daily_plan_text(text: str) -> str:
+        softened = _single_line(text, 160)
+        if not softened:
+            return ""
+        replacements = [
+            (r"想[^，。,；;]{0,18}(砸|摔|打人|揍人|报复|毁掉|弄坏)[^，。,；;]{0,18}", "烦得想先躲开一会儿"),
+            (r"(把|将)[^，。,；;]{0,14}(砸|摔|扔)[^，。,；;]{0,14}(地上|墙上|门上|出去|烂|碎)[^，。,；;]{0,8}", "把手边的东西往里推了推"),
+            (r"(砸|摔)(东西|门|墙|书|杯子|手机|笔)[^，。,；;]{0,8}", "把东西先放远一点"),
+            (r"(骂人|想骂|吼人|想吼)[^，。,；;]{0,10}", "把话咽回去"),
+        ]
+        for pattern, replacement in replacements:
+            softened = re.sub(pattern, replacement, softened)
+        softened = re.sub(r"(烦躁|暴躁|恼火)到?有点?攻击性", "烦躁得有点想躲开", softened)
+        softened = softened.replace("想砸东西的烦躁", "有点烦,但努力收着")
+        softened = softened.replace("想摔东西的烦躁", "有点烦,但努力收着")
+        return _single_line(softened, 160)
+
+    def _extract_json_payload(self, raw_text: str) -> Any:
+        text = raw_text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        candidates = [text]
+        object_start, object_end = text.find("{"), text.rfind("}")
+        if object_start >= 0 and object_end > object_start:
+            candidates.append(text[object_start : object_end + 1])
+        array_start, array_end = text.find("["), text.rfind("]")
+        if array_start >= 0 and array_end > array_start:
+            candidates.append(text[array_start : array_end + 1])
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    def _get_current_plan_item(self, plan: dict[str, Any]) -> dict[str, str] | None:
+        if not self._is_plan_date_active(plan.get("date")):
+            return None
+        items = plan.get("items")
+        if not isinstance(items, list):
+            return None
+        current_minutes = self._effective_plan_now_minutes(str(plan.get("date") or ""))
+        if current_minutes is None:
+            return None
+        selected = None
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_minutes = self._parse_hhmm_to_minutes(item.get("time"))
+            if item_minutes is None:
+                continue
+            if item_minutes <= current_minutes:
+                selected = item
+            else:
+                break
+        if isinstance(selected, dict):
+            plan_date = str(plan.get("date") or "").strip()
+            selected_minutes = self._parse_hhmm_to_minutes(selected.get("time"))
+            if (
+                plan_date
+                and plan_date != _today_key()
+                and current_minutes >= 24 * 60
+                and selected_minutes is not None
+                and self._is_sleepy_plan_item(selected)
+            ):
+                elapsed = max(0, current_minutes - selected_minutes)
+                carried = dict(selected)
+                carried["time"] = self._minutes_to_hhmm(current_minutes)
+                runtime = {}
+                state = self.data.get("daily_state", {})
+                if isinstance(state, dict) and isinstance(state.get("sleep_runtime"), dict):
+                    runtime = state.get("sleep_runtime", {})
+                phase = str(runtime.get("phase") or "")
+                if phase == "woken":
+                    carried["activity"] = "夜里被消息轻轻叫醒，还半梦半醒地留着一点睡意。"
+                    carried["mood"] = "刚醒，迷糊"
+                    carried["message_seed"] = "像刚从睡里被叫醒；如果用户不继续聊，会慢慢把手机放下睡回去。"
+                elif phase == "sleeping_again":
+                    carried["activity"] = "刚才被叫醒过一下，现在又慢慢睡回去了。"
+                    carried["mood"] = "重新睡着，安静"
+                    carried["message_seed"] = "睡意重新接上了；再被唤起时会有一点断续的迷糊感。"
+                elif elapsed >= 45:
+                    carried["activity"] = "夜里还在睡着，前一晚的睡前片段已经过去，只剩休息延续。"
+                    carried["mood"] = "睡着，安静"
+                    carried["message_seed"] = "还在睡着。如果这时候被叫醒，会有点迷糊；没人继续打扰就会睡回去。"
+                else:
+                    carried["activity"] = "刚从前一晚的睡前片段进入休息，正在慢慢安静下来。"
+                    carried["mood"] = _single_line(selected.get("mood"), 40) or "安静"
+                    carried["message_seed"] = "正在收声准备睡，语气会更轻。"
+                return carried
+            return selected
+        return items[0] if items and isinstance(items[0], dict) else None
+
+    def _format_daily_plan(self, plan: dict[str, Any]) -> str:
+        if not plan or not plan.get("items"):
+            return "今天还没有日程。"
+        source = "模型生成" if plan.get("source") == "llm" else "备用日程"
+        lines = [
+            f"{self.bot_name} 今天的日程（{plan.get('date', _today_key())},{source}）："
+        ]
+        state = self.data.get("daily_state", {})
+        if isinstance(state, dict) and state.get("date") == plan.get("date"):
+            lines.append(
+                f"状态：能量 {state.get('energy', 70)}/100｜情绪偏{state.get('mood_bias', '平稳')}｜{state.get('sleep', '睡眠平稳')}"
+            )
+        for item in plan.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            mood = f"｜{item.get('mood')}" if item.get("mood") else ""
+            lines.append(f"{item.get('time')} {item.get('activity')}{mood}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _detail_event_text(item: dict[str, Any], limit: int = 160) -> str:
+        if not isinstance(item, dict):
+            return ""
+        for key in (
+            "event",
+            "content",
+            "detail",
+            "description",
+            "text",
+            "narrative",
+            "body",
+            "细化",
+            "细化内容",
+            "细化叙述",
+            "事件",
+            "主要事件",
+        ):
+            text = _single_line(item.get(key), limit)
+            if text:
+                return text
+        return ""
+
+    def _format_current_detail_view(self) -> str:
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict) or not plan.get("items"):
+            return "今天还没有日程，所以也没有可看的当前细化。"
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            enhanced = {}
+        segment = self._current_detail_segment_for_update() or self._pick_detail_segment(plan, enhanced)
+        if not segment:
+            return "当前还没有可用的细化结果。先让今天的日程段完成细化，或者手动执行一次“陪伴 重置细化”。"
+        key = str(segment.get("key") or "")
+        snapshot = enhanced.get(key) if key else None
+        if not isinstance(snapshot, dict):
+            return "当前时间段还没有落地的细化内容。可以先执行一次“陪伴 重置细化”。"
+
+        item = segment.get("item") if isinstance(segment, dict) else {}
+        start_text = self._minutes_to_hhmm(_safe_int(segment.get("start"), 0))
+        end_text = self._minutes_to_hhmm(_safe_int(segment.get("end"), 0))
+        lines = [
+            f"当前细化时段：{start_text}-{end_text}",
+            f"对应日程：{_single_line((item or {}).get('activity'), 120)}",
+        ]
+        mood = _single_line((item or {}).get("mood"), 24)
+        if mood:
+            lines.append(f"日程情绪：{mood}")
+
+        state_variables = snapshot.get("state_variables", [])
+        if isinstance(state_variables, list) and state_variables:
+            lines.append("状态变量：")
+            for variable in state_variables[:8]:
+                if not isinstance(variable, dict):
+                    continue
+                name = _single_line(variable.get("name"), 32)
+                value = _single_line(variable.get("value"), 60)
+                note = _single_line(variable.get("note"), 80)
+                if name and value:
+                    lines.append(f"- {name}: {value}" + (f"（{note}）" if note else ""))
+
+        presence = snapshot.get("presence_status")
+        if isinstance(presence, dict):
+            mode = _single_line(presence.get("mode"), 24)
+            reason = _single_line(presence.get("reason"), 80)
+            if mode and mode != "unchanged":
+                lines.append("QQ状态表现：")
+                lines.append(f"- {mode}" + (f"｜{reason}" if reason else ""))
+
+        interaction_updates = snapshot.get("interaction_updates", [])
+        if isinstance(interaction_updates, list) and interaction_updates:
+            lines.append("用户介入后的局部更新：")
+            for update in interaction_updates[-4:]:
+                if not isinstance(update, dict):
+                    continue
+                at = _single_line(update.get("at"), 8)
+                user_text = _single_line(update.get("user_text"), 80)
+                intensity = _single_line(update.get("intensity"), 12)
+                reaction = _single_line(update.get("reaction"), 120)
+                state_updates = update.get("state_updates")
+                state_text = ""
+                if isinstance(state_updates, list) and state_updates:
+                    state_text = "；".join(_single_line(item, 60) for item in state_updates if _single_line(item, 60))
+                if reaction or user_text:
+                    prefix = f"- {at} " if at else "- "
+                    parts = [
+                        f"用户：{user_text}" if user_text else "",
+                        f"强度：{intensity}" if intensity else "",
+                        reaction,
+                        state_text,
+                    ]
+                    lines.append(prefix + "｜".join(part for part in parts if part))
+
+        today_events = snapshot.get("today_events", [])
+        scoped_today_events = self._filter_snapshot_items_to_segment(today_events, segment)
+        if scoped_today_events:
+            lines.append("细化内容：")
+            for detail_event in scoped_today_events[:8]:
+                if not isinstance(detail_event, dict):
+                    continue
+                window = _single_line(detail_event.get("window"), 24)
+                event_text = self._detail_event_text(detail_event, 160)
+                mood_text = _single_line(detail_event.get("mood"), 24)
+                if event_text:
+                    tail = f"｜{mood_text}" if mood_text else ""
+                    lines.append(f"- {window}｜{event_text}{tail}")
+        else:
+            summary = _single_line(snapshot.get("summary"), 160)
+            if summary and summary not in {"这一段按原日程慢慢推进。", "这一段按原日程慢慢推进"}:
+                lines.append(f"细化内容：{summary}")
+            else:
+                lines.append("细化内容：当前没有生成出可展示的细化正文。")
+
+        proactive_events = snapshot.get("proactive_events", [])
+        if isinstance(proactive_events, list) and proactive_events:
+            scoped_proactive_events = self._filter_snapshot_items_to_segment(proactive_events, segment)
+            if scoped_proactive_events:
+                lines.append("这一段的主动契机：")
+            for proactive_event in scoped_proactive_events[:10]:
+                if not isinstance(proactive_event, dict):
+                    continue
+                window = _single_line(proactive_event.get("window"), 24)
+                reason = _single_line(proactive_event.get("reason"), 24)
+                action = _single_line(proactive_event.get("action"), 24) or "message"
+                topic = _single_line(proactive_event.get("topic"), 48)
+                motive = _single_line(proactive_event.get("motive"), 80)
+                why = _single_line(proactive_event.get("why"), 100)
+                scene = _single_line(proactive_event.get("scene"), 60)
+                tone = _single_line(proactive_event.get("tone"), 24)
+                impulse = _single_line(proactive_event.get("impulse"), 80)
+                lines.append(f"- {window}｜{reason}｜{action}｜{topic or motive or '（无话题）'}")
+                if why:
+                    lines.append(f"  why：{why}")
+                if motive:
+                    lines.append(f"  motive：{motive}")
+                meta_bits = []
+                if scene:
+                    meta_bits.append(f"scene={scene}")
+                if tone:
+                    meta_bits.append(f"tone={tone}")
+                if impulse:
+                    meta_bits.append(f"impulse={impulse}")
+                if meta_bits:
+                    lines.append("  " + "｜".join(meta_bits))
+                chain = proactive_event.get("chain")
+                if isinstance(chain, list) and chain:
+                    lines.append("  chain：")
+                    for step in chain[:4]:
+                        if not isinstance(step, dict):
+                            continue
+                        kind = _single_line(step.get("kind"), 24)
+                        after_minutes = _safe_int(step.get("after_minutes"), 0, 0)
+                        step_reason = _single_line(step.get("reason"), 24)
+                        step_topic = _single_line(step.get("topic"), 48)
+                        step_motive = _single_line(step.get("motive"), 80)
+                        step_tone = _single_line(step.get("tone"), 24)
+                        extra = []
+                        if after_minutes > 0:
+                            extra.append(f"{after_minutes} 分钟后")
+                        if step_reason:
+                            extra.append(step_reason)
+                        if step_topic:
+                            extra.append(step_topic)
+                        if step_tone:
+                            extra.append(f"tone={step_tone}")
+                        if step_motive:
+                            extra.append(f"motive={step_motive}")
+                        lines.append(f"    - {kind}" + (f"｜{'｜'.join(extra)}" if extra else ""))
+
+        if len(lines) <= 4:
+            lines.append("这段目前还比较空，说明细化结果里还没长出太多东西。")
+        return "\n".join(lines)
+
+    def _filter_snapshot_items_to_segment(
+        self,
+        raw_items: Any,
+        segment: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(raw_items, list) or not isinstance(segment, dict):
+            return []
+        start = _safe_int(segment.get("start"), 0)
+        end = _safe_int(segment.get("end"), self._segment_end_minutes(start, segment.get("item")))
+        if end <= start:
+            end += 24 * 60
+        kept: list[dict[str, Any]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            item_start, item_end = self._parse_window_minutes(str(item.get("window") or ""))
+            if item_start is None or item_end is None:
+                continue
+            candidates = [(item_start, item_end)]
+            if item_end < item_start:
+                candidates = [(item_start, item_end + 24 * 60)]
+            if item_start < start and end > 24 * 60:
+                candidates.append((item_start + 24 * 60, item_end + 24 * 60))
+            if any(candidate_start >= start and candidate_end <= end for candidate_start, candidate_end in candidates):
+                kept.append(item)
+        return kept
+
+    def _format_current_detail_brief(self) -> str:
+        plan = self.data.get("daily_plan", {})
+        if not isinstance(plan, dict) or not plan.get("items"):
+            return "今天还没有日程，所以没有可细化的时间段。"
+        enhanced = self.data.get("detail_enhanced_segments", {})
+        if not isinstance(enhanced, dict):
+            enhanced = {}
+        segment = self._current_detail_segment_for_update() or self._pick_detail_segment(plan, enhanced)
+        if not segment:
+            return "当前还没有可用的细化结果。"
+        key = str(segment.get("key") or "")
+        snapshot = enhanced.get(key) if key else None
+        if not isinstance(snapshot, dict):
+            return "当前时间段还没有落地的细化内容。"
+
+        item = segment.get("item") if isinstance(segment, dict) else {}
+        start_text = self._minutes_to_hhmm(_safe_int(segment.get("start"), 0))
+        end_text = self._minutes_to_hhmm(_safe_int(segment.get("end"), 0))
+        lines = [
+            f"{start_text}-{end_text}｜{_single_line((item or {}).get('activity'), 80)}",
+        ]
+        summary = _single_line(snapshot.get("summary"), 140)
+        if summary:
+            lines.append(summary)
+
+        today_events = snapshot.get("today_events", [])
+        if isinstance(today_events, list) and today_events:
+            for detail_event in today_events[:3]:
+                if not isinstance(detail_event, dict):
+                    continue
+                window = _single_line(detail_event.get("window"), 18)
+                event_text = self._detail_event_text(detail_event, 120)
+                mood_text = _single_line(detail_event.get("mood"), 20)
+                if event_text:
+                    lines.append(f"- {window} {event_text}" + (f"｜{mood_text}" if mood_text else ""))
+
+        interaction_updates = snapshot.get("interaction_updates", [])
+        if isinstance(interaction_updates, list) and interaction_updates:
+            latest = next((item for item in reversed(interaction_updates) if isinstance(item, dict)), None)
+            if isinstance(latest, dict):
+                user_text = _single_line(latest.get("user_text"), 60)
+                reaction = _single_line(latest.get("reaction"), 100)
+                if reaction or user_text:
+                    lines.append("局部更新：" + "｜".join(part for part in (f"用户：{user_text}" if user_text else "", reaction) if part))
+
+        return "\n".join(lines)
+
+    def _debug_tick_skip(self, user_id: str, reason: str, *, prefix: str = "跳过") -> None:
+        if prefix == "跳过":
+            return
+        reason_text = _single_line(reason, 120) or "未知原因"
+        key = f"{prefix}:{user_id}"
+        now = _now_ts()
+        cache = getattr(self, "_tick_skip_log_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._tick_skip_log_cache = cache
+        last_ts = _safe_float(cache.get(key), 0)
+        if now - last_ts < 1800:
+            return
+        cache[key] = now
+        if len(cache) > 300:
+            cutoff = now - 3600
+            for old_key, ts in list(cache.items()):
+                if _safe_float(ts, 0) < cutoff:
+                    cache.pop(old_key, None)
+        logger.debug(f"[PrivateCompanion] {prefix} {user_id}: {reason_text}")
+
+    async def _tick(self):
+        await self._maybe_settle_skill_growth()
+        await self._maybe_trigger_bilibili_boredom_watch()
+        await self._maybe_trigger_web_exploration()
+        await self._maybe_track_ai_daily()
+        await self._maybe_trigger_news_boredom_read()
+        await self._maybe_trigger_jm_cosmos_boredom_read()
+        await self._maybe_publish_qzone_life_post()
+        await self._maybe_schedule_private_reading_recommendation_request()
+        async with self._data_lock:
+            if self._maybe_schedule_bilibili_video_share():
+                self._save_data_sync()
+            users = list(self.data.get("users", {}).items())
+
+        for user_id, user in users:
+            if isinstance(user, dict):
+                user["user_id"] = str(user.get("user_id") or user_id)
+            if not isinstance(user, dict) or not self._is_target_private_user(str(user_id), user):
+                continue
+            now = _now_ts()
+            due_timer = self._get_active_llm_timer(user)
+            due_timer_id = (
+                str(due_timer.get("id") or "")
+                if isinstance(due_timer, dict) and now >= _safe_float(due_timer.get("scheduled_ts"), 0)
+                else ""
+            )
+            should_send, reason = self._should_send(user)
+            if not should_send:
+                self._debug_tick_skip(user_id, reason)
+                continue
+
+            async with self._data_lock:
+                current_for_mark = self._get_user(user_id)
+                self._recover_stale_proactive_sending(current_for_mark)
+                if current_for_mark.get("proactive_sending"):
+                    self._debug_tick_skip(user_id, "主动发送仍在进行中")
+                    continue
+                current_for_mark["proactive_sending"] = True
+                current_for_mark["proactive_sending_started_at"] = _now_ts()
+                self._save_data_sync()
+
+            planned_action_for_send = str(user.get("planned_proactive_action") or "message")
+            planned_motive_for_send = _single_line(user.get("planned_proactive_motive"), 140)
+            planned_chain_for_send = (
+                list(user.get("planned_event_chain") or [])
+                if isinstance(user.get("planned_event_chain"), list)
+                else []
+            )
+            proactive_quote_message_id = self._planned_proactive_quote_message_id(user, str(user.get("umo") or ""))
+            planned_opener_mode_for_send = str(user.get("planned_opener_mode") or "")
+            planned_followup_kind_for_send = str(user.get("planned_followup_kind") or "")
+            load_defer_note = self._photo_text_load_defer_note(planned_action_for_send, force_refresh=True)
+            if load_defer_note:
+                async with self._data_lock:
+                    current_for_defer = self._get_user(user_id)
+                    self._defer_planned_photo_text_for_load(current_for_defer, now=_now_ts(), note=load_defer_note)
+                    self._save_data_sync()
+                self._debug_tick_skip(user_id, load_defer_note, prefix="延后")
+                continue
+            task_start_last_seen = _safe_float(user.get("last_seen"), 0)
+            task_start_inbound_count = _safe_int(user.get("inbound_count"), 0)
+            reason, text, image_path, extra_components, action_summary, effective_action_for_send = await self._render_message(user)
+            async with self._data_lock:
+                current_after_render = self._get_user(user_id)
+                has_new_user_message = (
+                    _safe_float(current_after_render.get("last_seen"), 0) > task_start_last_seen
+                    or _safe_int(current_after_render.get("inbound_count"), 0) > task_start_inbound_count
+                )
+            if has_new_user_message:
+                logger.info(
+                    "[PrivateCompanion] 用户在主动消息生成期间已有新消息,丢弃本次主动发送: %s",
+                    user_id,
+                )
+                async with self._data_lock:
+                    current_for_clear = self._get_user(user_id)
+                    current_for_clear["proactive_sending"] = False
+                    current_for_clear["proactive_sending_started_at"] = 0
+                    self._save_data_sync()
+                continue
+            if not text and not image_path and not extra_components:
+                async with self._data_lock:
+                    current = self._get_user(user_id)
+                    current["proactive_sending"] = False
+                    current["proactive_sending_started_at"] = 0
+                    if self._simulation_active(current):
+                        self._consume_simulation_event(current)
+                    else:
+                        current["next_proactive_at"] = 0
+                        current["planned_proactive_reason"] = ""
+                        current["planned_proactive_action"] = ""
+                        current["planned_proactive_source"] = ""
+                        current["planned_proactive_motive"] = ""
+                        current["planned_proactive_topic"] = ""
+                        current["planned_opener_mode"] = ""
+                        current["planned_followup_kind"] = ""
+                        current["planned_proactive_quota_exempt"] = False
+                        self._schedule_next_proactive(current, now=_now_ts(), delay_hours=(2, 8))
+                    self._save_data_sync()
+                self._debug_tick_skip(user_id, "主动行为失败或不适合发送", prefix="放弃")
+                continue
+            try:
+                logger.info(
+                    "[PrivateCompanion] 准备主动发送给 %s: reason=%s action=%s quote=%s text=%s image=%s extra=%s",
+                    user_id,
+                    reason,
+                    effective_action_for_send or planned_action_for_send or "message",
+                    bool(proactive_quote_message_id),
+                    _single_line(text, 120),
+                    bool(image_path),
+                    len(extra_components),
+                )
+                await self._send_proactive_message_chain(
+                    user["umo"],
+                    text,
+                    image_path,
+                    extra_components=extra_components,
+                    quote_message_id=proactive_quote_message_id,
+                )
+                logger.info(
+                    "[PrivateCompanion] 主动发送完成: user=%s reason=%s action=%s",
+                    user_id,
+                    reason,
+                    planned_action_for_send or "message",
+                )
+                await self._archive_proactive_message_to_conversation(
+                    user=user,
+                    user_prompt=self._build_proactive_archive_user_prompt(
+                        reason=reason,
+                        action=effective_action_for_send or planned_action_for_send or "message",
+                        motive=planned_motive_for_send,
+                        action_summary=action_summary,
+                    ),
+                    assistant_response=self._build_proactive_archive_assistant_text(
+                        text=text,
+                        image_path=image_path,
+                        extra_components=extra_components,
+                        action_summary=action_summary,
+                    ),
+                )
+            except Exception as e:
+                logger.warning(f"[PrivateCompanion] 发送给 {user_id} 失败: {e}")
+                async with self._data_lock:
+                    current_after_failure = self._get_user(user_id)
+                    current_after_failure["next_proactive_at"] = 0
+                    current_after_failure["planned_proactive_reason"] = ""
+                    current_after_failure["planned_proactive_action"] = ""
+                    current_after_failure["planned_proactive_source"] = ""
+                    current_after_failure["planned_proactive_motive"] = ""
+                    current_after_failure["planned_proactive_topic"] = ""
+                    current_after_failure["planned_event_chain"] = []
+                    current_after_failure["planned_opener_mode"] = ""
+                    current_after_failure["planned_followup_kind"] = ""
+                    current_after_failure["planned_proactive_quota_exempt"] = False
+                    self._schedule_next_proactive(current_after_failure, now=_now_ts(), delay_hours=(6, 12))
+                    self._save_data_sync()
+                continue
+            finally:
+                async with self._data_lock:
+                    current_for_clear = self._get_user(user_id)
+                    current_for_clear["proactive_sending"] = False
+                    current_for_clear["proactive_sending_started_at"] = 0
+                    self._save_data_sync()
+
+            async with self._data_lock:
+                current = self._get_user(user_id)
+                simulation_active = self._simulation_active(current)
+                self._reset_daily_counter_if_needed(current)
+                current["last_sent"] = _now_ts()
+                current["last_companion_message"] = _single_line(_strip_internal_message_blocks(text), 500)
+                current["last_proactive_reason"] = reason
+                current["last_proactive_action"] = effective_action_for_send or planned_action_for_send or "message"
+                current["last_proactive_behavior_summary"] = action_summary
+                current["last_proactive_motive"] = planned_motive_for_send
+                self._remember_proactive_topic(
+                    current,
+                    text=text,
+                    topic=current.get("planned_proactive_topic"),
+                    motive=planned_motive_for_send,
+                )
+                self._mark_planned_candidate_status(current, "sent", "已发送")
+                self._note_proactive_daypart_sent(current, current["last_sent"])
+                opener_mode = planned_opener_mode_for_send
+                followup_kind = planned_followup_kind_for_send
+                if opener_mode == "name_only":
+                    current["suspended_proactive"] = self._build_suspended_proactive_payload(
+                        opener_text=text,
+                        reason=reason,
+                        action=current["last_proactive_action"],
+                        motive=current["last_proactive_motive"],
+                        action_summary=action_summary,
+                        chain=planned_chain_for_send,
+                    )
+                elif followup_kind == "suspended_opener":
+                    suspended = current.get("suspended_proactive")
+                    if isinstance(suspended, dict) and suspended.get("active"):
+                        suspended["complaint_sent"] = True
+                        second = suspended.get("second_followup")
+                        if isinstance(second, dict) and second:
+                            after_minutes = _safe_int(second.get("after_minutes"), 45, 0, 240)
+                            second_reason = _single_line(second.get("reason"), 40) or "morning_greeting"
+                            if second_reason == "morning_greeting":
+                                after_minutes = max(after_minutes, 90)
+                            current["pending_followup_event"] = {
+                                "date": _today_key(),
+                                "window": self._window_from_delay_minutes(after_minutes, width_minutes=18),
+                                "reason": second_reason,
+                                "action": "message",
+                                "why": "前一条早晨试探后隔了挺久,如果还想续,也只轻轻补一句。",
+                                "topic": _single_line(second.get("topic"), 80) or "早晨那句后面",
+                                "motive": self._normalize_internal_motive_text(_single_line(second.get("motive"), 100)),
+                                "scene": "早晨那句试探之后又过了一阵",
+                                "tone": _single_line(second.get("tone"), 30) or "轻一点,不催促",
+                                "impulse": "隔了挺久才又想放一句,不要求对方立刻回",
+                                "_scheduled_ts": _now_ts() + after_minutes * 60,
+                                "_cancel_on_inbound": True,
+                            }
+                elif followup_kind == "chain_followup":
+                    next_chain_followup = self._build_followup_event_from_chain(
+                        planned_chain_for_send,
+                        origin_reason=reason,
+                        origin_action=current["last_proactive_action"],
+                        now_ts=_now_ts(),
+                    )
+                    if isinstance(next_chain_followup, dict):
+                        current["pending_followup_event"] = next_chain_followup
+                elif planned_chain_for_send and not current.get("pending_followup_event"):
+                    next_chain_followup = self._build_followup_event_from_chain(
+                        planned_chain_for_send,
+                        origin_reason=reason,
+                        origin_action=current["last_proactive_action"],
+                        now_ts=_now_ts(),
+                    )
+                    if isinstance(next_chain_followup, dict):
+                        current["pending_followup_event"] = next_chain_followup
+                if reason == "group_share":
+                    current["group_share_context"] = {}
+                if reason == "bili_video_share":
+                    current["bilibili_video_context"] = {}
+                if reason == "news_share":
+                    current["news_context"] = {}
+                if reason == "web_exploration_share":
+                    current["web_exploration_context"] = {}
+                if reason == "jm_cosmos_recommendation_request":
+                    current["jm_cosmos_recommendation_context"] = {}
+                if reason == "creative_share":
+                    current["creative_share_context"] = {}
+                if simulation_active:
+                    self._consume_simulation_event(current)
+                else:
+                    current["sent_today"] = _safe_int(current.get("sent_today"), 0) + 1
+                    current["proactive_sent_count"] = _safe_int(current.get("proactive_sent_count"), 0) + 1
+                    current["ignored_streak"] = _safe_int(current.get("ignored_streak"), 0) + 1
+                    current["awaiting_reply_since"] = _now_ts()
+                    self._note_action_sent(current, current["last_proactive_action"])
+                    existing_followup = current.get("pending_followup_event")
+                    if isinstance(existing_followup, dict) and existing_followup:
+                        current["pending_followup_event"] = existing_followup
+                    elif followup_kind in {"suspended_opener", "chain_followup"} or opener_mode == "name_only":
+                        current["pending_followup_event"] = {}
+                    else:
+                        current["pending_followup_event"] = self._maybe_make_unanswered_screen_peek_event(
+                            current,
+                            reason,
+                            current["last_proactive_action"],
+                        ) or self._maybe_make_followup_event(
+                            current,
+                            reason,
+                            current["last_proactive_action"],
+                        ) or {}
+                    if self._is_greeting_reason(reason):
+                        self._reset_daily_counter_if_needed(current)
+                        sent_greetings = current.setdefault("greetings_sent", [])
+                        if not isinstance(sent_greetings, list):
+                            sent_greetings = []
+                            current["greetings_sent"] = sent_greetings
+                        if reason not in sent_greetings:
+                            sent_greetings.append(reason)
+                    self._clear_llm_timer_event(current, event_id=due_timer_id)
+                    next_timer = self._get_active_llm_timer(current)
+                    if isinstance(next_timer, dict) and _safe_float(next_timer.get("scheduled_ts"), 0) > _now_ts():
+                        current["next_proactive_at"] = _safe_float(next_timer.get("scheduled_ts"), 0)
+                        current["planned_proactive_reason"] = str(next_timer.get("reason") or "check_in")
+                        current["planned_proactive_action"] = str(next_timer.get("action") or "message")
+                        current["planned_proactive_source"] = "timer"
+                        current["planned_proactive_motive"] = _single_line(next_timer.get("motive"), 140)
+                        current["planned_proactive_topic"] = _single_line(next_timer.get("topic"), 60)
+                        self._set_planned_proactive_trigger(
+                            current,
+                            message_id=_single_line(next_timer.get("trigger_message_id"), 120),
+                            umo=_single_line(next_timer.get("trigger_umo"), 160),
+                            created_at=_safe_float(next_timer.get("trigger_ts"), 0),
+                        )
+                        current["planned_event_chain"] = list(next_timer.get("chain") or []) if isinstance(next_timer.get("chain"), list) else []
+                        current["planned_opener_mode"] = ""
+                        current["planned_followup_kind"] = ""
+                        current["planned_proactive_quota_exempt"] = False
+                    else:
+                        current["next_proactive_at"] = 0
+                        current["planned_proactive_reason"] = ""
+                        current["planned_proactive_action"] = ""
+                        current["planned_proactive_source"] = ""
+                        current["planned_proactive_motive"] = ""
+                        current["planned_proactive_topic"] = ""
+                        current["planned_event_chain"] = []
+                        current["planned_opener_mode"] = ""
+                        current["planned_followup_kind"] = ""
+                        current["planned_proactive_quota_exempt"] = False
+                        self._clear_planned_proactive_trigger(current)
+                        self._schedule_next_proactive(current, now=_now_ts())
+                self._save_data_sync()
+                current_snapshot = dict(current)
+            asyncio.create_task(self._refresh_persona_relationship(user_id, current_snapshot))
+

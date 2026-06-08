@@ -1609,6 +1609,7 @@ class PrivateCompanionPageApi:
             "enable_group_scene_awareness",
             "enable_group_reality_promise_guard",
             "enable_group_wakeup_enhancement",
+            "enable_group_high_intensity_mode",
             "enable_private_image_self_recognition",
             "enable_group_conversation_followup",
             "enable_group_interjection",
@@ -1899,6 +1900,7 @@ class PrivateCompanionPageApi:
             "enable_news_boredom_read",
             "enable_news_daily_hot_read",
             "enable_ai_daily_watch",
+            "ai_daily_sources",
             "ai_daily_source_uid",
             "ai_daily_check_window",
             "ai_daily_check_interval_minutes",
@@ -2401,6 +2403,7 @@ class PrivateCompanionPageApi:
             "enable_forward_message_adaptation",
             "enable_group_reality_promise_guard",
             "enable_group_wakeup_enhancement",
+            "enable_group_high_intensity_mode",
             "enable_private_image_self_recognition",
             "enable_group_conversation_followup",
             "enable_group_interjection",
@@ -2422,6 +2425,7 @@ class PrivateCompanionPageApi:
             "enable_news_boredom_read",
             "enable_news_daily_hot_read",
             "enable_ai_daily_watch",
+            "ai_daily_sources",
             "ai_daily_source_uid",
             "ai_daily_check_window",
             "ai_daily_check_interval_minutes",
@@ -3122,6 +3126,34 @@ class PrivateCompanionPageApi:
         if not ai_text_chars and ai_digest_first_item:
             ai_text_chars = len(str(ai_digest_first_item.get("article_text") or ""))
         try:
+            ai_subtitle_chars = max(0, int(ai_daily.get("last_video_subtitle_chars") or 0))
+        except (TypeError, ValueError):
+            ai_subtitle_chars = 0
+        if not ai_subtitle_chars and ai_digest_first_item:
+            ai_subtitle_chars = len(str(ai_digest_first_item.get("video_subtitle_text") or ""))
+        try:
+            ai_video_context_chars = max(0, int(ai_daily.get("last_video_context_chars") or 0))
+        except (TypeError, ValueError):
+            ai_video_context_chars = 0
+        if not ai_video_context_chars and ai_digest_first_item:
+            ai_video_context_chars = len(str(ai_digest_first_item.get("video_context_text") or ""))
+        try:
+            ai_video_duration = max(0, int(ai_daily.get("last_video_duration") or ai_digest_first_item.get("video_duration") or 0))
+        except (TypeError, ValueError):
+            ai_video_duration = 0
+        ai_video_tags_raw = ai_daily.get("last_video_tags") if isinstance(ai_daily.get("last_video_tags"), list) else ai_digest_first_item.get("video_tags")
+        ai_video_tags = [
+            self._single_line(tag, 40)
+            for tag in ai_video_tags_raw
+            if self._single_line(tag, 40)
+        ] if isinstance(ai_video_tags_raw, list) else []
+        ai_video_comments_raw = ai_daily.get("last_video_hot_comments") if isinstance(ai_daily.get("last_video_hot_comments"), list) else ai_digest_first_item.get("video_hot_comments")
+        ai_video_comments = [
+            self._single_line(comment, 120)
+            for comment in ai_video_comments_raw
+            if self._single_line(comment, 120)
+        ] if isinstance(ai_video_comments_raw, list) else []
+        try:
             source_count = len(getattr(self.plugin, "_news_source_items", lambda: [])())
         except Exception:
             source_count = 0
@@ -3138,11 +3170,50 @@ class PrivateCompanionPageApi:
                 "date": self._single_line(ai_daily.get("date"), 20),
                 "last_checked_at": self.plugin._format_timestamp_elapsed(ai_daily.get("last_checked_at", 0)),
                 "last_success_date": self._single_line(ai_daily.get("last_success_date"), 20),
+                "last_source_name": self._single_line(ai_daily.get("last_source_name"), 40),
+                "last_source_author": self._single_line(ai_daily.get("last_source_author"), 60),
+                "last_source_mid": self._single_line(ai_daily.get("last_source_mid"), 40),
+                "last_source_schedule": self._single_line(ai_daily.get("last_source_schedule"), 10),
                 "last_video_title": self._single_line(ai_daily.get("last_video_title"), 120),
+                "last_video_link": self._single_line(ai_daily.get("last_video_link"), 400),
+                "last_video_owner_name": self._single_line(ai_daily.get("last_video_owner_name") or ai_digest_first_item.get("video_owner_name"), 80),
+                "last_video_tname": self._single_line(ai_daily.get("last_video_tname") or ai_digest_first_item.get("video_tname"), 60),
+                "last_video_duration": ai_video_duration,
+                "last_video_context_chars": ai_video_context_chars,
+                "last_video_tags": ai_video_tags[:10],
+                "last_video_hot_comments": ai_video_comments[:5],
                 "last_text_link": self._single_line(ai_daily.get("last_text_link"), 400),
                 "last_text_readable": bool(ai_daily.get("last_text_readable")) if "last_text_readable" in ai_daily else bool(ai_digest_first_item.get("article_readable") and ai_digest_first_item.get("article_text")),
                 "last_text_chars": ai_text_chars,
+                "last_video_subtitle_readable": bool(ai_daily.get("last_video_subtitle_readable")) if "last_video_subtitle_readable" in ai_daily else bool(ai_digest_first_item.get("video_subtitle_readable") and ai_digest_first_item.get("video_subtitle_text")),
+                "last_video_subtitle_chars": ai_subtitle_chars,
+                "last_video_subtitle_status": self._single_line(ai_daily.get("last_video_subtitle_status") or ai_digest_first_item.get("video_subtitle_status"), 40),
                 "last_read_basis": self._single_line(ai_daily.get("last_read_basis"), 40),
+                "sources": [
+                    {
+                        "key": self._single_line(item.get("key"), 80),
+                        "name": self._single_line(item.get("name"), 40),
+                        "author_name": self._single_line(item.get("author_name"), 60),
+                        "mid": self._single_line(item.get("mid"), 40),
+                        "schedule": self._single_line(item.get("schedule"), 10),
+                    }
+                    for item in (ai_daily.get("sources") if isinstance(ai_daily.get("sources"), list) else [])
+                    if isinstance(item, dict)
+                ],
+                "source_states": {
+                    self._single_line(key, 80): {
+                        "name": self._single_line(value.get("name"), 40),
+                        "author_name": self._single_line(value.get("author_name"), 60),
+                        "mid": self._single_line(value.get("mid"), 40),
+                        "schedule": self._single_line(value.get("schedule"), 10),
+                        "status": self._single_line(value.get("status"), 80),
+                        "last_checked_at": self.plugin._format_timestamp_elapsed(value.get("last_checked_at", 0)),
+                        "last_success_date": self._single_line(value.get("last_success_date"), 20),
+                        "last_video_title": self._single_line(value.get("last_video_title"), 120),
+                    }
+                    for key, value in (ai_daily.get("source_states") if isinstance(ai_daily.get("source_states"), dict) else {}).items()
+                    if isinstance(value, dict)
+                },
                 "topic": self._single_line(ai_digest.get("topic"), 60),
                 "headline": self._single_line(ai_digest.get("headline"), 120),
             },
