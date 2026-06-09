@@ -467,7 +467,7 @@ class NewsExplorationMixin:
         raw = str(getattr(self, "news_sources", "") or "")
         items: list[dict[str, str]] = []
         seen: set[str] = set()
-        for line in raw.splitlines():
+        for line in self._split_news_source_lines(raw):
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -544,6 +544,28 @@ class NewsExplorationMixin:
             if len(items) >= 12:
                 break
         return items
+
+    @staticmethod
+    def _split_news_source_lines(raw: str) -> list[str]:
+        text = str(raw or "").strip()
+        if not text:
+            return []
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) != 1:
+            return lines
+        line = lines[0]
+        markers = list(re.finditer(r"(?:^|\s+)(#?\s*[^|\n]+?)\|(?=(?:https?://|bilibili:|bvid:))", line, flags=re.I))
+        if len(markers) <= 1:
+            return lines
+        recovered: list[str] = []
+        for index, match in enumerate(markers):
+            start = match.end()
+            end = markers[index + 1].start() if index + 1 < len(markers) else len(line)
+            name = str(match.group(1) or "").strip()
+            target = line[start:end].strip()
+            if name and target:
+                recovered.append(f"{name}|{target}")
+        return recovered or lines
 
     @staticmethod
     def _news_xml_text(node: Any, *paths: str) -> str:

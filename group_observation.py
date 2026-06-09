@@ -1403,33 +1403,25 @@ class GroupObservationMixin:
         profile = profiles.get(user_id)
         if not isinstance(profile, dict) or profile.get("enabled", True) is False:
             return
-        cleaned = _single_line(text, 120)
-        if not (8 <= len(cleaned) <= 90):
+        signal = self._worldbook_pending_observation_signal(text)
+        if not signal:
             return
-        if cleaned.startswith(("/", "!", "！", "#")) or re.fullmatch(r"[\W_]+", cleaned):
-            return
-        if re.search(r"我是|叫我|你可以叫我|我是你|你爹|你爸|我是.*主人", cleaned):
-            return
-        useful_markers = (
-            "喜欢", "不喜欢", "讨厌", "害怕", "怕", "最近", "正在", "准备", "想", "想要", "打算",
-            "以后", "今天", "明天", "作业", "考试", "上课", "上班", "下班", "画", "写", "玩", "看",
-            "吃", "睡", "困", "累", "开心", "难过", "生气", "压力", "习惯", "总是", "经常",
-        )
-        if not any(marker in cleaned for marker in useful_markers):
-            return
+        cleaned = signal["evidence"]
         now = now or _now_ts()
         last_at = _safe_float(profile.get("last_pending_observation_at"), 0)
-        if last_at and now - last_at < 6 * 3600:
+        if last_at and now - last_at < 12 * 3600:
             return
         pending = profile.setdefault("pending_observations", [])
         if not isinstance(pending, list):
             pending = []
             profile["pending_observations"] = pending
         evidence = cleaned
+        evidence_key = self._worldbook_pending_observation_key(evidence)
         for item in pending:
             if not isinstance(item, dict):
                 continue
-            if _single_line(item.get("evidence"), 120) == evidence:
+            existing_key = self._worldbook_pending_observation_key(item.get("evidence") or item.get("content"))
+            if existing_key and (existing_key == evidence_key or existing_key in evidence_key or evidence_key in existing_key):
                 item["count"] = _safe_int(item.get("count"), 1, 1) + 1
                 item["updated_at"] = now
                 profile["last_pending_observation_at"] = now
@@ -1439,19 +1431,58 @@ class GroupObservationMixin:
             0,
             {
                 "id": uuid.uuid4().hex[:12],
-                "title": "群聊观察",
+                "title": signal["title"],
                 "content": f"{identity_name} 在群聊中提到或表现出：{evidence}",
                 "evidence": evidence,
                 "group_id": _single_line(group_id, 40),
                 "source": "group_observation",
-                "weight": 35,
+                "weight": signal["weight"],
                 "count": 1,
                 "created_at": now,
                 "updated_at": now,
             },
         )
-        del pending[8:]
+        del pending[5:]
         profile["last_pending_observation_at"] = now
+
+    def _worldbook_pending_observation_signal(self, text: str) -> dict[str, Any] | None:
+        cleaned = _single_line(text, 140)
+        if not (6 <= len(cleaned) <= 100):
+            return None
+        if cleaned.startswith(("/", "!", "！", "#")) or re.fullmatch(r"[\W_]+", cleaned):
+            return None
+        if re.search(r"(https?://|www\.|BV[0-9A-Za-z]{8,}|av\d{4,}|\[图片\]|\[语音\]|\[转发消息\])", cleaned, re.I):
+            return None
+        if re.search(r"(我是|你可以叫我|我是你|你爹|你爸|我是.*主人)", cleaned):
+            return None
+        if re.search(r"(?<!不要)(?<!别)(?<!不准)叫我", cleaned):
+            return None
+        if re.search(r"(胖次|内裤|脱下来|给你看|生理需求|起飞|开导|涩涩|色色)", cleaned):
+            return None
+        if re.fullmatch(r"(今天的?|明天的?|昨天的?|解决了|怎么做呢|好+|嗯+|啊+|草+|笑死|笨蛋|入土|入机)", cleaned):
+            return None
+        if re.search(r"[?？]$", cleaned) and re.search(r"(你|他|她|它|大家|有人|谁|什么|怎么|为啥|为什么)", cleaned):
+            return None
+
+        strong_patterns: tuple[tuple[str, int, str], ...] = (
+            ("偏好/厌恶", 50, r"(喜欢|爱吃|爱看|爱玩|推|厨|不喜欢|讨厌|反感|雷|雷点|受不了|不能接受|不吃|过敏)"),
+            ("互动边界", 55, r"(不要叫|别叫|不要提|别提|不想聊|不接受|介意|边界|底线|触雷|会破防)"),
+            ("长期习惯", 45, r"(习惯|总是|经常|一直|长期|每天|常常|固定|作息|失眠|熬夜|早睡|晚睡)"),
+            ("近期计划", 42, r"(最近在|正在|准备|打算|计划|以后想|想要|要开始|在学|学.*中|练.*中|项目|稿子|作业|考试|上课|上班|下班)"),
+            ("重要状态", 45, r"(压力很大|压力大|焦虑|难过|生气|开心|累死|很累|困死|生病|发烧|住院|搬家|入职|离职|毕业)"),
+        )
+        for title, weight, pattern in strong_patterns:
+            if re.search(pattern, cleaned):
+                if re.search(r"^(今天|明天|昨天)[，,。 ]*(还行|一般|没啥|没事|解决了)?$", cleaned):
+                    return None
+                return {"title": title, "weight": weight, "evidence": cleaned}
+        return None
+
+    @staticmethod
+    def _worldbook_pending_observation_key(value: Any) -> str:
+        text = _single_line(value, 120).lower()
+        text = re.sub(r"[^\w\u4e00-\u9fff]+", "", text)
+        return text[:80]
 
     def _looks_like_group_member_name(self, group: dict[str, Any], token: str) -> bool:
         token = _single_line(token, 40)

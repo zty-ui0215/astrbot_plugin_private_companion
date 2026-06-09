@@ -2438,9 +2438,11 @@ function renderWorldbook() {
   $("#worldbookSummary").innerHTML = [
     worldbookStat("QQ 身份锚点", worldbook.enabled_member_count || 0, `${worldbook.member_count || 0} 个关系节点`),
     worldbookStat("群资料", worldbook.group_count || 0, "可用于群聊上下文"),
-    worldbookStat("资料条目", worldbook.entry_count || 0, "保留完整原始资料"),
+    worldbookStat("待确认观察", worldbook.pending_observation_total || 0, "确认后才写入重要记忆"),
     worldbookStat("识别方式", worldbook.enabled ? "QQ 精确" : "关闭", worldbook.match_aliases ? "称呼辅助开启" : "仅 QQ 确认"),
   ].join("");
+  const clearPendingButton = $("#worldbookClearPendingBtn");
+  if (clearPendingButton) clearPendingButton.disabled = !(worldbook.pending_observation_total > 0);
   $("#worldbookSourceFiles").textContent = Array.isArray(worldbook.source_files) && worldbook.source_files.length
     ? `资料路径：${worldbook.source_files.join("；")}`
     : "资料路径：默认路径尚未读取到可用配置";
@@ -3167,6 +3169,85 @@ function renderBookCoverInner(book, kindLabel, title, progress = "") {
   `;
 }
 
+function bookTagInputValue(tags) {
+  return Array.isArray(tags) ? tags.filter(Boolean).join("、") : "";
+}
+
+function parseBookTagInput(value) {
+  const seen = new Set();
+  return String(value || "")
+    .split(/[,，、\s\n\r]+/)
+    .map((item) => item.trim())
+    .filter((item) => {
+      if (!item) return false;
+      const key = item.toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 8);
+}
+
+function mergeBookTagCandidates(...groups) {
+  const seen = new Set();
+  const result = [];
+  groups.flat().forEach((tag) => {
+    const text = String(tag || "").trim();
+    if (!text) return;
+    const key = text.toLocaleLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.push(text);
+  });
+  return result.slice(0, 16);
+}
+
+function renderBookPreferenceEditor(book) {
+  if (book.kind !== "jm_album") return "";
+  const likedValue = bookTagInputValue(book.user_liked_tags);
+  const dislikedValue = bookTagInputValue(book.user_disliked_tags);
+  const sourceTags = Array.isArray(book.tags) ? book.tags.filter(Boolean) : [];
+  const preferenceTags = Array.isArray(book.preference_tags) ? book.preference_tags.filter(Boolean) : [];
+  const preferenceChips = preferenceTags.length
+    ? `<div class="book-preference-auto-tags"><span>Bot 标注</span>${preferenceTags.map((tag) => `<b>${escapeHtml(tag)}</b>`).join("")}</div>`
+    : "";
+  const candidates = mergeBookTagCandidates(sourceTags, preferenceTags);
+  const candidatePicker = candidates.length
+    ? `
+      <div class="book-preference-candidates">
+        <span>现有标签</span>
+        ${candidates.map((tag) => `
+          <div class="book-preference-candidate">
+            <b>${escapeHtml(tag)}</b>
+            <button type="button" data-book-tag-pick data-tag-target="liked" data-tag-value="${escapeHtml(tag)}">喜好</button>
+            <button type="button" data-book-tag-pick data-tag-target="disliked" data-tag-value="${escapeHtml(tag)}">厌恶</button>
+          </div>
+        `).join("")}
+      </div>
+    `
+    : "";
+  return `
+    <form class="book-preference-editor" data-book-preference-form>
+      <header>
+        <span>偏好标签</span>
+        <button type="submit">保存标签</button>
+      </header>
+      <div class="book-preference-fields">
+        <label>
+          <span>喜好</span>
+          <input type="text" name="liked_tags" value="${escapeHtml(likedValue)}" placeholder="画风、节奏、设定">
+        </label>
+        <label>
+          <span>厌恶</span>
+          <input type="text" name="disliked_tags" value="${escapeHtml(dislikedValue)}" placeholder="拖沓、雷点、题材">
+        </label>
+      </div>
+      ${candidatePicker}
+      ${preferenceChips}
+    </form>
+  `;
+}
+
 function allBookshelfBooks() {
   const bookshelf = state.bookshelfUnlocked || state.overview?.bookshelf || {};
   return [
@@ -3235,9 +3316,13 @@ function renderBookDetailPanel() {
   const tags = Array.isArray(activeTags) && activeTags.length
     ? `<div class="book-tags">${activeTags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`
     : "";
+  const preferenceEditor = renderBookPreferenceEditor(book);
   const readingImpressionText = book.kind === "jm_album"
     ? String(book.reading_impression || book.impression || "").replace(/^读后感[:：]\s*/, "").trim()
     : "";
+  const pageCommentCount = book.kind === "jm_album"
+    ? Number(book.page_comment_count ?? (Array.isArray(book.page_comments) ? book.page_comments.length : 0))
+    : 0;
   const botRating = Number(book.rating || 0);
   const userRating = Number(book.user_rating || 0);
   const ratingReason = String(book.user_rating_reason || book.rating_reason || "").trim();
@@ -3263,6 +3348,7 @@ function renderBookDetailPanel() {
     : "";
   const manageActions = book.kind === "browsing" ? "" : `
     <div class="book-manage-actions">
+      ${book.kind === "jm_album" ? `<button type="button" data-book-reread>让 Bot 重读</button>` : ""}
       <button type="button" class="danger-outline" data-book-delete
         data-book-kind="${escapeHtml(book.kind || "")}"
         data-book-id="${escapeHtml(book.id || "")}"
@@ -3347,10 +3433,12 @@ function renderBookDetailPanel() {
             ${book.tone ? `<div><dt>气质</dt><dd>${escapeHtml(book.tone)}</dd></div>` : ""}
             ${book.point_of_view ? `<div><dt>视角</dt><dd>${escapeHtml(book.point_of_view)}</dd></div>` : ""}
             ${book.progress ? `<div><dt>进度</dt><dd>${escapeHtml(book.progress)}</dd></div>` : ""}
+            ${book.kind === "jm_album" ? `<div><dt>备注</dt><dd>${escapeHtml(pageCommentCount)} 条</dd></div>` : ""}
             ${book.created ? `<div><dt>入柜</dt><dd>${escapeHtml(book.created)}</dd></div>` : ""}
           </dl>
           ${readingImpression}
           ${tags}
+          ${preferenceEditor}
           ${manageActions}
           <button type="button" class="read-button" data-book-read>开始阅读</button>
         </div>
@@ -3361,6 +3449,7 @@ function renderBookDetailPanel() {
 
 function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readingImpression = "") {
   const pages = Array.isArray(book.pages) ? book.pages : [];
+  const pageCommentCount = Number(book.page_comment_count ?? (Array.isArray(book.page_comments) ? book.page_comments.length : pages.filter((page) => String(page.comment || "").trim()).length));
   const maxStart = Math.max(0, pages.length - (pages.length % 2 === 0 ? 2 : 1));
   const start = Math.min(Math.max(0, Number(state.selectedBookSpreadIndex || 0)), maxStart);
   state.selectedBookSpreadIndex = start % 2 === 0 ? start : start - 1;
@@ -3397,7 +3486,7 @@ function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readin
       </nav>
       <div class="reader-toolbar">
         <button type="button" data-book-back>返回简介</button>
-        <span>${escapeHtml(kindLabel)} · ${escapeHtml(firstPage)}-${escapeHtml(lastPage)} / ${escapeHtml(pages.length)}</span>
+        <span>${escapeHtml(kindLabel)} · ${escapeHtml(firstPage)}-${escapeHtml(lastPage)} / ${escapeHtml(pages.length)} · 备注 ${escapeHtml(pageCommentCount)} 条</span>
         <button type="button" data-book-close>收回书柜</button>
       </div>
       <div class="manga-reader-shell">
@@ -3410,6 +3499,7 @@ function renderJmAlbumReader(book, kindLabel, displayTitle, displayIntro, readin
           <div class="manga-reader-actions">
             <button type="button" data-book-prev ${state.selectedBookSpreadIndex <= 0 ? "disabled" : ""}>上一页</button>
             <button type="button" data-book-next ${state.selectedBookSpreadIndex + 2 >= pages.length ? "disabled" : ""}>下一页</button>
+            <button type="button" data-book-reread>让 Bot 重读</button>
             <button type="button" class="danger-outline" data-book-delete
               data-book-kind="${escapeHtml(book.kind || "")}"
               data-book-id="${escapeHtml(book.id || "")}"
@@ -4536,7 +4626,7 @@ const newsSourcePresets = [
 ];
 
 function parseNewsSources(raw) {
-  return String(raw || "").split(/\r?\n/).map((line) => {
+  return splitNewsSourceLines(raw).map((line) => {
     const original = line;
     let text = line.trim();
     if (!text) return null;
@@ -4555,6 +4645,23 @@ function parseNewsSources(raw) {
       ? "bilibili_video"
       : (lowerTarget.startsWith("bilibili:") || target.includes("space.bilibili.com") ? "bilibili" : "rss");
     return { enabled, name, target, type, original };
+  }).filter(Boolean);
+}
+
+function splitNewsSourceLines(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return [];
+  const normalLines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (normalLines.length !== 1) return normalLines;
+  const line = normalLines[0];
+  const markers = Array.from(line.matchAll(/(?:^|\s+)(#?\s*[^|\n]+?)\|(?=(?:https?:\/\/|bilibili:|bvid:))/gi));
+  if (markers.length <= 1) return normalLines;
+  return markers.map((match, index) => {
+    const start = match.index + match[0].length;
+    const end = index + 1 < markers.length ? markers[index + 1].index : line.length;
+    const name = String(match[1] || "").trim();
+    const target = line.slice(start, end).trim();
+    return `${name}|${target}`.trim();
   }).filter(Boolean);
 }
 
@@ -6561,6 +6668,16 @@ document.addEventListener("click", (event) => {
     void rateSelectedBookshelfItem(ratingButton);
     return;
   }
+  const commentsUpdateButton = element?.closest("[data-book-reread], [data-book-comments-update]");
+  if (commentsUpdateButton) {
+    void rereadSelectedBookshelfItem(commentsUpdateButton);
+    return;
+  }
+  const tagPickButton = element?.closest("[data-book-tag-pick]");
+  if (tagPickButton) {
+    applyBookPreferenceTagPick(tagPickButton);
+    return;
+  }
   const diaryJump = element?.closest("[data-diary-jump]");
   if (diaryJump) {
     state.selectedDiaryDate = diaryJump.dataset.diaryJump || "";
@@ -6668,6 +6785,83 @@ async function rateSelectedBookshelfItem(button = null) {
   }, `已评分 ${rating}/10`, button);
 }
 
+async function updateSelectedBookshelfTags(form) {
+  const book = state.selectedBook || {};
+  const albumId = book.album_id || "";
+  if (!albumId) {
+    showToast("没有找到要编辑标签的藏书。", "error");
+    return;
+  }
+  const button = form.querySelector("button[type='submit']");
+  const likedTags = parseBookTagInput(form.elements.liked_tags?.value || "");
+  const dislikedTags = parseBookTagInput(form.elements.disliked_tags?.value || "")
+    .filter((tag) => !likedTags.some((liked) => liked.toLocaleLowerCase() === tag.toLocaleLowerCase()));
+  await runAction(async () => {
+    const result = await postJson("/bookshelf/tags", {
+      album_id: albumId,
+      liked_tags: likedTags,
+      disliked_tags: dislikedTags,
+      access_token: state.bookshelfAccessToken || state.bookshelfUnlocked?.access_token || "",
+    });
+    state.bookshelfUnlocked = result.bookshelf || null;
+    state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
+    const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(albumId));
+    if (updated) state.selectedBook = updated;
+    state.bookshelfPage = "detail";
+    renderBookshelf();
+    renderBookDetailPanel();
+  }, "已保存标签", button);
+}
+
+function applyBookPreferenceTagPick(button) {
+  const form = button.closest("[data-book-preference-form]");
+  const tag = String(button.dataset.tagValue || "").trim();
+  const target = button.dataset.tagTarget === "disliked" ? "disliked_tags" : "liked_tags";
+  const other = target === "liked_tags" ? "disliked_tags" : "liked_tags";
+  if (!form || !tag) return;
+  const targetInput = form.elements[target];
+  const otherInput = form.elements[other];
+  if (!(targetInput instanceof HTMLInputElement) || !(otherInput instanceof HTMLInputElement)) return;
+  const targetTags = parseBookTagInput(targetInput.value);
+  const otherTags = parseBookTagInput(otherInput.value).filter((item) => item.toLocaleLowerCase() !== tag.toLocaleLowerCase());
+  if (!targetTags.some((item) => item.toLocaleLowerCase() === tag.toLocaleLowerCase())) {
+    targetTags.push(tag);
+  }
+  targetInput.value = targetTags.slice(0, 8).join("、");
+  otherInput.value = otherTags.join("、");
+}
+
+async function rereadSelectedBookshelfItem(button = null) {
+  const book = state.selectedBook || {};
+  const albumId = book.album_id || "";
+  if (!albumId) {
+    showToast("没有找到要重读的藏书。", "error");
+    return;
+  }
+  const currentPage = state.bookshelfPage;
+  await runAction(async () => {
+    const result = await postJson("/bookshelf/comments/update", {
+      album_id: albumId,
+      access_token: state.bookshelfAccessToken || state.bookshelfUnlocked?.access_token || "",
+    });
+    state.bookshelfUnlocked = result.bookshelf || null;
+    state.bookshelfAccessToken = result.bookshelf?.access_token || state.bookshelfAccessToken || "";
+    const updated = allBookshelfBooks().find((item) => item.kind === "jm_album" && String(item.album_id || "") === String(albumId));
+    if (updated) state.selectedBook = updated;
+    state.bookshelfPage = currentPage === "reader" ? "reader" : "detail";
+    renderBookshelf();
+    renderBookDetailPanel();
+    void hydrateBookshelfImages($("#bookDetailPanel") || document);
+  }, "", button);
+}
+
+document.addEventListener("submit", (event) => {
+  const form = event.target instanceof HTMLFormElement ? event.target : null;
+  if (!form || !form.matches("[data-book-preference-form]")) return;
+  event.preventDefault();
+  void updateSelectedBookshelfTags(form);
+});
+
 document.addEventListener("change", (event) => {
   const target = event.target instanceof HTMLSelectElement ? event.target : null;
   if (!target || !target.matches("[data-diary-date]")) return;
@@ -6725,6 +6919,12 @@ $("#worldbookGroups").addEventListener("click", async (event) => {
 });
 $("#worldbookImportBtn").addEventListener("click", async () => {
   await runAction(() => postJson("/worldbook/import", {}), "已刷新关系网", $("#worldbookImportBtn"));
+});
+$("#worldbookClearPendingBtn").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (!requireSecondClick(button, "worldbook-clear-pending", "再次点击清理所有待确认观察", "再次点击清理")) return;
+  await runAction(() => postJson("/worldbook/observations/clear", {}), "", button);
+  button.disabled = !((state.overview?.worldbook?.pending_observation_total || 0) > 0);
 });
 $("#worldbookAddMemberForm").addEventListener("submit", async (event) => {
   event.preventDefault();

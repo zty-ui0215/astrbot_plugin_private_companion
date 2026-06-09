@@ -482,8 +482,19 @@ class CoreStoreMixin:
             if key not in user:
                 user[key] = default_value
         user.setdefault("manual_enabled", False)
+        user.setdefault("manual_disabled", False)
+        if (
+            not created
+            and str(user_id).isdigit()
+            and str(user_id) in set(self._configured_target_ids())
+            and user.get("enabled") is False
+            and not user.get("manual_enabled")
+        ):
+            user["manual_disabled"] = True
         if created:
             user["enabled"] = str(user_id).isdigit() and str(user_id) in set(self._configured_target_ids())
+        elif user.get("manual_disabled"):
+            user["enabled"] = False
         elif not self._is_target_private_user(user_id, user):
             user["enabled"] = False
         if not user.get("nickname"):

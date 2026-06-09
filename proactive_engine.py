@@ -281,7 +281,7 @@ class ProactiveEngineMixin:
         source = _single_line(candidate.get("source"), 40) or "unknown"
         reason = _single_line(candidate.get("reason"), 40) or "check_in"
         scheduled = _safe_float(candidate.get("scheduled_ts"), now)
-        signature = self._proactive_topic_signature(topic, motive, source, reason)
+        signature = self._proactive_topic_signature(topic, motive)
         pool = self._cleanup_proactive_candidate_pool(now=now)
         if status in {"blocked", "accepted"}:
             for existing in reversed(pool):
@@ -291,13 +291,7 @@ class ProactiveEngineMixin:
                     continue
                 if str(existing.get("user_id") or "") != str(user_id):
                     continue
-                if str(existing.get("source") or "") != source or str(existing.get("reason") or "") != reason:
-                    continue
-                if str(existing.get("action") or "") != action:
-                    continue
                 if status == "accepted" and str(existing.get("id") or "") == str(candidate.get("id") or ""):
-                    continue
-                if str(existing.get("note") or "") != _single_line(note, 160):
                     continue
                 if not self._topic_signature_similar(signature, str(existing.get("signature") or "")):
                     continue
@@ -335,8 +329,6 @@ class ProactiveEngineMixin:
         signature = self._proactive_topic_signature(
             candidate.get("topic"),
             candidate.get("motive"),
-            candidate.get("source"),
-            candidate.get("reason"),
         )
         if not signature:
             return False
@@ -360,6 +352,9 @@ class ProactiveEngineMixin:
         now = _now_ts()
         source = _single_line(candidate.get("source"), 40) or "unknown"
         scheduled = _safe_float(candidate.get("scheduled_ts"), now)
+        if not self._user_enabled_for_proactive(str(user_id), user):
+            self._clear_pending_proactive_plan(user)
+            return False
         if _safe_float(user.get("next_proactive_at"), 0) > 0 and str(user.get("planned_proactive_source") or "") == "timer":
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有用户预约/定时主动")
             return False
@@ -403,6 +398,10 @@ class ProactiveEngineMixin:
 
     def _should_send(self, user: dict[str, Any]) -> tuple[bool, str]:
         self._recover_stale_proactive_sending(user)
+        user_id = str(user.get("user_id") or user.get("id") or "")
+        if not self._user_enabled_for_proactive(user_id, user):
+            self._clear_pending_proactive_plan(user)
+            return False, "私聊对象未启用"
         if user.get("proactive_sending"):
             return False, "上一条主动消息仍在发送中"
         if not user.get("umo"):

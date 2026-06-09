@@ -371,7 +371,17 @@ class PrivateReadingMixin:
         user_rating = _safe_int(album.get("user_rating"), 0, 0, 10)
         bot_rating = _safe_int(album.get("rating"), 0, 0, 10)
         rating = user_rating or bot_rating
-        if rating <= 0:
+        explicit_liked_terms = [
+            _single_line(tag, 24)
+            for tag in (album.get("user_liked_tags") if isinstance(album.get("user_liked_tags"), list) else [])
+            if _single_line(tag, 24)
+        ][:8]
+        explicit_disliked_terms = [
+            _single_line(tag, 24)
+            for tag in (album.get("user_disliked_tags") if isinstance(album.get("user_disliked_tags"), list) else [])
+            if _single_line(tag, 24)
+        ][:8]
+        if rating <= 0 and not explicit_liked_terms and not explicit_disliked_terms:
             return
         state = self.data.setdefault("jm_cosmos_integration", {})
         if not isinstance(state, dict):
@@ -385,30 +395,44 @@ class PrivateReadingMixin:
         if not isinstance(history, list):
             history = []
             profile["history"] = history
-        raw_terms: list[str] = []
-        raw_terms.append(_single_line(album.get("keyword"), 24))
-        raw_terms.extend(_single_line(tag, 24) for tag in album.get("tags", [])[:8] if _single_line(tag, 24)) if isinstance(album.get("tags"), list) else None
-        raw_terms.extend(_single_line(tag, 24) for tag in album.get("preference_tags", [])[:8] if _single_line(tag, 24)) if isinstance(album.get("preference_tags"), list) else None
-        terms: list[str] = []
-        seen: set[str] = set()
-        for term in raw_terms:
-            normalized = self._normalize_private_reading_tag(term)
-            if normalized and normalized not in seen:
-                seen.add(normalized)
-                terms.append(term)
-        history.append(
-            {
-                "album_id": _single_line(album.get("id") or album.get("album_id"), 32),
-                "title": _single_line(album.get("title"), 80),
-                "rating": rating,
-                "bot_rating": bot_rating,
-                "user_rating": user_rating,
-                "source": "user" if user_rating else "bot",
-                "reason": _single_line(album.get("user_rating_reason") or album.get("rating_reason"), 160),
-                "terms": terms[:12],
-                "created_ts": _safe_float(album.get("created_ts"), _now_ts()),
-            }
-        )
+        album_id = _single_line(album.get("id") or album.get("album_id"), 32)
+        title = _single_line(album.get("title"), 80)
+
+        def normalized_terms(raw_terms: list[str]) -> list[str]:
+            terms: list[str] = []
+            seen: set[str] = set()
+            for term in raw_terms:
+                normalized = self._normalize_private_reading_tag(term)
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    terms.append(term)
+            return terms
+
+        def append_history(row_rating: int, terms: list[str], *, source: str, reason: str = "") -> None:
+            if row_rating <= 0 or not terms:
+                return
+            history.append(
+                {
+                    "album_id": album_id,
+                    "title": title,
+                    "rating": row_rating,
+                    "bot_rating": bot_rating,
+                    "user_rating": user_rating,
+                    "source": source,
+                    "reason": _single_line(reason or album.get("user_rating_reason") or album.get("rating_reason"), 160),
+                    "terms": terms[:12],
+                    "created_ts": _safe_float(album.get("created_ts"), _now_ts()),
+                }
+            )
+
+        if rating > 0:
+            raw_terms: list[str] = []
+            raw_terms.append(_single_line(album.get("keyword"), 24))
+            raw_terms.extend(_single_line(tag, 24) for tag in album.get("tags", [])[:8] if _single_line(tag, 24)) if isinstance(album.get("tags"), list) else None
+            raw_terms.extend(_single_line(tag, 24) for tag in album.get("preference_tags", [])[:8] if _single_line(tag, 24)) if isinstance(album.get("preference_tags"), list) else None
+            append_history(rating, normalized_terms(raw_terms), source="user" if user_rating else "bot")
+        append_history(9, normalized_terms(explicit_liked_terms), source="user_tags", reason="用户在书柜详情页标为喜好")
+        append_history(2, normalized_terms(explicit_disliked_terms), source="user_tags", reason="用户在书柜详情页标为厌恶")
         del history[:-60]
 
         scores: dict[str, list[float]] = {}
@@ -417,7 +441,7 @@ class PrivateReadingMixin:
             if not isinstance(row, dict):
                 continue
             row_rating = _safe_float(row.get("rating"), 0)
-            source_weight = 1.35 if str(row.get("source") or "") == "user" else 0.75
+            source_weight = 1.35 if str(row.get("source") or "") in {"user", "user_tags"} else 0.75
             for term in row.get("terms", []) if isinstance(row.get("terms"), list) else []:
                 normalized = self._normalize_private_reading_tag(term)
                 if not normalized:

@@ -4796,6 +4796,10 @@ class DailyStateMixin:
             return
         async with self._data_lock:
             user = self._get_user(user_id)
+            if not self._user_enabled_for_proactive(user_id, user):
+                self._clear_pending_proactive_plan(user)
+                self._save_data_sync()
+                return
             reason = _single_line(payload.get("reason"), 40) or self._infer_timer_reason(
                 scheduled_ts,
                 source_text,
@@ -5512,7 +5516,12 @@ class DailyStateMixin:
         for user_id, user in users:
             if isinstance(user, dict):
                 user["user_id"] = str(user.get("user_id") or user_id)
-            if not isinstance(user, dict) or not self._is_target_private_user(str(user_id), user):
+            if not isinstance(user, dict) or not self._user_enabled_for_proactive(str(user_id), user):
+                if isinstance(user, dict) and _safe_float(user.get("next_proactive_at"), 0) > 0:
+                    async with self._data_lock:
+                        current_for_clear = self._get_user(str(user_id))
+                        self._clear_pending_proactive_plan(current_for_clear)
+                        self._save_data_sync()
                 continue
             now = _now_ts()
             due_timer = self._get_active_llm_timer(user)
@@ -5528,6 +5537,11 @@ class DailyStateMixin:
 
             async with self._data_lock:
                 current_for_mark = self._get_user(user_id)
+                if not self._user_enabled_for_proactive(str(user_id), current_for_mark):
+                    self._clear_pending_proactive_plan(current_for_mark)
+                    self._save_data_sync()
+                    self._debug_tick_skip(user_id, "私聊对象未启用")
+                    continue
                 self._recover_stale_proactive_sending(current_for_mark)
                 if current_for_mark.get("proactive_sending"):
                     self._debug_tick_skip(user_id, "主动发送仍在进行中")

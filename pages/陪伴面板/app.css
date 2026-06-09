@@ -3063,6 +3063,125 @@ input[type="search"] {
   font-size: 12px;
 }
 
+.book-preference-editor {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(47, 117, 102, 0.18);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.book-preference-editor header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.book-preference-editor header span {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.book-preference-editor button {
+  min-height: 30px;
+  border: 1px solid rgba(47, 117, 102, 0.24);
+  border-radius: 8px;
+  padding: 0 11px;
+  background: #fff;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.book-preference-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.book-preference-fields label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.book-preference-fields input {
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 8px 9px;
+  background: #fffdf8;
+  color: var(--ink);
+  font-family: inherit;
+}
+
+.book-preference-auto-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+
+.book-preference-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.book-preference-candidates > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.book-preference-candidate {
+  display: inline-flex;
+  overflow: hidden;
+  align-items: center;
+  border: 1px solid rgba(47, 117, 102, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.book-preference-candidate b {
+  padding: 3px 8px;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.book-preference-candidate button {
+  min-height: 24px;
+  border: 0;
+  border-left: 1px solid rgba(47, 117, 102, 0.12);
+  border-radius: 0;
+  padding: 0 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.book-preference-candidate button:hover {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.book-preference-auto-tags span,
+.book-preference-auto-tags b {
+  border: 1px solid rgba(89, 71, 111, 0.14);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #59476f;
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .book-reading-impression {
   display: grid;
   gap: 7px;
@@ -6919,6 +7038,10 @@ pre {
   }
 
   .book-preview-info dl {
+    grid-template-columns: 1fr;
+  }
+
+  .book-preference-fields {
     grid-template-columns: 1fr;
   }
 

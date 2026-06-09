@@ -47,8 +47,11 @@ class PrivateCompanionPageApi:
             ("/bookshelf/image_data", self.get_bookshelf_image_data, ["GET"], "Private Companion Page bookshelf image data"),
             ("/bookshelf/delete", self.delete_bookshelf_item, ["POST"], "Private Companion Page delete bookshelf item"),
             ("/bookshelf/rate", self.rate_bookshelf_item, ["POST"], "Private Companion Page rate bookshelf item"),
+            ("/bookshelf/tags", self.update_bookshelf_item_tags, ["POST"], "Private Companion Page update bookshelf item tags"),
+            ("/bookshelf/comments/update", self.update_bookshelf_item_comments, ["POST"], "Private Companion Page update bookshelf item comments"),
             ("/worldbook/import", self.import_worldbook, ["POST"], "Private Companion Page import worldbook"),
             ("/worldbook/member/update", self.update_worldbook_member, ["POST"], "Private Companion Page update worldbook member"),
+            ("/worldbook/observations/clear", self.clear_worldbook_pending_observations, ["POST"], "Private Companion Page clear worldbook pending observations"),
             ("/worldbook/group/update", self.update_worldbook_group, ["POST"], "Private Companion Page update worldbook group"),
             ("/skill/update", self.update_skill_growth, ["POST"], "Private Companion Page update skill growth"),
             ("/external_ability/update", self.update_external_ability, ["POST"], "Private Companion Page update external proactive ability"),
@@ -247,19 +250,9 @@ class PrivateCompanionPageApi:
                     enabled = bool(payload.get("enabled"))
                     user["enabled"] = enabled
                     user["manual_enabled"] = enabled
+                    user["manual_disabled"] = not enabled
                     if not enabled:
-                        for key in (
-                            "next_proactive_at",
-                            "planned_proactive_reason",
-                            "planned_proactive_action",
-                            "planned_proactive_motive",
-                            "planned_proactive_topic",
-                            "planned_proactive_source",
-                            "planned_event_chain",
-                            "planned_opener_mode",
-                            "planned_followup_kind",
-                        ):
-                            user[key] = [] if key == "planned_event_chain" else "" if key != "next_proactive_at" else 0
+                        self.plugin._clear_pending_proactive_plan(user)
                 if "nickname" in payload:
                     user["nickname"] = self._single_line(payload.get("nickname"), 24)
                 if "style" in payload:
@@ -274,18 +267,7 @@ class PrivateCompanionPageApi:
                     user["photo_generated_day"] = ""
                     user["screen_peek_today"] = 0
                 if payload.get("clear_schedule"):
-                    for key in (
-                        "next_proactive_at",
-                        "planned_proactive_reason",
-                        "planned_proactive_action",
-                        "planned_proactive_motive",
-                        "planned_proactive_topic",
-                        "planned_proactive_source",
-                        "planned_event_chain",
-                        "planned_opener_mode",
-                        "planned_followup_kind",
-                    ):
-                        user[key] = [] if key == "planned_event_chain" else "" if key != "next_proactive_at" else 0
+                    self.plugin._clear_pending_proactive_plan(user)
                 if payload.get("clear_learning"):
                     for key, empty in (
                         ("companion_memory", {}),
@@ -836,6 +818,228 @@ class PrivateCompanionPageApi:
             logger.error(f"[PrivateCompanionPage] 保存夹层藏书评分失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    def _normalize_bookshelf_tag_list(self, value: Any, *, limit: int = 8) -> list[str]:
+        raw_items: list[Any]
+        if isinstance(value, str):
+            raw_items = re.split(r"[,，、\s\n\r]+", value)
+        elif isinstance(value, list):
+            raw_items = value
+        else:
+            raw_items = []
+        tags: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_items:
+            tag = self._single_line(raw, 24)
+            if not tag:
+                continue
+            normalized = tag.casefold()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            tags.append(tag)
+            if len(tags) >= limit:
+                break
+        return tags
+
+    async def update_bookshelf_item_tags(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        access_token = self._bookshelf_request_token(payload)
+        if not self._bookshelf_access_token_valid(access_token):
+            return self._error(self._bookshelf_access_error()["error"])
+        album_id = self._single_line(payload.get("album_id") or payload.get("id"), 32)
+        liked_tags = self._normalize_bookshelf_tag_list(payload.get("liked_tags"))
+        disliked_tags_raw = self._normalize_bookshelf_tag_list(payload.get("disliked_tags"))
+        liked_seen = {tag.casefold() for tag in liked_tags}
+        disliked_tags = [tag for tag in disliked_tags_raw if tag.casefold() not in liked_seen]
+        if not album_id:
+            return self._error("缺少 album_id")
+        try:
+            async with self.plugin._data_lock:
+                items = self.plugin.data.setdefault("bookshelf_items", [])
+                if not isinstance(items, list):
+                    items = []
+                    self.plugin.data["bookshelf_items"] = items
+                target: dict[str, Any] | None = None
+                for item in items:
+                    if not isinstance(item, dict) or item.get("type") != "jm_album":
+                        continue
+                    if str(item.get("album_id") or item.get("id") or "") == album_id:
+                        item["user_liked_tags"] = liked_tags
+                        item["user_disliked_tags"] = disliked_tags
+                        item["user_tags_updated_ts"] = time.time()
+                        target = item
+                        break
+                state = self.plugin.data.setdefault("jm_cosmos_integration", {})
+                if isinstance(state, dict):
+                    last_album = state.get("last_album")
+                    if isinstance(last_album, dict) and str(last_album.get("id") or last_album.get("album_id") or "") == album_id:
+                        last_album["user_liked_tags"] = liked_tags
+                        last_album["user_disliked_tags"] = disliked_tags
+                        last_album["user_tags_updated_ts"] = time.time()
+                        if target is None:
+                            target = last_album
+                if target is None:
+                    return self._error("没有找到这本夹层藏书")
+                updater = getattr(self.plugin, "_update_private_reading_preference_profile", None)
+                if callable(updater):
+                    updater(target)
+                self.plugin._save_data_sync()
+                data = deepcopy(self.plugin.data)
+            return self._ok({"bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 保存夹层藏书标签失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    def _resolve_bookshelf_data_file(self, value: Any) -> Path | None:
+        path_text = self._single_line(value, 500)
+        if not path_text:
+            return None
+        data_root = Path(str(getattr(self.plugin, "data_dir", ""))).resolve()
+        try:
+            raw_path = Path(path_text)
+            path = raw_path.resolve() if raw_path.is_absolute() else (data_root / raw_path).resolve()
+            path.relative_to(data_root)
+            if path.exists() and path.is_file():
+                return path
+        except Exception:
+            return None
+        return None
+
+    def _jm_album_comment_sample(self, item: dict[str, Any]) -> tuple[Path | None, list[Path], list[int]]:
+        cover_path = self._resolve_bookshelf_data_file(item.get("cover_path"))
+        pages = item.get("pages") if isinstance(item.get("pages"), list) else []
+        page_by_index: dict[int, Path] = {}
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            page_index = self._int(page.get("index"))
+            page_path = self._resolve_bookshelf_data_file(page.get("path"))
+            if page_index > 0 and page_path:
+                page_by_index[page_index] = page_path
+        sampled_pages = [
+            self._int(page)
+            for page in (item.get("sampled_pages") if isinstance(item.get("sampled_pages"), list) else [])
+            if self._int(page) > 0 and self._int(page) in page_by_index
+        ][:5]
+        if not sampled_pages:
+            sampled_pages = sorted(page_by_index)[:5]
+        return cover_path, [page_by_index[page] for page in sampled_pages if page in page_by_index], sampled_pages
+
+    async def update_bookshelf_item_comments(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        access_token = self._bookshelf_request_token(payload)
+        if not self._bookshelf_access_token_valid(access_token):
+            return self._error(self._bookshelf_access_error()["error"])
+        album_id = self._single_line(payload.get("album_id") or payload.get("id"), 32)
+        if not album_id:
+            return self._error("缺少 album_id")
+        try:
+            async with self.plugin._data_lock:
+                items = self.plugin.data.get("bookshelf_items") if isinstance(self.plugin.data.get("bookshelf_items"), list) else []
+                target = next(
+                    (
+                        item
+                        for item in items
+                        if isinstance(item, dict)
+                        and item.get("type") == "jm_album"
+                        and str(item.get("album_id") or item.get("id") or "") == album_id
+                    ),
+                    None,
+                )
+                if target is None:
+                    state = self.plugin.data.get("jm_cosmos_integration") if isinstance(self.plugin.data.get("jm_cosmos_integration"), dict) else {}
+                    last_album = state.get("last_album") if isinstance(state.get("last_album"), dict) else None
+                    if last_album and str(last_album.get("id") or last_album.get("album_id") or "") == album_id:
+                        target = last_album
+                if target is None:
+                    return self._error("没有找到这本夹层藏书")
+                target_snapshot = deepcopy(target)
+            cover_path, page_paths, sampled_pages = self._jm_album_comment_sample(target_snapshot)
+            if not page_paths:
+                return self._error("没有找到可用于重读的本地图片")
+            vision = getattr(self.plugin, "_call_jm_cosmos_vision", None)
+            if not callable(vision):
+                return self._error("当前插件版本不支持让 Bot 重读")
+            vision_result = await vision(cover_path, target_snapshot, page_paths=page_paths, sampled_pages=sampled_pages)
+            if not isinstance(vision_result, dict) or not (vision_result.get("impression") or vision_result.get("page_comments")):
+                return self._error("这次没有生成新的读后感或批注")
+            updates: dict[str, Any] = {
+                "comments_updated_ts": time.time(),
+                "sampled_pages": sampled_pages,
+            }
+            impression = self._single_line(vision_result.get("impression"), 600)
+            if impression:
+                updates["impression"] = impression
+                updates["reading_impression"] = impression
+            rating = self._int(vision_result.get("rating"))
+            if 1 <= rating <= 10:
+                updates["rating"] = rating
+            rating_reason = self._single_line(vision_result.get("rating_reason"), 160)
+            if rating_reason:
+                updates["rating_reason"] = rating_reason
+            preference_tags = self._normalize_bookshelf_tag_list(vision_result.get("preference_tags"))
+            if preference_tags:
+                updates["preference_tags"] = preference_tags
+            page_comments = vision_result.get("page_comments") if isinstance(vision_result.get("page_comments"), list) else []
+            normalized_comments: list[dict[str, Any]] = []
+            for comment in page_comments[:8]:
+                if not isinstance(comment, dict):
+                    continue
+                page_no = self._int(comment.get("page"))
+                comment_text = self._single_line(comment.get("comment"), 80)
+                if page_no > 0 and comment_text:
+                    normalized_comments.append({"page": page_no, "comment": comment_text})
+            if normalized_comments:
+                existing_comments = target_snapshot.get("page_comments") if isinstance(target_snapshot.get("page_comments"), list) else []
+                merged_by_page: dict[int, dict[str, Any]] = {}
+                for comment in existing_comments:
+                    if not isinstance(comment, dict):
+                        continue
+                    page_no = self._int(comment.get("page"))
+                    comment_text = self._single_line(comment.get("comment"), 80)
+                    if page_no > 0 and comment_text:
+                        merged_by_page[page_no] = {**comment, "page": page_no, "comment": comment_text}
+                for comment in normalized_comments:
+                    page_no = self._int(comment.get("page"))
+                    comment_text = self._single_line(comment.get("comment"), 80)
+                    if page_no > 0 and comment_text:
+                        merged_by_page[page_no] = {"page": page_no, "comment": comment_text}
+                updates["page_comments"] = [
+                    merged_by_page[page]
+                    for page in sorted(merged_by_page)
+                ][:12]
+                updates["page_comments_previous"] = existing_comments[:12]
+            async with self.plugin._data_lock:
+                items = self.plugin.data.get("bookshelf_items") if isinstance(self.plugin.data.get("bookshelf_items"), list) else []
+                written = False
+                for item in items:
+                    if not isinstance(item, dict) or item.get("type") != "jm_album":
+                        continue
+                    if str(item.get("album_id") or item.get("id") or "") == album_id:
+                        item.update(updates)
+                        target = item
+                        written = True
+                        break
+                state = self.plugin.data.setdefault("jm_cosmos_integration", {})
+                if isinstance(state, dict):
+                    last_album = state.get("last_album")
+                    if isinstance(last_album, dict) and str(last_album.get("id") or last_album.get("album_id") or "") == album_id:
+                        last_album.update(updates)
+                        if not written:
+                            target = last_album
+                            written = True
+                if not written:
+                    return self._error("没有找到可写回的夹层藏书")
+                updater = getattr(self.plugin, "_update_private_reading_preference_profile", None)
+                if callable(updater):
+                    updater(target)
+                self.plugin._save_data_sync()
+                data = deepcopy(self.plugin.data)
+            return self._ok({"message": "Bot 已重新读过并更新读后感", "bookshelf": await self._bookshelf_summary(data, unlocked=True, access_token=access_token)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 更新夹层藏书批注失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
     async def import_worldbook(self) -> dict[str, Any]:
         try:
             async with self.plugin._data_lock:
@@ -952,6 +1156,40 @@ class PrivateCompanionPageApi:
             return self._ok({"message": message, "worldbook": self._worldbook_summary(data)})
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新关系节点失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def clear_worldbook_pending_observations(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        user_id = self._single_line(payload.get("user_id"), 40)
+        try:
+            async with self.plugin._data_lock:
+                profiles = self.plugin.data.setdefault("worldbook_member_profiles", {})
+                if not isinstance(profiles, dict):
+                    profiles = {}
+                    self.plugin.data["worldbook_member_profiles"] = profiles
+                cleared = 0
+                touched = 0
+                for profile_id, profile in profiles.items():
+                    if user_id and str(profile_id) != user_id:
+                        continue
+                    if not isinstance(profile, dict):
+                        continue
+                    pending = profile.get("pending_observations")
+                    if not isinstance(pending, list) or not pending:
+                        continue
+                    cleared += len([item for item in pending if isinstance(item, dict)])
+                    profile["pending_observations"] = []
+                    profile["pending_observations_cleared_at"] = time.time()
+                    touched += 1
+                if user_id and not touched:
+                    return self._error("没有找到可清理的待确认观察")
+                if touched:
+                    self.plugin._save_data_sync()
+                data = deepcopy(self.plugin.data)
+            message = f"已清理 {cleared} 条待确认观察" if cleared else "没有待确认观察需要清理"
+            return self._ok({"message": message, "cleared": cleared, "worldbook": self._worldbook_summary(data)})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 清理待确认观察失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def update_worldbook_group(self) -> dict[str, Any]:
@@ -2659,6 +2897,10 @@ class PrivateCompanionPageApi:
             return self._normalize_id_list(value)
         if key == "worldbook_config_paths":
             return str(value or "").strip()[:1000]
+        if key in {"news_sources", "ai_daily_sources"}:
+            return self._normalize_multiline_source_config(value, limit=4000)
+        if key in {"news_hot_sources", "web_exploration_interests", "private_reading_default_keywords", "private_reading_blocked_tags"}:
+            return str(value or "").strip()[:1200]
         if key in {"group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_interest_keywords"}:
             return str(value or "").strip()[:1200]
         if key == "private_image_self_recognition_hint":
@@ -2962,6 +3204,29 @@ class PrivateCompanionPageApi:
             return bool(value)
         return self._single_line(value, 240)
 
+    @staticmethod
+    def _normalize_multiline_source_config(value: Any, *, limit: int = 4000) -> str:
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if text and "\n" not in text:
+            markers = list(re.finditer(r"(?:^|\s+)(#?\s*[^|\n]+?)\|(?=(?:https?://|bilibili:|bvid:))", text, flags=re.I))
+            if len(markers) > 1:
+                recovered: list[str] = []
+                for index, match in enumerate(markers):
+                    start = match.end()
+                    end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
+                    name = str(match.group(1) or "").strip()
+                    target = text[start:end].strip()
+                    if name and target:
+                        recovered.append(f"{name}|{target}")
+                if recovered:
+                    text = "\n".join(recovered)
+        lines: list[str] = []
+        for raw_line in text.split("\n"):
+            line = raw_line.strip()
+            if line:
+                lines.append(line)
+        return "\n".join(lines)[:limit].strip()
+
     def _worldbook_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         profiles = data.get("worldbook_member_profiles") if isinstance(data.get("worldbook_member_profiles"), dict) else {}
         groups = data.get("worldbook_group_profiles") if isinstance(data.get("worldbook_group_profiles"), dict) else {}
@@ -3031,6 +3296,7 @@ class PrivateCompanionPageApi:
             "entry_count": len(entries),
             "member_count": len(profile_items),
             "enabled_member_count": sum(1 for item in profile_items if item.get("enabled", True)),
+            "pending_observation_total": sum(self._clamp_int(item.get("pending_observation_count"), 0, 0, 999) for item in profile_items),
             "group_count": len(group_items),
             "last_import": self.plugin._format_timestamp_elapsed(state.get("last_import_at", 0)),
             "source_files": state.get("source_files") if isinstance(state.get("source_files"), list) else [],
@@ -3518,6 +3784,9 @@ class PrivateCompanionPageApi:
                     "user_rating_reason": last_album.get("user_rating_reason"),
                     "user_rated_ts": last_album.get("user_rated_ts"),
                     "preference_tags": last_album.get("preference_tags") if isinstance(last_album.get("preference_tags"), list) else [],
+                    "user_liked_tags": last_album.get("user_liked_tags") if isinstance(last_album.get("user_liked_tags"), list) else [],
+                    "user_disliked_tags": last_album.get("user_disliked_tags") if isinstance(last_album.get("user_disliked_tags"), list) else [],
+                    "user_tags_updated_ts": last_album.get("user_tags_updated_ts"),
                     "page_comments": last_album.get("page_comments") if isinstance(last_album.get("page_comments"), list) else [],
                     "image_count": last_album.get("image_count"),
                     "pages": last_album.get("pages") if isinstance(last_album.get("pages"), list) else [],
@@ -3735,8 +4004,20 @@ class PrivateCompanionPageApi:
                             for tag in (item.get("preference_tags") if isinstance(item.get("preference_tags"), list) else [])[:8]
                             if self._single_line(tag, 24)
                         ],
+                        "user_liked_tags": [
+                            self._single_line(tag, 24)
+                            for tag in (item.get("user_liked_tags") if isinstance(item.get("user_liked_tags"), list) else [])[:8]
+                            if self._single_line(tag, 24)
+                        ],
+                        "user_disliked_tags": [
+                            self._single_line(tag, 24)
+                            for tag in (item.get("user_disliked_tags") if isinstance(item.get("user_disliked_tags"), list) else [])[:8]
+                            if self._single_line(tag, 24)
+                        ],
+                        "user_tags_updated": bool(item.get("user_tags_updated_ts")),
                         "cover_src": cover_src,
                         "pages": page_items,
+                        "page_comment_count": len(page_comment_map),
                         "page_comments": [
                             {"page": page, "comment": comment}
                             for page, comment in sorted(page_comment_map.items())
@@ -3759,6 +4040,7 @@ class PrivateCompanionPageApi:
 
     def _proactive_candidate_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         raw = data.get("proactive_candidate_pool") if isinstance(data.get("proactive_candidate_pool"), list) else []
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
         now = time.time()
         buckets: list[dict[str, Any]] = []
         counts: dict[str, int] = {}
@@ -3768,8 +4050,18 @@ class PrivateCompanionPageApi:
             if not isinstance(item, dict):
                 continue
             repeat_count = max(1, self._int(item.get("repeat_count")))
-            total_attempts += repeat_count
             status = self._single_line(item.get("status"), 24) or "unknown"
+            user_id = self._single_line(item.get("user_id"), 32)
+            user = users.get(user_id) if isinstance(users, dict) else None
+            if status != "sent" and not bool(
+                isinstance(user, dict)
+                and getattr(self.plugin, "_user_enabled_for_proactive", lambda uid, profile: bool(profile and profile.get("enabled", True)))(
+                    user_id,
+                    user,
+                )
+            ):
+                continue
+            total_attempts += repeat_count
             source = self._single_line(item.get("source"), 40) or "unknown"
             display_source = "bookshelf_reading" if source == "jm_cosmos" else source
             counts[status] = counts.get(status, 0) + repeat_count
@@ -3789,16 +4081,11 @@ class PrivateCompanionPageApi:
             topic = self._single_line(item.get("topic"), 100)
             motive = self._single_line(item.get("motive"), 180)
             note = self._single_line(item.get("note"), 160)
-            user_id = self._single_line(item.get("user_id"), 32)
             merged = None
             for existing in reversed(buckets):
                 if existing.get("status") != status:
                     continue
                 if existing.get("user_id") != user_id:
-                    continue
-                if existing.get("source") != display_source or existing.get("reason") != reason:
-                    continue
-                if existing.get("action") != action or existing.get("note") != note:
                     continue
                 old_signature = str(existing.get("_signature") or "")
                 if signature and old_signature:
@@ -3842,6 +4129,8 @@ class PrivateCompanionPageApi:
                 merged["topic"] = topic
             if motive:
                 merged["motive"] = motive
+            if note and note != merged.get("note"):
+                merged["note"] = "多来源合并"
             merged["is_due"] = bool(merged.get("scheduled_ts") and self._float(merged.get("scheduled_ts")) <= now)
         items: list[dict[str, Any]] = []
         for item in buckets:

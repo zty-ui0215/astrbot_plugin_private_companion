@@ -254,15 +254,25 @@ class ProactiveMixin:
                 ids.append(user_id)
         return ids
 
+    def _user_enabled_for_proactive(self, user_id: str, user: dict[str, Any] | None = None) -> bool:
+        if not isinstance(user, dict):
+            return False
+        if user.get("enabled") is False or user.get("manual_disabled"):
+            return False
+        return self._is_target_private_user(user_id, user)
+
     def _sync_configured_targets(self):
         for user_id in self._configured_target_ids():
             user = self._get_user(user_id)
+            if user.get("manual_disabled"):
+                self._clear_pending_proactive_plan(user)
+                continue
             user["enabled"] = True
             user["target_user"] = True
             user.setdefault("nickname", self.default_nickname)
             if not user.get("umo"):
                 user["umo"] = f"{self.target_platform}:FriendMessage:{user_id}"
-            if _safe_float(user.get("next_proactive_at"), 0) <= 0:
+            if self._user_enabled_for_proactive(user_id, user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:
                 self._schedule_next_proactive(user, now=_now_ts())
 
     def _prime_enabled_user_schedules(self) -> bool:
@@ -275,9 +285,10 @@ class ProactiveMixin:
             if not isinstance(raw_user, dict):
                 continue
             raw_user_id = str(raw_user.get("user_id") or "")
-            if not self._is_target_private_user(raw_user_id, raw_user):
+            if not self._user_enabled_for_proactive(raw_user_id, raw_user):
                 raw_user["enabled"] = False
-                raw_user["next_proactive_at"] = 0
+                self._clear_pending_proactive_plan(raw_user)
+                changed = True
                 continue
             if not raw_user.get("umo"):
                 continue
@@ -414,6 +425,10 @@ class ProactiveMixin:
         now: float | None = None,
         delay_hours: tuple[float, float] | None = None,
     ):
+        user_id = str(user.get("user_id") or user.get("id") or "")
+        if not self._user_enabled_for_proactive(user_id, user):
+            self._clear_pending_proactive_plan(user)
+            return
         now = now or _now_ts()
         planned_event = self._pick_best_planned_event(user, now)
         reason = (
@@ -604,6 +619,9 @@ class ProactiveMixin:
         user["planned_event_chain"] = []
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
+        user["planned_proactive_quota_exempt"] = False
+        user["planned_candidate_id"] = ""
+        self._clear_planned_proactive_trigger(user)
 
     async def _scheduler_loop(self):
         while not self._stop_event.is_set():
