@@ -827,6 +827,7 @@ class NewsExplorationMixin:
 
     async def _fetch_bilibili_news_search_fallback(self, source: dict[str, str]) -> list[dict[str, Any]]:
         source_name = _single_line(source.get("name"), 40) or "B站 AI早报"
+        mid = re.sub(r"\D+", "", str(source.get("mid") or ""))
         now_dt = datetime.now()
         today = now_dt.strftime("%Y-%m-%d")
         date_tokens = self._ai_daily_date_tokens(now_dt)

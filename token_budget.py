@@ -367,6 +367,66 @@ class TokenBudgetMixin:
             except Exception:
                 pass
 
+    def _default_chat_provider_id(self, umo: str = "") -> str:
+        """Resolve AstrBot's current chat provider for SDK versions that require an explicit id."""
+        context = getattr(self, "context", None)
+        candidates: list[Any] = []
+        data = getattr(self, "data", {})
+        users = data.get("users") if isinstance(data, dict) else None
+        if umo:
+            candidates.append(umo)
+        if isinstance(users, dict):
+            candidates.extend(
+                str(user.get("umo") or "").strip()
+                for user in users.values()
+                if isinstance(user, dict) and str(user.get("umo") or "").strip()
+            )
+        candidates.append("")
+        get_using = getattr(context, "get_using_provider", None)
+        if callable(get_using):
+            seen: set[str] = set()
+            for raw_umo in candidates:
+                candidate_umo = str(raw_umo or "").strip()
+                if candidate_umo in seen:
+                    continue
+                seen.add(candidate_umo)
+                provider = None
+                try:
+                    provider = get_using(umo=candidate_umo) if candidate_umo else get_using()
+                except TypeError:
+                    try:
+                        provider = get_using(candidate_umo) if candidate_umo else get_using(None)
+                    except Exception:
+                        provider = None
+                except Exception:
+                    provider = None
+                provider_id = self._provider_id_from_instance(provider)
+                if provider_id:
+                    return provider_id
+        return ""
+
+    @staticmethod
+    def _provider_id_from_instance(provider: Any) -> str:
+        if provider is None:
+            return ""
+        try:
+            meta = provider.meta()
+            value = getattr(meta, "id", "") or (meta.get("id") if isinstance(meta, dict) else "")
+            if value:
+                return _single_line(value, 160)
+        except Exception:
+            pass
+        config = getattr(provider, "provider_config", None) or getattr(provider, "config", None) or {}
+        if isinstance(config, dict):
+            for key in ("id", "provider_id"):
+                value = _single_line(config.get(key), 160)
+                if value:
+                    return value
+        return _single_line(getattr(provider, "provider_id", ""), 160)
+
+    def _resolve_chat_provider_id(self, provider_id: str | None = None, *, umo: str = "") -> str:
+        return str(provider_id or self.llm_provider_id or self._default_chat_provider_id(umo) or "").strip()
+
     async def _llm_call(
         self,
         prompt: str,
@@ -375,7 +435,7 @@ class TokenBudgetMixin:
         task: str | None = None,
     ) -> str | None:
         start = time.time()
-        selected_provider = str(provider_id or self.llm_provider_id or "").strip()
+        selected_provider = self._resolve_chat_provider_id(provider_id)
         task_key = _single_line(task, 40) or self._classify_llm_prompt(prompt)
         budget_exempt = self._is_llm_budget_exempt_task(task_key)
         if not budget_exempt and self._daily_token_soft_limit_should_defer(task_key):
@@ -390,9 +450,9 @@ class TokenBudgetMixin:
             self._record_llm_budget_skip(provider_id=selected_provider, task=task_key, prompt=prompt)
             return None
         try:
-            kwargs = {"prompt": prompt}
-            if selected_provider:
-                kwargs["chat_provider_id"] = selected_provider
+            if not selected_provider:
+                raise RuntimeError("未找到可用的 AstrBot 默认模型 Provider")
+            kwargs = {"prompt": prompt, "chat_provider_id": selected_provider}
             resp = await self.context.llm_generate(**kwargs)
             if resp and resp.completion_text:
                 completion = resp.completion_text.strip()

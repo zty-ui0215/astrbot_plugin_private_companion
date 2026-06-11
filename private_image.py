@@ -538,7 +538,10 @@ class PrivateImageMixin:
         if astrbot_provider_id:
             return astrbot_provider_id, "astrbot_image_caption", prompt
         fallback_provider_id = self._task_provider(self.jm_cosmos_vision_provider_id, self.narration_provider_id)
-        return fallback_provider_id, "plugin_vision", prompt
+        if fallback_provider_id:
+            return fallback_provider_id, "plugin_vision", prompt
+        default_provider_id = self._default_chat_provider_id(umo)
+        return default_provider_id, "astrbot_default", prompt
 
     def _private_image_provider_by_id(self, provider_id: str) -> Any:
         provider_id = _single_line(provider_id, 160)
@@ -559,6 +562,7 @@ class PrivateImageMixin:
             (_single_line(provider_settings.get("default_image_caption_provider_id"), 160), "astrbot_image_caption", prompt),
             (self._task_provider(self.jm_cosmos_vision_provider_id, self.narration_provider_id), "plugin_vision", prompt),
             (self._task_provider(self.llm_provider_id), "plugin_main", prompt),
+            (self._default_chat_provider_id(umo), "astrbot_default", prompt),
         ]
 
     def _select_private_image_visual_provider(self, umo: str = "") -> tuple[str, str, str, Any]:

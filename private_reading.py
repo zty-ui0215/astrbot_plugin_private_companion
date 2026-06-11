@@ -575,13 +575,22 @@ class PrivateReadingMixin:
                 break
         if not image_paths:
             return {}
-        provider_id = self._task_provider(self.jm_cosmos_vision_provider_id, self.narration_provider_id)
-        if not provider_id:
-            return {}
         try:
             getter = getattr(self.context, "get_provider_by_id", None)
-            provider = getter(provider_id) if callable(getter) else None
-            if provider is None:
+            provider_id = ""
+            provider = None
+            seen_providers: set[str] = set()
+            for candidate_id, _provider_source, _prompt in self._private_image_visual_provider_candidates():
+                candidate_id = _single_line(candidate_id, 160)
+                if not candidate_id or candidate_id in seen_providers:
+                    continue
+                seen_providers.add(candidate_id)
+                candidate = getter(candidate_id) if callable(getter) else None
+                if candidate is not None and self._provider_supports_image(candidate):
+                    provider_id = candidate_id
+                    provider = candidate
+                    break
+            if not provider_id or provider is None:
                 return {}
             image_urls = []
             for path in image_paths:
