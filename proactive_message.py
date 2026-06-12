@@ -2553,6 +2553,10 @@ class ProactiveMessageMixin:
         return [component], str(audio_path)
 
     def _get_tts_prompt_text(self, target: str) -> str:
+        if getattr(self, "enable_tts_enhancement", False):
+            builder = getattr(self, "_build_tts_rule_prompt", None)
+            if callable(builder):
+                return str(builder("generic") or "").strip()
         try:
             config = self.context.get_config(target) if target else self.context.get_config()
         except Exception:
@@ -2640,21 +2644,21 @@ class ProactiveMessageMixin:
         provider_settings: dict[str, Any],
         config: dict[str, Any],
     ) -> tuple[list[Any], str]:
-        plugin = self._get_tts_modify_plugin(config)
-        if plugin is None:
-            return [], "未找到 tts_modify 插件"
         try:
-            components = await plugin._process_tts_tags(
+            processor = getattr(self, "_process_tts_tags", None)
+            if not callable(processor):
+                return [], "TTS强化未接入"
+            components = await processor(
                 spoken_text,
                 tts_provider,
                 provider_settings,
                 config,
             )
         except Exception as e:
-            logger.warning(f"[PrivateCompanion] tts_modify 处理主动语音失败: {e}")
+            logger.warning(f"[PrivateCompanion] TTS强化处理主动语音失败: {e}")
             return [], str(e)
         audio_note = self._extract_record_note(components)
-        return components or [], audio_note or "已通过 tts_modify 生成语音"
+        return components or [], audio_note or "已通过 TTS强化生成语音"
 
     def _get_tts_modify_plugin(self, config: dict[str, Any]) -> Any:
         for module_name in ("astrbot_plugin_tts_modify.main", "data.plugins.astrbot_plugin_tts_modify.main"):

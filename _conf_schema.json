@@ -307,16 +307,18 @@
   "PLUGIN_VISION_PROVIDER_ID": {
     "description": "插件识图模型（私聊/合并消息/识屏）",
     "type": "string",
-    "hint": "用于插件自己的视觉理解任务：私聊单图/表情包转述、引用图片、合并消息图片、识屏、素材封面/抽样页理解等。建议填写一个确认可用的视觉模型。留空时会先尝试 AstrBot 本体图片转述模型，再回退到工具结果转述模型或主模型。",
+    "hint": "用于插件自己的通用视觉理解任务：私聊单图/表情包转述、引用图片、合并消息图片和识屏。夹层阅读不使用这里；它有单独的夹层阅读视觉模型。留空时会先尝试 AstrBot 本体图片转述模型，再回退到工具结果转述模型或主模型。",
     "default": "",
     "_special": "select_provider"
   },
   "PRIVATE_READING_VISION_PROVIDER_ID": {
-    "description": "旧版备选识图模型（兼容项）",
+    "description": "夹层阅读视觉模型",
     "type": "string",
-    "hint": "兼容旧配置名。新配置请优先使用“插件识图模型（PLUGIN_VISION_PROVIDER_ID）”；保存新字段时会同步到这里，避免旧版本或旧路径读不到。",
+    "hint": "仅用于夹层阅读的封面/抽样页理解、页边批注、读后感、评分和阅读偏好标签。必须填写支持图片输入的视觉模型；留空或模型不可用时不会回退到通用识图模型，也不会生成批注/读后感。",
     "default": "",
-    "invisible": true,
+    "condition": {
+      "enable_private_reading_integration": true
+    },
     "_special": "select_provider"
   },
   "_section_02_private": {
@@ -419,6 +421,25 @@
     "type": "bool",
     "hint": "开启后，私聊图片转述会额外判断图片、表情包、聊天截图里是否疑似出现当前角色自己、头像、名字或二创形象。图片是否等待用户补充说明由“消息收口防抖”的图片收口秒数控制。",
     "default": true
+  },
+  "enable_private_image_gif_enhancement": {
+    "description": "启用 GIF 动图强化",
+    "type": "bool",
+    "hint": "图片转述增强的可选子功能。开启后，动态 GIF 会抽取代表帧供视觉模型按时间顺序理解动作、表情变化和文字变化；关闭后按普通图片/GIF 原图路径处理。",
+    "default": true,
+    "condition": "enable_private_image_self_recognition"
+  },
+  "private_image_gif_max_frames": {
+    "description": "GIF 表情包抽帧数",
+    "type": "int",
+    "hint": "动态 GIF 进入视觉转述时最多抽取多少个代表帧。帧数越多越能理解动作变化，但会增加识图耗时和视觉模型输入量。默认 4。",
+    "slider": {
+      "min": 1,
+      "max": 8,
+      "step": 1
+    },
+    "default": 4,
+    "condition": "enable_private_image_gif_enhancement"
   },
   "private_image_self_recognition_hint": {
     "description": "图片转述增强：识别当前角色自己的线索",
@@ -1337,9 +1358,9 @@
     "default": true
   },
   "QZONE_COOKIE": {
-    "description": "QQ 空间 Cookie（可选）",
-    "type": "string",
-    "hint": "可选手动覆盖项。填入浏览器 QQ 空间复制的 Cookie 后，本插件会优先使用它发布/读取空间；留空则继续使用 OneBot 自动获取的 Cookie。Cookie 属于敏感信息，不要发给他人。",
+    "description": "QQ 空间手动 Cookie",
+    "type": "text",
+    "hint": "可填写浏览器 QQ 空间 Cookie，作为查看、评论、点赞和发布说说的优先凭据。留空时仍使用 OneBot 自动 Cookie。需包含 uin/p_uin 与 p_skey 或 skey。",
     "default": "",
     "condition": {
       "enable_qzone_integration": true
@@ -2387,6 +2408,13 @@
     "hint": "用于描述角色如何称呼用户、用户身份、彼此关系和相处方式。不会作为图片自我识别的角色外观线索。",
     "default": ""
   },
+  "roleplay_knowledge_source_ids": {
+    "description": "角色设定：AstrBot 知识库选择",
+    "type": "list",
+    "hint": "由拓展页“角色设定”直接选择可用 AstrBot 知识库/文档。用于增强日程模拟与世界观适配，不需要手动填写。",
+    "default": [],
+    "invisible": true
+  },
   "include_schedule_in_messages": {
     "description": "允许主动消息偶尔带上当前日程背景",
     "type": "bool",
@@ -2838,6 +2866,142 @@
     "type": "bool",
     "hint": "开启后，Bot 可能在深夜、晚间、状态分享或想更贴近一点时主动留一小句语音。需要当前会话已配置可用的 TTS provider。",
     "default": false
+  },
+  "enable_tts_enhancement": {
+    "description": "TTS强化",
+    "type": "bool",
+    "hint": "支持中文聊天文本搭配外语语音块：标签外保留中文显示，<tts> 内按配置语种朗读。统一处理生成路径、标签规范化、语种控制、发送前朗读文本清洗和主用户触发。需要当前会话已配置可用的 TTS provider。",
+    "default": false
+  },
+  "tts_generation_mode": {
+    "description": "TTS生成路径",
+    "type": "string",
+    "default": "hybrid",
+    "options": ["hybrid", "direct", "convert"],
+    "labels": ["hybrid：标签优先+自动转换", "direct：只让主模型写标签", "convert：统一后处理转换"],
+    "hint": "hybrid：有 <tts> 就直接处理，没有时按自动语音规则转换。direct：只向主模型注入 <tts> 规则，不做后处理转换。convert：主模型普通回复后统一交给转换模型生成 TTS 格式。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "tts_voice_language": {
+    "description": "TTS语音语种",
+    "type": "string",
+    "default": "ja",
+    "options": ["ja", "zh", "en"],
+    "labels": ["日语", "中文", "英语"],
+    "hint": "控制 <tts> 标签内真正送入 TTS 的语种。可让标签外保留中文显示文本，标签内使用日语或英语朗读；日语模式会尽量避免把明显非日语文本直接送进 TTS。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "tts_conversion_provider_id": {
+    "description": "TTS转换模型Provider ID",
+    "type": "string",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "用于 convert 路径、hybrid 自动语音和语种修正。留空时会尽量用保守兜底，不影响显式 <tts> 标签解析。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "tts_extra_prompt": {
+    "description": "TTS补充规则",
+    "type": "text",
+    "default": "",
+    "hint": "只填写本人格或声线的额外要求。基础 <tts> 格式、语种和 provider 情绪标签适配规则会自动生成，留空最稳。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "auto_voice_enabled": {
+    "description": "自动语音转换",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，hybrid 路径可按概率把纯文本短回复转换为语音；convert 路径不依赖此开关。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "auto_voice_full_conversion_enabled": {
+    "description": "自动语音完整转换",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后，自动语音尽量把整条回复完整转换为一段语音，而不是混合保留部分文本。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "auto_voice_probability": {
+    "description": "自动语音触发概率(%)",
+    "type": "int",
+    "default": 20,
+    "min": 0,
+    "max": 100,
+    "hint": "普通纯文本回复参与自动语音转换的概率。0 表示不触发，100 表示符合条件时总是触发。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "auto_voice_max_chars": {
+    "description": "自动语音最大字数",
+    "type": "int",
+    "default": 50,
+    "min": 0,
+    "hint": "普通回复不超过该字数才参与自动语音。填 0 表示不限制。主用户单独概率命中时不受此限制。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "auto_voice_cooldown_seconds": {
+    "description": "自动语音冷却秒数",
+    "type": "int",
+    "default": 120,
+    "min": 0,
+    "hint": "同一会话成功触发自动语音后，需要等待多少秒才能再次触发。主用户单独概率命中时不受普通冷却限制。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "main_user_voice_probability": {
+    "description": "主用户触发概率(%)",
+    "type": "int",
+    "default": -1,
+    "min": -1,
+    "max": 100,
+    "hint": "群聊中主用户本人发言或被 @ 到时的触发概率。填 -1 表示继承普通概率。主用户来自 target_user_ids 和私聊身份别名归并。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "main_user_mention_voice_keywords": {
+    "description": "@主用户语音关键词",
+    "type": "text",
+    "default": "",
+    "hint": "群聊 @ 到主用户且命中这些关键词时，参与强制语音判定。多个关键词可用逗号、空格或换行分隔。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "main_user_mention_voice_probability": {
+    "description": "@主用户关键词触发概率(%)",
+    "type": "int",
+    "default": 0,
+    "min": 0,
+    "max": 100,
+    "hint": "命中 @主用户语音关键词后的触发概率。0 表示不启用关键词强制触发。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
+  },
+  "main_user_mention_voice_prompt": {
+    "description": "@主用户关键词提示词",
+    "type": "text",
+    "default": "",
+    "hint": "关键词规则命中后注入给模型的补充要求，例如更短、更贴近、使用某种声线。",
+    "condition": {
+      "enable_tts_enhancement": true
+    }
   },
   "voice_action_max_chars": {
     "description": "主动语音最大字数",

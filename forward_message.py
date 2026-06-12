@@ -711,23 +711,43 @@ class ForwardMessageMixin:
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         image_items: list[tuple[str, str]] = []
         seen_image_keys: set[str] = set()
+        gif_enhancement_enabled = bool(getattr(self, "enable_private_image_gif_enhancement", True))
+        gif_max_frames = max(1, min(8, int(getattr(self, "private_image_gif_max_frames", 4) or 4)))
+        max_model_images = max(8, min(16, limit * gif_max_frames if limit else gif_max_frames * 2))
         for source in sources:
+            image_key = self._private_image_source_cache_key(source)
+            gif_items = self._private_image_gif_frame_model_items(source, image_key, max_frames=gif_max_frames) if gif_enhancement_enabled else []
+            if gif_items:
+                for frame_key, frame_url in gif_items:
+                    if frame_key in seen_image_keys:
+                        continue
+                    seen_image_keys.add(frame_key)
+                    image_items.append((frame_key, frame_url))
+                    if len(image_items) >= max_model_images:
+                        break
+                if len(image_items) >= max_model_images:
+                    break
+                continue
             url = self._private_image_source_to_model_url(source)
             if not url:
                 continue
-            image_key = self._private_image_source_cache_key(source) or ("model_url:" + hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest())
+            image_key = image_key or ("model_url:" + hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest())
             if image_key in seen_image_keys:
                 continue
             seen_image_keys.add(image_key)
             image_items.append((image_key, url))
+            if len(image_items) >= max_model_images:
+                break
         image_keys = [key for key, _ in image_items]
         image_urls = [url for _, url in image_items]
         if not image_urls:
             return ""
         default_prompt = (
             "请按出现顺序把合并消息里的图片压缩成短摘要。每张图只写一行,不要写标题、分析过程或长篇描述。\n"
-            "格式：第N张：<图片类型>；<可见文字/主体/关键细节,40字内>；<可能表达的语气或用途,30字内>。\n"
-            "看不清就写看不清；不要猜测人物关系。"
+            "格式：第N张：<图片类型>；内容=<可见文字/主体/动作/关键细节,50字内>；表达=<用户可能借图表达的情绪、态度、疑问、用途或梗,45字内>。\n"
+            "完整性规则：每张图都要同时保留客观内容和表达意图；这是在原有基础上的增强,不是二选一。"
+            "若是照片/截图/漫画/聊天记录,内容描述更细一点；若是表情包/贴纸/GIF,表达意图和情绪梗分析更多一点。看不清就写看不清；不要猜测人物关系。"
+            "如果同一张动态 GIF 被抽成多帧,请把连续帧当作同一个动态表情包理解,概括动作/表情变化。"
         )
         attempts = 0
         seen_providers: set[str] = set()

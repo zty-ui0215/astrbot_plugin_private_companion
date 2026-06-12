@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import html
+import io
 import os
 import re
 import shutil
@@ -537,7 +538,7 @@ class PrivateImageMixin:
         prompt = str(provider_settings.get("image_caption_prompt") or "").strip()
         if astrbot_provider_id:
             return astrbot_provider_id, "astrbot_image_caption", prompt
-        fallback_provider_id = self._task_provider(self.jm_cosmos_vision_provider_id, self.narration_provider_id)
+        fallback_provider_id = self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id)
         if fallback_provider_id:
             return fallback_provider_id, "plugin_vision", prompt
         default_provider_id = self._default_chat_provider_id(umo)
@@ -560,7 +561,7 @@ class PrivateImageMixin:
         prompt = str(provider_settings.get("image_caption_prompt") or "").strip()
         return [
             (_single_line(provider_settings.get("default_image_caption_provider_id"), 160), "astrbot_image_caption", prompt),
-            (self._task_provider(self.jm_cosmos_vision_provider_id, self.narration_provider_id), "plugin_vision", prompt),
+            (self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id), "plugin_vision", prompt),
             (self._task_provider(self.llm_provider_id), "plugin_main", prompt),
             (self._default_chat_provider_id(umo), "astrbot_default", prompt),
         ]
@@ -631,16 +632,132 @@ class PrivateImageMixin:
     def _private_image_model_image_items(self, image_sources: list[str]) -> list[tuple[str, str]]:
         image_items: list[tuple[str, str]] = []
         seen_image_keys: set[str] = set()
+        gif_enhancement_enabled = bool(getattr(self, "enable_private_image_gif_enhancement", True))
+        gif_max_frames = max(1, min(8, int(getattr(self, "private_image_gif_max_frames", 4) or 4)))
+        max_model_images = max(8, min(16, gif_max_frames * 2))
         for source in [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:4]:
+            image_key = self._private_image_source_cache_key(source)
+            gif_items = self._private_image_gif_frame_model_items(source, image_key, max_frames=gif_max_frames) if gif_enhancement_enabled else []
+            if gif_items:
+                for frame_key, frame_url in gif_items:
+                    if frame_key in seen_image_keys:
+                        continue
+                    seen_image_keys.add(frame_key)
+                    image_items.append((frame_key, frame_url))
+                    if len(image_items) >= max_model_images:
+                        return image_items
+                continue
             url = self._private_image_source_to_model_url(source)
             if not url:
                 continue
-            image_key = self._private_image_source_cache_key(source) or ("model_url:" + hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest())
+            image_key = image_key or ("model_url:" + hashlib.sha1(url.encode("utf-8", errors="ignore")).hexdigest())
             if image_key in seen_image_keys:
                 continue
             seen_image_keys.add(image_key)
             image_items.append((image_key, url))
+            if len(image_items) >= max_model_images:
+                break
         return image_items
+
+    def _private_image_gif_frame_model_items(self, source: str, image_key: str, *, max_frames: int = 4) -> list[tuple[str, str]]:
+        raw = self._private_image_source_bytes_if_gif(source)
+        if not raw:
+            return []
+        image_key = image_key or ("gif:" + hashlib.sha256(raw).hexdigest())
+        try:
+            from PIL import Image as PILImage, ImageSequence
+        except Exception:
+            logger.debug("[PrivateCompanion] Pillow 不可用,动态 GIF 将按原图交给视觉模型")
+            return []
+        try:
+            with PILImage.open(io.BytesIO(raw)) as image:
+                frame_total = getattr(image, "n_frames", 1) or 1
+                is_animated = bool(getattr(image, "is_animated", False) or frame_total > 1)
+                if not is_animated:
+                    return []
+                indices = self._private_image_sample_gif_frame_indices(frame_total, max_frames=max_frames)
+                frames: list[tuple[str, str]] = []
+                seen_hashes: set[str] = set()
+                for index, frame in enumerate(ImageSequence.Iterator(image)):
+                    if index not in indices:
+                        continue
+                    rgba = frame.convert("RGBA")
+                    output = io.BytesIO()
+                    rgba.save(output, format="PNG")
+                    payload = output.getvalue()
+                    frame_hash = hashlib.sha1(payload).hexdigest()
+                    if frame_hash in seen_hashes:
+                        continue
+                    seen_hashes.add(frame_hash)
+                    key = f"gifframe:v1:{image_key}:f{index}:n{frame_total}:{frame_hash[:12]}"
+                    url = "data:image/png;base64," + base64.b64encode(payload).decode("ascii")
+                    frames.append((key, url))
+                    if len(frames) >= max_frames:
+                        break
+                if not frames:
+                    return []
+                logger.info("[PrivateCompanion] 动态 GIF 已抽帧供视觉识别: frames=%s/%s source=%s", len(frames), frame_total, _single_line(source, 120))
+                return frames
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 动态 GIF 抽帧失败: %s", exc)
+        return []
+
+    @staticmethod
+    def _private_image_sample_gif_frame_indices(frame_total: int, *, max_frames: int = 4) -> set[int]:
+        total = max(1, int(frame_total or 1))
+        limit = max(1, int(max_frames or 4))
+        if total <= limit:
+            return set(range(total))
+        if limit == 1:
+            anchors = [total // 2]
+        elif limit == 2:
+            anchors = [0, total - 1]
+        elif limit == 3:
+            anchors = [0, total // 2, total - 1]
+        else:
+            anchors = [0, total // 3, (total * 2) // 3, total - 1]
+        result: list[int] = []
+        for item in anchors:
+            index = max(0, min(total - 1, int(item)))
+            if index not in result:
+                result.append(index)
+            if len(result) >= limit:
+                break
+        return set(result)
+
+    def _private_image_source_bytes_if_gif(self, source: str) -> bytes:
+        text = str(source or "").strip()
+        if not text:
+            return b""
+        try:
+            raw = b""
+            if text.startswith("data:") and "," in text:
+                meta, payload = text.split(",", 1)
+                if "gif" not in meta.lower():
+                    return b""
+                raw = base64.b64decode(payload, validate=False) if ";base64" in meta.lower() else payload.encode("utf-8", errors="ignore")
+            elif text.startswith("base64://"):
+                raw = base64.b64decode(text[len("base64://"):], validate=False)
+            else:
+                if text.startswith("file://"):
+                    text = text[len("file://"):]
+                path = Path(text)
+                if not path.exists() or not path.is_file():
+                    return b""
+                if path.suffix.lower() != ".gif":
+                    head = path.read_bytes()[:6]
+                    return b"" if not head.startswith((b"GIF87a", b"GIF89a")) else path.read_bytes()
+                raw = path.read_bytes()
+            return raw if raw.startswith((b"GIF87a", b"GIF89a")) else b""
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 动态 GIF 字节读取失败: %s", exc)
+            return b""
+
+    def _private_image_sources_include_gif(self, image_sources: list[str]) -> bool:
+        for source in [str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:4]:
+            if self._private_image_source_bytes_if_gif(source):
+                return True
+        return False
 
     @staticmethod
     def _provider_supports_image(provider: Any) -> bool:
@@ -729,11 +846,11 @@ class PrivateImageMixin:
         return (
             "【角色识别线索】\n"
             "以下只用于给图片归属打标签,不要展开推理,不要复述规则。当前角色不是发图用户。\n"
-            "这里的“当前角色自己/当前角色的表情包”包括头像、Q版、二创、表情包、同人图和风格化卡通形象；"
-            "不要求图片写出角色名字,也不要求完全等同官方立绘。\n"
-            "如果画面主体同时命中多个当前角色显著视觉锚点,例如发色/发型、瞳色、发饰、服饰、物种、星月等专属元素,"
-            "且没有明显冲突,请优先判断为当前角色自己；如果明显是表情包或贴纸语境,判断为当前角色的表情包。\n"
-            "只有视觉锚点过少、与角色线索冲突,或主体明显是无关人物/物品时,才写无法判断或用户发来的无关图片。\n"
+            "这里的“当前角色自己/当前角色的表情包”可以包括头像、Q版、二创、表情包、同人图和风格化卡通形象,但必须保留当前角色的核心外观锚点。\n"
+            "归属判断采用保守规则：发型/发色/瞳色/物种/标志性服饰任一核心锚点与角色线索明显冲突时,不要判为当前角色自己,请写无法判断或用户发来的无关图片。\n"
+            "例如角色是短发,画面主体却是长发、双马尾、麻花辫或高马尾；角色是黑发,画面主体却是蓝发/紫发/粉发等,都属于明显冲突。\n"
+            "只有画面主体同时命中多个当前角色显著视觉锚点,且没有上述冲突时,才可判断为当前角色自己；如果明显是表情包或贴纸语境,判断为当前角色的表情包。\n"
+            "视觉锚点过少、只能泛泛说可爱/少女/二次元、与角色线索冲突,或主体明显是无关人物/物品时,请写无法判断或用户发来的无关图片。\n"
             f"{context}\n"
             "只在最后一行输出归属标签：图像归属判断：当前角色自己/当前角色的表情包/当前角色的聊天截图/发图用户本人/用户发来的无关图片/无法判断。"
         )
@@ -789,6 +906,73 @@ class PrivateImageMixin:
                 return line
         return ""
 
+    def _private_image_role_visual_text(self) -> str:
+        schedule_persona = str(getattr(self, "schedule_persona_prompt", "") or "")
+        custom_hint = self._private_image_role_self_recognition_hint()
+        parts: list[str] = []
+        for label in ("识别点", "外貌", "发型发色", "瞳色", "服饰风格", "种族", "职业/身份"):
+            value = self._roleplay_labeled_value(schedule_persona, label)
+            if value:
+                parts.append(f"{label}：{value}")
+        if custom_hint:
+            parts.append(custom_hint)
+        return _single_line("\n".join(parts), 900)
+
+    @staticmethod
+    def _private_image_has_any_token(text: str, tokens: tuple[str, ...]) -> bool:
+        return any(token and token in text for token in tokens)
+
+    def _private_image_ownership_conflict_reason(self, vision_text: str) -> str:
+        ownership = self._private_image_ownership_kind(self._private_image_ownership_line(vision_text))
+        if ownership not in {"bot_self", "bot_sticker", "bot_chat"}:
+            return ""
+        role = re.sub(r"\s+", "", self._private_image_role_visual_text())
+        visible = re.sub(r"\s+", "", self._private_image_visible_line(vision_text) or vision_text)
+        if not role or not visible:
+            return ""
+        if "短发" in role and self._private_image_has_any_token(
+            visible,
+            ("长发", "双马尾", "雙馬尾", "马尾", "馬尾", "麻花辫", "辫子", "辮子"),
+        ):
+            return "发型冲突：角色线索为短发,图片主体为长发/马尾类发型"
+        if self._private_image_has_any_token(role, ("长发", "長髮", "长髮")) and "短发" in visible:
+            return "发型冲突：角色线索为长发,图片主体为短发"
+        hair_colors = ("黑", "白", "银", "金", "黄", "蓝", "紫", "红", "粉", "棕", "绿", "灰")
+        role_hair = {color for color in hair_colors if f"{color}发" in role or f"{color}髮" in role}
+        visible_hair = {color for color in hair_colors if f"{color}发" in visible or f"{color}髮" in visible}
+        if role_hair and visible_hair and role_hair.isdisjoint(visible_hair):
+            return f"发色冲突：角色线索={','.join(sorted(role_hair))} 图片主体={','.join(sorted(visible_hair))}"
+        return ""
+
+    def _private_image_downgrade_conflicting_ownership(self, vision_text: str) -> str:
+        text = _single_line(vision_text, 600)
+        reason = self._private_image_ownership_conflict_reason(text)
+        if not reason:
+            return text
+        old_line = self._private_image_ownership_line(text)
+        new_line = "图像归属判断：无法判断"
+        if old_line and old_line in text:
+            corrected = text.replace(old_line, new_line, 1)
+        else:
+            corrected = f"{text} {new_line}".strip()
+        logger.info(
+            "[PrivateCompanion] 图片归属自我识别因外观冲突降级: reason=%s before=%s after=%s",
+            _single_line(reason, 120),
+            old_line or "无",
+            new_line,
+        )
+        return corrected
+
+    def _private_image_visible_line(self, text: str) -> str:
+        segment = self._private_image_labeled_segment(text, "可见内容")
+        if segment:
+            return segment
+        for raw_line in str(text or "").replace("；", "\n").replace("。", "\n").splitlines():
+            line = _single_line(raw_line, 260)
+            if "可见内容" in line:
+                return line
+        return ""
+
     @staticmethod
     def _private_image_labeled_segment(text: str, label: str) -> str:
         source = _single_line(text, 900)
@@ -833,8 +1017,65 @@ class PrivateImageMixin:
             return "unknown"
         return ""
 
-    def _private_image_reply_objective(self, ownership_line: str) -> str:
+    def _private_image_type_line(self, text: str) -> str:
+        segment = self._private_image_labeled_segment(text, "图片类型")
+        if segment:
+            return segment
+        for raw_line in str(text or "").replace("；", "\n").replace("。", "\n").splitlines():
+            line = _single_line(raw_line, 120)
+            if "图片类型" in line:
+                return line
+        return ""
+
+    def _private_image_type_kind(self, text: str) -> str:
+        compact = re.sub(r"\s+", "", str(self._private_image_type_line(text) or text or "")).lower()
+        if any(token in compact for token in ("表情包", "贴纸", "sticker", "emoji", "gif", "动图")):
+            return "sticker"
+        if "聊天记录" in compact or "聊天截图" in compact:
+            return "chat"
+        if "截图" in compact:
+            return "screenshot"
+        if "漫画" in compact:
+            return "manga"
+        if "照片" in compact or "photo" in compact:
+            return "photo"
+        return ""
+
+    @staticmethod
+    def _private_image_user_asks_content(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return False
+        patterns = (
+            "图里是什么", "图里有啥", "图里有什么", "图片里是什么", "图片里有啥", "图片里有什么",
+            "这图是什么", "这个图是什么", "这张图是什么", "这是啥", "这是什么", "什么内容",
+            "看到了什么", "你看到了什么", "画了什么", "写了什么", "什么意思",
+        )
+        return any(item in compact for item in patterns)
+
+    def _private_image_reply_objective(self, ownership_line: str, vision_text: str = "", user_text: str = "") -> str:
         kind = self._private_image_ownership_kind(ownership_line)
+        image_kind = self._private_image_type_kind(vision_text)
+        asks_content = self._private_image_user_asks_content(user_text)
+        if asks_content:
+            return (
+                "回复目标：用户正在询问图片内容。请优先基于“可见内容”直接概括图里有什么、文字是什么、整体场景是什么；"
+                "同时结合“图像表达意图”说明它可能在表达什么。不要只回应情绪、不要反问来源、不要把历史图片当成本轮图片。"
+                "涉及露骨、暴力或敏感画面时只做克制概括，不复述露骨台词，不展开细节。"
+            )
+        if image_kind == "sticker":
+            return (
+                "回复目标：这类图片按表情包/贴纸/GIF 理解。请同时利用“可见内容”和“图像表达意图”："
+                "先接住它传达的情绪、态度、动作变化、文字梗或调侃点，但不要丢掉画面主体、文字和动作这些内容依据。"
+                "请直接接住用户这次借图表达的意思，短句自然回复。"
+            )
+        if image_kind in {"photo", "screenshot", "manga", "chat"}:
+            return (
+                "回复目标：这类图片按普通图片/截图/漫画/聊天记录处理。请同时利用“可见内容”和“图像表达意图”："
+                "先理解画面主体、文字和场景，再结合用户发图可能表达的态度、疑问或分享意图回应。"
+                "不要只把它当表情包接情绪，也不要把表达意图完全忽略。"
+                "不要复述图片台词、不要扮演图片角色、不要使用括号动作或神态旁白。"
+            )
         if kind in {"bot_self", "bot_sticker", "bot_chat"}:
             return (
                 "回复目标：优先回应图片作为用户消息的表达意图,例如表情包文字、情绪、动作或梗。"
@@ -870,12 +1111,17 @@ class PrivateImageMixin:
         if not image_urls:
             return ""
         default_prompt = (
-            "请把用户刚发的图片压缩成给聊天模型看的短摘要。只输出下面 4 行,不要写标题、分析过程、帧列表或长篇描述。\n"
-            "图片类型：<照片/截图/表情包/聊天记录/其他>\n"
-            "可见内容：<主体、文字或最关键细节,30字内>\n"
-            "图像表达意图：<用户可能表达的情绪、态度或梗,30字内>\n"
+            "请把用户刚发的图片压缩成给聊天模型看的短摘要。先判断它更像表情包/贴纸/GIF,还是照片/截图/漫画/聊天记录。"
+            "只输出下面 4 行,不要写标题、分析过程、帧列表或长篇描述。\n"
+            "图片类型：<照片/截图/漫画/表情包/聊天记录/其他>\n"
+            "可见内容：<客观画面主体、文字、动作或最关键细节,45字内；若是照片/截图/漫画/聊天记录,请比普通表情包更细致地说明画面内容>\n"
+            "图像表达意图：<用户可能借图表达的情绪、态度、疑问、分享意图、动作变化或梗,45字内；若是表情包/贴纸/GIF,请比普通图片更充分分析情绪和梗>\n"
             "图像归属判断：<当前角色自己/当前角色的表情包/当前角色的聊天截图/发图用户本人/用户发来的无关图片/无法判断>\n"
+            "完整性规则：这是在原有基础上的增强,不是二选一。任何类型都要保留可见内容和表达意图；"
+            "区别只是图片侧多给内容细节,表情包/GIF侧多给情绪、态度和梗点。"
+            "使用规则：表情包/贴纸/GIF 的表达意图常来自文字、表情、动作和梗点；普通图片的表达意图常来自用户分享、询问、吐槽或展示的语境。"
             "无法确定就写无法判断；不要为了归属判断反复比较。"
+            "如果同一张动态 GIF 被抽成多帧,请按时间顺序综合动作、表情变化和文字变化,不要把它们当成多张无关图片。"
         )
         attempts = 0
         seen: set[str] = set()
@@ -897,6 +1143,7 @@ class PrivateImageMixin:
             cache_key = self._private_image_vision_cache_key(image_keys, provider_id, prompt, scope="private_image")
             cached_text = self._get_private_image_vision_cache(cache_key, provider_id=provider_id, image_keys=image_keys, scope="private_image")
             if cached_text:
+                cached_text = self._private_image_downgrade_conflicting_ownership(cached_text)
                 intent_line = self._private_image_intent_line(cached_text)
                 ownership_line = self._private_image_ownership_line(cached_text)
                 logger.info(
@@ -916,6 +1163,7 @@ class PrivateImageMixin:
                 result = await provider.text_chat(prompt=prompt, image_urls=image_urls, max_tokens=220)
                 text = str(getattr(result, "completion_text", result) or "").strip()
                 cleaned_text = _single_line(_strip_internal_message_blocks(text), 600)
+                cleaned_text = self._private_image_downgrade_conflicting_ownership(cleaned_text)
                 intent_line = self._private_image_intent_line(cleaned_text)
                 ownership_line = self._private_image_ownership_line(cleaned_text)
                 self._record_llm_usage(
@@ -1076,31 +1324,172 @@ class PrivateImageMixin:
         )
         return any(marker in compact for marker in markers)
 
+    def _private_image_reply_misses_content_question(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return False
+        if self._private_image_reply_ignores_vision_summary(text):
+            return True
+        source_only_markers = (
+            "从哪搞的", "从哪弄的", "哪搞的", "哪弄的", "哪里搞的", "哪里弄的",
+            "哪来的", "哪里来的", "出处", "来源", "你怎么突然发这个", "怎么突然发这个",
+        )
+        content_markers = (
+            "图里", "图片里", "画面", "可见", "内容", "漫画", "截图", "照片", "文字",
+        )
+        return any(marker in compact for marker in source_only_markers) and not any(marker in compact for marker in content_markers)
+
+    def _private_image_content_answer_from_vision(self, vision_text: str, *, user_text: str = "") -> str:
+        visible = self._private_image_visible_line(vision_text)
+        image_type = self._private_image_type_line(vision_text)
+        intent = self._private_image_intent_line(vision_text)
+        visible_value = re.sub(r"^可见内容[：:]\s*", "", _single_line(visible, 180)).strip()
+        type_value = re.sub(r"^图片类型[：:]\s*", "", _single_line(image_type, 80)).strip()
+        intent_value = re.sub(r"^图像表达意图[：:]\s*", "", _single_line(intent, 140)).strip()
+        parts: list[str] = []
+        if type_value and visible_value:
+            parts.append(f"图里大概是{type_value}：{visible_value}")
+        elif visible_value:
+            parts.append(f"图里大概是：{visible_value}")
+        elif type_value:
+            parts.append(f"图里像是{type_value}。")
+        if intent_value:
+            parts.append(f"它主要是在表达{intent_value}")
+        answer = "；".join(parts).strip("；")
+        if not answer:
+            return ""
+        if self._private_image_user_asks_content(user_text):
+            answer += "。"
+        return answer
+
     async def _send_private_image_reply_text(self, event: AstrMessageEvent, reply: str) -> None:
         text = self._normalize_private_image_reply_text(reply)
         if not text:
+            return
+        chain = await self._private_image_reply_chain(text, event)
+        if not chain:
             return
         should_segment = (
             bool(getattr(self, "enable_segmented_proactive_reply", False))
             and str(getattr(self, "segmented_proactive_scope", "") or "") == "all_llm"
         )
-        segments = self._split_proactive_text(text) if should_segment else [part.strip() for part in text.splitlines() if part.strip()]
-        segments = [segment for segment in segments if segment]
-        if not segments:
-            segments = [text]
-        if len(segments) <= 1:
-            await event.send(event.plain_result(segments[0]))
+        outbound_chains = self._private_image_split_reply_chain(chain, should_segment=should_segment)
+        if not outbound_chains:
             return
-        logger.info("[PrivateCompanion] 私聊单图回复按手动链路分段发送: segments=%s", len(segments))
-        await event.send(event.plain_result(segments[0]))
+        if len(outbound_chains) <= 1:
+            await self._send_private_image_reply_chain(event, outbound_chains[0])
+            return
+        logger.info("[PrivateCompanion] 私聊单图回复按手动链路分段发送: segments=%s", len(outbound_chains))
+        await self._send_private_image_reply_chain(event, outbound_chains[0])
         asyncio.create_task(
-            self._send_segmented_llm_reply_remainder(
+            self._send_private_image_reply_remainder_chains(
                 event,
-                segments[1:],
-                previous_segment=segments[0],
-                source="private_image",
+                outbound_chains[1:],
+                previous_text=self._private_image_chain_text(outbound_chains[0]),
             )
         )
+
+    async def _private_image_reply_chain(self, text: str, event: AstrMessageEvent) -> list[Any]:
+        normalized = str(text or "").strip()
+        normalizer = getattr(self, "_normalize_tts_tags", None)
+        if callable(normalizer) and re.search(r"</?t{2,}s\b", normalized, flags=re.IGNORECASE):
+            try:
+                normalized = str(normalizer(normalized) or normalized).strip()
+            except Exception:
+                pass
+        has_tts_block = bool(re.search(r"<tts\b[^>]*>.*?</tts>", normalized, flags=re.IGNORECASE | re.DOTALL))
+        if has_tts_block and bool(getattr(self, "enable_tts_enhancement", False)):
+            processor = getattr(self, "_process_tts_tags", None)
+            if callable(processor):
+                fallback_plain = re.sub(r"</?t{2,}s\b[^>]*>", "", normalized, flags=re.IGNORECASE).strip()
+                try:
+                    chain = await processor(normalized, event, fallback_plain=fallback_plain)
+                except Exception as exc:
+                    logger.warning("[PrivateCompanion] 私聊单图 TTS 组件生成失败,回退文本发送: %s", _single_line(exc, 120))
+                    chain = []
+                cleaned_chain = self._private_image_clean_reply_chain(chain)
+                if cleaned_chain:
+                    return cleaned_chain
+                if fallback_plain:
+                    return [Plain(fallback_plain)]
+        visible_text = re.sub(r"</?t{2,}s\b[^>]*>", "", normalized, flags=re.IGNORECASE).strip() if has_tts_block else normalized
+        return [Plain(visible_text)] if visible_text else []
+
+    @staticmethod
+    def _private_image_chain_text(chain: list[Any]) -> str:
+        return _single_line(" ".join(str(getattr(comp, "text", "") or "") for comp in chain if isinstance(comp, Plain)), 260)
+
+    @staticmethod
+    def _private_image_clean_reply_chain(chain: list[Any]) -> list[Any]:
+        cleaned: list[Any] = []
+        for comp in chain or []:
+            if isinstance(comp, Plain):
+                text = str(getattr(comp, "text", "") or "").strip()
+                if text:
+                    cleaned.append(Plain(text))
+                continue
+            cleaned.append(comp)
+        return cleaned
+
+    def _private_image_split_reply_chain(self, chain: list[Any], *, should_segment: bool) -> list[list[Any]]:
+        outbound: list[list[Any]] = []
+        for comp in chain:
+            if isinstance(comp, Plain):
+                text = str(getattr(comp, "text", "") or "").strip()
+                if not text:
+                    continue
+                segments = self._split_proactive_text(text) if should_segment else [part.strip() for part in text.splitlines() if part.strip()]
+                segments = [segment for segment in segments if segment] or [text]
+                outbound.extend([[Plain(segment)] for segment in segments])
+                continue
+            outbound.append([comp])
+        return outbound
+
+    async def _send_private_image_reply_chain(self, event: AstrMessageEvent, chain: list[Any]) -> None:
+        if not chain:
+            return
+        try:
+            await event.send(event.chain_result(chain))
+            return
+        except Exception:
+            await event.send(self._build_result_from_chain(chain))
+
+    async def _send_private_image_reply_remainder_chains(
+        self,
+        event: AstrMessageEvent,
+        chains: list[list[Any]],
+        *,
+        previous_text: str = "",
+    ) -> None:
+        prev = previous_text
+        total = len([item for item in chains if item])
+        sent_index = 0
+        for chain in chains:
+            if not chain:
+                continue
+            sent_index += 1
+            try:
+                wait_for = prev or self._private_image_chain_text(chain)
+                delay = await self._calc_segmented_proactive_interval(wait_for)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await self._send_private_image_reply_chain(event, chain)
+                logger.info(
+                    "[PrivateCompanion] 私聊单图剩余片段已发送: index=%s/%s preview=%s",
+                    sent_index,
+                    total,
+                    self._private_image_chain_text(chain) or chain[0].__class__.__name__,
+                )
+                prev = self._private_image_chain_text(chain) or prev
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "[PrivateCompanion] 私聊单图剩余片段发送失败: error=%s",
+                    _single_line(exc, 160),
+                    exc_info=True,
+                )
+                return
 
     def _take_buffered_private_image_context_for_event(self, event: AstrMessageEvent) -> dict[str, Any]:
         try:
@@ -1147,7 +1536,7 @@ class PrivateImageMixin:
                 logger.info("[PrivateCompanion] 私聊单图延迟视觉转述失败: user=%s error=%s", user_id, _single_line(exc, 120))
         ownership_line = self._private_image_ownership_line(vision_text)
         intent_line = self._private_image_intent_line(vision_text)
-        reply_objective = self._private_image_reply_objective(ownership_line)
+        reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
         prompt = _single_line(getattr(event, "message_str", ""), 120)
         if not prompt or prompt == "[图片]":
             prompt = (
@@ -1206,7 +1595,16 @@ class PrivateImageMixin:
             setattr(framework_event, "private_companion_delayed_image_sources", list(request_image_refs))
             buffered_image_mode = _single_line(buffer.get("image_mode"), 20)
             main_provider_supports_image = self._event_main_provider_supports_image(framework_event)
-            direct_image_mode = bool(request_image_refs and buffered_image_mode == "direct" and main_provider_supports_image)
+            has_dynamic_gif_sources = (
+                bool(getattr(self, "enable_private_image_gif_enhancement", True))
+                and self._private_image_sources_include_gif(raw_image_sources)
+            )
+            direct_image_mode = bool(
+                request_image_refs
+                and buffered_image_mode == "direct"
+                and main_provider_supports_image
+                and not has_dynamic_gif_sources
+            )
             direct_provider_id = ""
             direct_provider_source = "current_main_provider"
             if direct_image_mode:
@@ -1219,12 +1617,18 @@ class PrivateImageMixin:
                 setattr(framework_event, "private_companion_delayed_image_mode", "direct")
             elif request_image_refs:
                 setattr(framework_event, "private_companion_delayed_image_mode", "caption")
-            elif not vision_text and images:
+            if not direct_image_mode and not vision_text and images:
                 vision_text = _single_line(await self._transcribe_private_inbound_images(images, umo=umo), 600)
                 setattr(framework_event, "private_companion_delayed_image_vision_text", vision_text)
                 ownership_line = self._private_image_ownership_line(vision_text)
                 intent_line = self._private_image_intent_line(vision_text)
-                reply_objective = self._private_image_reply_objective(ownership_line)
+                reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
+            if has_dynamic_gif_sources and request_image_refs:
+                logger.info(
+                    "[PrivateCompanion] 私聊单图检测到动态 GIF,已改用抽帧视觉摘要链路: user=%s has_vision=%s",
+                    user_id,
+                    bool(vision_text),
+                )
             conv = None
             if umo:
                 conv_id = await self.context.conversation_manager.get_curr_conversation_id(umo)
@@ -1359,7 +1763,7 @@ class PrivateImageMixin:
                     setattr(event, "private_companion_delayed_image_vision_text", vision_text)
                     ownership_line = self._private_image_ownership_line(vision_text)
                     intent_line = self._private_image_intent_line(vision_text)
-                    reply_objective = self._private_image_reply_objective(ownership_line)
+                    reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
                 fallback_prompt = (
                     "用户刚刚只发了一张图片,没有补充文字。请用当前私聊人格自然回复一句,像 QQ 私聊短句；不要提模型、插件、视觉转述或路径,不要使用括号动作、神态旁白或舞台描写。\n"
                     f"{self._private_image_identity_disambiguation_instruction()}\n"

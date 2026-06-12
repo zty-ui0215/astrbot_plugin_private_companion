@@ -653,20 +653,13 @@ class PrivateReadingMixin:
             return {}
         try:
             getter = getattr(self.context, "get_provider_by_id", None)
-            provider_id = ""
-            provider = None
-            seen_providers: set[str] = set()
-            for candidate_id, _provider_source, _prompt in self._private_image_visual_provider_candidates():
-                candidate_id = _single_line(candidate_id, 160)
-                if not candidate_id or candidate_id in seen_providers:
-                    continue
-                seen_providers.add(candidate_id)
-                candidate = getter(candidate_id) if callable(getter) else None
-                if candidate is not None and self._provider_supports_image(candidate):
-                    provider_id = candidate_id
-                    provider = candidate
-                    break
+            provider_id = _single_line(getattr(self, "jm_cosmos_vision_provider_id", ""), 160)
+            provider = getter(provider_id) if provider_id and callable(getter) else None
             if not provider_id or provider is None:
+                logger.info("[PrivateCompanion] 夹层阅读未配置专用视觉模型，跳过页图批注和读后感生成")
+                return {}
+            if not self._provider_supports_image(provider):
+                logger.warning("[PrivateCompanion] 夹层阅读视觉模型不支持图片输入: provider=%s", provider_id)
                 return {}
             image_urls = []
             for path in image_paths:
@@ -1298,7 +1291,7 @@ class PrivateReadingMixin:
                 bot_rating = _safe_int(vision_result.get("rating"), 0, 0, 10) if isinstance(vision_result, dict) else 0
                 rating_reason = _single_line(vision_result.get("rating_reason"), 160) if isinstance(vision_result, dict) else ""
                 preference_tags = vision_result.get("preference_tags", []) if isinstance(vision_result, dict) else []
-                impression = vision or self._jm_cosmos_textual_impression(detail)
+                impression = vision
                 title = _single_line(detail.get("title") or candidate.get("title"), 80)
                 description = _single_line(
                     detail.get("description")

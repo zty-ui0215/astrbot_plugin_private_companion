@@ -2788,6 +2788,92 @@ input[type="search"] {
   grid-column: 1 / -1;
 }
 
+.roleplay-knowledge-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  border: 1px solid rgba(66, 111, 156, 0.18);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.roleplay-knowledge-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.roleplay-knowledge-head h4 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.roleplay-knowledge-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.roleplay-knowledge-list {
+  display: grid;
+  gap: 10px;
+}
+
+.roleplay-knowledge-source {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: rgba(251, 250, 247, 0.82);
+}
+
+.roleplay-knowledge-base,
+.roleplay-knowledge-doc {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.roleplay-knowledge-base input,
+.roleplay-knowledge-doc input {
+  margin-top: 3px;
+}
+
+.roleplay-knowledge-base span,
+.roleplay-knowledge-doc span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.roleplay-knowledge-base b,
+.roleplay-knowledge-doc b {
+  overflow-wrap: anywhere;
+}
+
+.roleplay-knowledge-base small,
+.roleplay-knowledge-doc small,
+.roleplay-knowledge-source p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.roleplay-knowledge-source p {
+  margin: 0;
+}
+
+.roleplay-knowledge-docs {
+  display: grid;
+  gap: 7px;
+  padding-left: 24px;
+}
+
 .roleplay-user-card {
   grid-column: 1 / -1;
   display: grid;
@@ -6014,6 +6100,16 @@ textarea {
   width: 100%;
 }
 
+.feature-provider-select {
+  display: grid;
+  gap: 8px;
+}
+
+.feature-provider-select select,
+.feature-provider-select input {
+  width: 100%;
+}
+
 .provider-current {
   display: grid;
   gap: 3px;
@@ -6445,24 +6541,31 @@ textarea {
   margin: 0;
 }
 
-.feature-detail-grid dl div {
+.feature-detail-grid dl > div {
   display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
+  grid-template-columns: minmax(82px, max-content) minmax(0, 1fr);
   gap: 10px;
   align-items: start;
+  min-width: 0;
 }
 
-.feature-detail-grid dt {
+.feature-detail-grid dl > div > dt {
   color: var(--muted);
   min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
-.feature-detail-grid dd {
+.feature-detail-grid dl > div > dd {
   margin: 0;
+  min-width: 0;
+  padding: 0;
+  border: 0;
   overflow-wrap: break-word;
   word-break: normal;
+  background: transparent;
   color: var(--ink);
-  min-width: 0;
   line-height: 1.5;
 }
 
@@ -7392,6 +7495,90 @@ tbody tr.is-selected {
   gap: 14px;
 }
 
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.config-card {
+  grid-column: span 6;
+  min-width: 0;
+  border: 1px solid rgba(222, 217, 206, 0.86);
+  border-radius: var(--radius);
+  padding: 14px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(251,250,247,0.92));
+  box-shadow: 0 14px 32px rgba(49, 45, 34, 0.07), var(--shadow-ring);
+}
+
+.config-card h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.config-card h2::before {
+  content: "";
+  width: 4px;
+  height: 16px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--accent), var(--blue));
+}
+
+.config-card.wide {
+  grid-column: 1 / -1;
+}
+
+#panel-config > .config-grid > .config-card > dl {
+  grid-template-columns: minmax(108px, 0.34fr) minmax(0, 1fr);
+  gap: 0;
+  margin-top: 4px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.72);
+}
+
+#panel-config > .config-grid > .config-card > dl > dt,
+#panel-config > .config-grid > .config-card > dl > dd {
+  min-height: 34px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+#panel-config > .config-grid > .config-card > dl > dt:nth-last-child(2),
+#panel-config > .config-grid > .config-card > dl > dd:last-child {
+  border-bottom: 0;
+}
+
+#panel-config > .config-grid > .config-card > dl > dt {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  background: rgba(242,239,231,0.72);
+  font-size: 13px;
+}
+
+#panel-config > .config-grid > .config-card > dl > dd {
+  display: flex;
+  align-items: center;
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+#panel-config .coverage-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+#panel-config .coverage-item {
+  min-height: 66px;
+  padding: 11px 12px;
+}
+
 .memory-grid article,
 .detail-block {
   border: 1px solid var(--line-soft);
@@ -7483,6 +7670,10 @@ pre {
   .provider-toolbar-actions {
     justify-content: flex-start;
   }
+
+  .config-card {
+    grid-column: 1 / -1;
+  }
 }
 
 @media (max-width: 1040px) {
@@ -7514,6 +7705,7 @@ pre {
   }
 
   .stats,
+  .config-grid,
   .dashboard-grid,
   .dashboard-pulse,
   .health-list,
@@ -7570,6 +7762,15 @@ pre {
 
   .pulse-card.wide {
     grid-column: span 1;
+  }
+
+  #panel-config > .config-grid > .config-card > dl {
+    grid-template-columns: minmax(92px, 0.42fr) minmax(0, 1fr);
+  }
+
+  #panel-config > .config-grid > .config-card > dl > dt,
+  #panel-config > .config-grid > .config-card > dl > dd {
+    padding: 8px;
   }
 
   .pulse-card.tall {

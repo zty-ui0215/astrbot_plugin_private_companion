@@ -134,6 +134,7 @@
               </div>
               <input name="bot_name" type="hidden" />
               <input name="default_style" type="hidden" />
+              <input name="roleplay_knowledge_source_ids" type="hidden" />
               <label class="roleplay-textarea roleplay-freeform">角色设定补充
                 <textarea name="schedule_persona_prompt" rows="10" placeholder="姓名：
 种族：
@@ -229,6 +230,16 @@ QQ空间 = 公开札记
                   <label>QQ空间 <input data-roleplay-translation-part="QQ空间" placeholder="例如 公开札记" /></label>
                   <label>书柜 <input data-roleplay-translation-part="书柜" placeholder="例如 行囊书匣" /></label>
                 </div>
+              </div>
+              <div class="roleplay-knowledge-panel">
+                <div class="roleplay-knowledge-head">
+                  <div>
+                    <h4>AstrBot 知识库参考</h4>
+                    <p>选择已有知识库或文档，给日程模拟和世界观适配提供背景。</p>
+                  </div>
+                  <span id="roleplayKnowledgeCount" class="module-badge">0</span>
+                </div>
+                <div id="roleplayKnowledgeSources" class="roleplay-knowledge-list"></div>
               </div>
             </section>
 
@@ -896,24 +907,24 @@ QQ空间 = 公开札记
       </section>
 
       <section class="panel" id="panel-config">
-        <div class="memory-grid">
-          <article>
+        <div class="config-grid">
+          <article class="config-card">
             <h2>私聊策略</h2>
             <dl id="privateConfig"></dl>
           </article>
-          <article>
+          <article class="config-card">
             <h2>群聊策略</h2>
             <dl id="groupConfig"></dl>
           </article>
-          <article>
+          <article class="config-card wide">
             <h2>长线主动</h2>
             <dl id="longTermConfig"></dl>
           </article>
-          <article class="wide">
+          <article class="config-card wide">
             <h2>群聊名单覆盖</h2>
             <div id="listCoverage" class="coverage-grid"></div>
           </article>
-          <article class="wide">
+          <article class="config-card wide">
             <h2>群聊名单</h2>
             <form id="accessForm" class="access-manager">
               <div class="access-mode-row">

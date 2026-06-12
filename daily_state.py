@@ -2089,11 +2089,16 @@ class DailyStateMixin:
             and not force
         ):
             return cached
-        if not getattr(self, "enable_yesterday_screen_diary_context", True):
+        screen_companion_available = False
+        try:
+            screen_companion_available = self._get_screen_companion_plugin() is not None
+        except Exception:
+            screen_companion_available = False
+        if not getattr(self, "enable_yesterday_screen_diary_context", True) or not screen_companion_available:
             payload = {
                 "date": today,
                 "source_date": source_date,
-                "source": "disabled",
+                "source": "disabled" if not getattr(self, "enable_yesterday_screen_diary_context", True) else "screen_companion_unavailable",
                 "summary": "",
                 "items": [],
                 "available": False,

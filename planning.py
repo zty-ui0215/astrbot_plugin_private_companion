@@ -461,6 +461,11 @@ def get_schedule_planning_prompt(plugin) -> str:
         parts.append("【日程专用角色设定】\n" + schedule_persona)
     if worldview:
         parts.append("【日程专用世界观/生活背景】\n" + worldview)
+    knowledge_formatter = getattr(plugin, "_format_roleplay_knowledge_context", None)
+    if callable(knowledge_formatter):
+        knowledge_context = knowledge_formatter(purpose="schedule", max_chars=3600, max_chunks=20)
+        if knowledge_context:
+            parts.append(knowledge_context)
     if not parts:
         parts.append("【AstrBot 默认人格（回退）】\n" + persona)
     else:

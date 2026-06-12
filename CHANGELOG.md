@@ -1,10 +1,5 @@
 # 更新日志
 
-## 3.4.3
-
-- 新增 QQ 空间手动 Cookie 覆盖配置 `QZONE_COOKIE`：填写浏览器 QQ 空间 Cookie 后，查看、评论和发布说说会优先使用该 Cookie；留空时继续使用 OneBot 自动获取 Cookie。
-- 优化 `陪伴 诊断空间`：会脱敏显示手动 Cookie 是否配置、是否能计算 `g_tk`、是否能读取本人空间，并继续诊断 OneBot 自动 Cookie。
-
 ## 3.4.2
 
 - 修复 QQ 空间发布工具空参数调用会触发 AstrBot 工具参数异常的问题；`pc_qzone_publish_feed` 现在缺少 `text` 时返回 `need_text`，不会打断工具链路。

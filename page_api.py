@@ -105,6 +105,8 @@ class PrivateCompanionPageApi:
                     "settings": self._runtime_settings(),
                     "cache": self._cache_summary(data),
                     "livingmemory": self._livingmemory_summary(),
+                    "screen_companion": self._screen_companion_summary(data),
+                    "knowledge": self.plugin._roleplay_knowledge_summary(),
                     "worldbook": self._worldbook_summary(data),
                     "proactive_candidates": self._proactive_candidate_summary(data),
                     "bilibili": self._bilibili_summary(data),
@@ -412,7 +414,7 @@ class PrivateCompanionPageApi:
                 if key in self._allowed_setting_keys():
                     changed[key] = self._normalize_setting_value(key, value)
             for key, value in changed.items():
-                self._apply_config_value(key, value)
+                self._apply_config_value(key, value, changed)
             if changed:
                 self._save_config_if_possible()
             overview = await self.get_overview()
@@ -1948,14 +1950,37 @@ class PrivateCompanionPageApi:
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
             "enable_yesterday_screen_diary_context",
+            "enable_tts_enhancement",
             "enable_creative_writing",
             "creative_hidden_mode",
         ]
         values = {key: bool(getattr(self.plugin, key, False)) for key in keys}
         try:
+            livingmemory_available = bool(getattr(self.plugin, "_livingmemory_available", lambda: False)())
+        except Exception:
+            livingmemory_available = False
+        try:
+            bilibili_available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
+        except Exception:
+            bilibili_available = False
+        try:
+            qzone_available = bool(getattr(self.plugin, "_qzone_available", lambda: False)())
+        except Exception:
+            qzone_available = False
+        try:
+            screen_companion_available = bool(self._screen_companion_available())
+        except Exception:
+            screen_companion_available = False
+        try:
             private_reading_available = bool(getattr(self.plugin, "_jm_cosmos_available", lambda: False)())
         except Exception:
             private_reading_available = False
+        values["enable_livingmemory_integration"] = bool(livingmemory_available and getattr(self.plugin, "enable_livingmemory_integration", False))
+        values["enable_bilibili_integration"] = bool(bilibili_available and getattr(self.plugin, "enable_bilibili_integration", False))
+        values["enable_bilibili_boredom_watch"] = bool(bilibili_available and getattr(self.plugin, "enable_bilibili_boredom_watch", False))
+        values["enable_qzone_integration"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_integration", False))
+        values["enable_qzone_life_publish"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_life_publish", False))
+        values["enable_yesterday_screen_diary_context"] = bool(screen_companion_available and getattr(self.plugin, "enable_yesterday_screen_diary_context", False))
         values["enable_private_reading_integration"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_integration", False))
         values["enable_private_reading_boredom_read"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_boredom_read", False))
         values["enable_private_reading_ask_recommendation"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_ask_recommendation", False))
@@ -1984,14 +2009,15 @@ class PrivateCompanionPageApi:
             "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
             "FORWARD_MESSAGE_PROVIDER_ID",
             "PLUGIN_VISION_PROVIDER_ID",
+            "PRIVATE_READING_VISION_PROVIDER_ID",
             "NEWS_PROVIDER_ID",
             "WEB_EXPLORATION_PROVIDER_ID",
         ]
         values = {key: self._config_get(key) for key in keys}
         if not values.get("PLUGIN_VISION_PROVIDER_ID"):
-            values["PLUGIN_VISION_PROVIDER_ID"] = (
-                str(getattr(self.plugin, "jm_cosmos_vision_provider_id", "") or "")
-            )
+            values["PLUGIN_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "plugin_vision_provider_id", "") or "")
+        if not values.get("PRIVATE_READING_VISION_PROVIDER_ID"):
+            values["PRIVATE_READING_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "jm_cosmos_vision_provider_id", "") or "")
         if not values.get("DREAM_DIARY_PROVIDER_ID"):
             values["DREAM_DIARY_PROVIDER_ID"] = str(getattr(self.plugin, "dream_diary_provider_id", "") or "")
         return values
@@ -2105,9 +2131,23 @@ class PrivateCompanionPageApi:
             "schedule_persona_prompt",
             "schedule_worldview_prompt",
             "roleplay_user_profile_prompt",
+            "roleplay_knowledge_source_ids",
             "worldview_adaptation_mode",
             "worldview_adaptation_prompt",
             "quiet_hours",
+            "tts_generation_mode",
+            "tts_voice_language",
+            "tts_conversion_provider_id",
+            "tts_extra_prompt",
+            "auto_voice_enabled",
+            "auto_voice_full_conversion_enabled",
+            "auto_voice_probability",
+            "auto_voice_max_chars",
+            "auto_voice_cooldown_seconds",
+            "main_user_voice_probability",
+            "main_user_mention_voice_keywords",
+            "main_user_mention_voice_probability",
+            "main_user_mention_voice_prompt",
             "daily_token_limit",
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
@@ -2141,6 +2181,8 @@ class PrivateCompanionPageApi:
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
             "private_image_vision_wait_seconds",
+            "enable_private_image_gif_enhancement",
+            "private_image_gif_max_frames",
             "enable_private_image_self_recognition",
             "private_image_self_recognition_hint",
             "enable_private_image_vision_cache",
@@ -2572,7 +2614,7 @@ class PrivateCompanionPageApi:
             },
         }
 
-    def _apply_config_value(self, key: str, value: Any) -> None:
+    def _apply_config_value(self, key: str, value: Any, overrides: dict[str, Any] | None = None) -> None:
         self._set_config_value(key, value)
         attr_map = {
             "LLM_PROVIDER_ID": "llm_provider_id",
@@ -2594,17 +2636,13 @@ class PrivateCompanionPageApi:
             "GROUP_SLANG_PROVIDER_ID": "group_slang_provider_id",
             "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": "group_followup_judge_provider_id",
             "FORWARD_MESSAGE_PROVIDER_ID": "forward_message_provider_id",
-            "PLUGIN_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",
+            "PLUGIN_VISION_PROVIDER_ID": "plugin_vision_provider_id",
             "PRIVATE_READING_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",
             "NEWS_PROVIDER_ID": "news_provider_id",
             "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
         }
         if key in attr_map:
             setattr(self.plugin, attr_map[key], str(value or "").strip())
-            if key == "PLUGIN_VISION_PROVIDER_ID":
-                self._set_config_value("PRIVATE_READING_VISION_PROVIDER_ID", str(value or "").strip())
-            elif key == "PRIVATE_READING_VISION_PROVIDER_ID" and not self._config_get("PLUGIN_VISION_PROVIDER_ID"):
-                self._set_config_value("PLUGIN_VISION_PROVIDER_ID", str(value or "").strip())
             if key == "DREAM_DIARY_PROVIDER_ID":
                 shared = str(value or "").strip()
                 self.plugin.dream_provider_id = shared
@@ -2618,6 +2656,13 @@ class PrivateCompanionPageApi:
             return
         if key == "group_blacklist_ids":
             self.plugin.group_blacklist_ids = list(value or [])
+            return
+        if key == "QZONE_COOKIE":
+            self.plugin.qzone_cookie = str(value or "").strip()
+            return
+        if key == "roleplay_knowledge_source_ids":
+            normalizer = getattr(self.plugin, "_normalize_roleplay_knowledge_source_ids", None)
+            self.plugin.roleplay_knowledge_source_ids = normalizer(value) if callable(normalizer) else list(value or [])
             return
         private_reading_attr_map = {
             "enable_private_reading_integration": "enable_jm_cosmos_integration",
@@ -2649,6 +2694,28 @@ class PrivateCompanionPageApi:
         if key in {"group_repeat_follow_probability", "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step"}:
             raw = float(value or 0)
             setattr(self.plugin, key, max(0.0, min(1.0, raw / 100.0 if raw > 1 else raw)))
+            return
+        tts_runtime_keys = {
+            "tts_generation_mode",
+            "tts_voice_language",
+            "tts_conversion_provider_id",
+            "tts_extra_prompt",
+            "auto_voice_enabled",
+            "auto_voice_full_conversion_enabled",
+            "auto_voice_probability",
+            "auto_voice_max_chars",
+            "auto_voice_cooldown_seconds",
+            "main_user_voice_probability",
+            "main_user_mention_voice_keywords",
+            "main_user_mention_voice_probability",
+            "main_user_mention_voice_prompt",
+        }
+        if key == "enable_tts_enhancement" or key in tts_runtime_keys:
+            loader = getattr(self.plugin, "_load_tts_enhancement_config", None)
+            if callable(loader):
+                loader(self._config_overlay(overrides or {key: value}))
+            else:
+                setattr(self.plugin, key, value)
             return
         if key in self._allowed_feature_keys():
             setattr(self.plugin, key, bool(value))
@@ -2684,6 +2751,25 @@ class PrivateCompanionPageApi:
             setattr(config, key, value)
         except Exception:
             logger.debug("[PrivateCompanionPage] 配置字段写入失败: %s", key)
+
+    def _config_overlay(self, overrides: dict[str, Any]) -> Any:
+        base = getattr(self.plugin, "config", {}) or {}
+
+        class _Overlay:
+            def get(self, item: str, default: Any = None) -> Any:
+                if item in overrides:
+                    return overrides[item]
+                getter = getattr(base, "get", None)
+                if callable(getter):
+                    try:
+                        return getter(item, default)
+                    except Exception:
+                        return default
+                if isinstance(base, dict):
+                    return base.get(item, default)
+                return getattr(base, item, default)
+
+        return _Overlay()
 
     def _config_get(self, key: str) -> str:
         config = getattr(self.plugin, "config", None)
@@ -2780,6 +2866,7 @@ class PrivateCompanionPageApi:
             "enable_private_reading_preference_influence",
             "enable_unanswered_screen_peek_followup",
             "enable_yesterday_screen_diary_context",
+            "enable_tts_enhancement",
             "enable_creative_writing",
             "creative_hidden_mode",
         }
@@ -2834,9 +2921,23 @@ class PrivateCompanionPageApi:
             "schedule_persona_prompt",
             "schedule_worldview_prompt",
             "roleplay_user_profile_prompt",
+            "roleplay_knowledge_source_ids",
             "worldview_adaptation_mode",
             "worldview_adaptation_prompt",
             "quiet_hours",
+            "tts_generation_mode",
+            "tts_voice_language",
+            "tts_conversion_provider_id",
+            "tts_extra_prompt",
+            "auto_voice_enabled",
+            "auto_voice_full_conversion_enabled",
+            "auto_voice_probability",
+            "auto_voice_max_chars",
+            "auto_voice_cooldown_seconds",
+            "main_user_voice_probability",
+            "main_user_mention_voice_keywords",
+            "main_user_mention_voice_probability",
+            "main_user_mention_voice_prompt",
             "daily_token_limit",
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
@@ -2869,6 +2970,8 @@ class PrivateCompanionPageApi:
             "photo_generation_style",
             "photo_generation_style_custom_prompt",
             "private_image_vision_wait_seconds",
+            "enable_private_image_gif_enhancement",
+            "private_image_gif_max_frames",
             "enable_private_image_self_recognition",
             "private_image_self_recognition_hint",
             "enable_private_image_vision_cache",
@@ -3016,6 +3119,8 @@ class PrivateCompanionPageApi:
             return self._normalize_multiline_source_config(value, limit=4000)
         if key in {"news_hot_sources", "web_exploration_interests", "private_reading_default_keywords", "private_reading_blocked_tags"}:
             return str(value or "").strip()[:1200]
+        if key == "QZONE_COOKIE":
+            return str(value or "").replace("\r", ";").replace("\n", ";").strip()[:8000]
         if key in {"group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_interest_keywords"}:
             return str(value or "").strip()[:1200]
         if key == "private_image_self_recognition_hint":
@@ -3023,6 +3128,18 @@ class PrivateCompanionPageApi:
         if key == "worldview_adaptation_mode":
             mode = str(value or "auto").strip()
             return mode if mode in {"auto", "modern", "fantasy", "sci_fi", "custom", "off"} else "auto"
+        if key == "tts_generation_mode":
+            mode = str(value or "hybrid").strip().lower()
+            return mode if mode in {"hybrid", "direct", "convert"} else "hybrid"
+        if key == "tts_voice_language":
+            lang = str(value or "ja").strip().lower()
+            return lang if lang in {"ja", "zh", "en"} else "ja"
+        if key in {"tts_extra_prompt", "main_user_mention_voice_prompt"}:
+            return str(value or "").strip()[:1200]
+        if key == "tts_conversion_provider_id":
+            return str(value or "").strip()[:160]
+        if key == "main_user_mention_voice_keywords":
+            return str(value or "").strip()[:1200]
         if key == "forward_message_mode":
             mode = str(value or "inject").strip().lower()
             if mode in {"注入", "injection"}:
@@ -3088,6 +3205,11 @@ class PrivateCompanionPageApi:
             return mode if mode in {"persona", "soft", "original"} else "persona"
         if key == "worldview_adaptation_prompt":
             return str(value or "").strip()[:1200]
+        if key == "roleplay_knowledge_source_ids":
+            normalizer = getattr(self.plugin, "_normalize_roleplay_knowledge_source_ids", None)
+            if callable(normalizer):
+                return normalizer(value)
+            return []
         if key in {"schedule_persona_prompt", "schedule_worldview_prompt", "roleplay_user_profile_prompt"}:
             return str(value or "").strip()[:2000]
         if key == "humanized_state_intensity":
@@ -3120,6 +3242,24 @@ class PrivateCompanionPageApi:
                 return max(0, min(5, int(value)))
             except (TypeError, ValueError):
                 return 1
+        if key == "auto_voice_probability":
+            try:
+                raw = float(value)
+                return max(0, min(100, int(round(raw * 100 if 0 <= raw <= 1 else raw))))
+            except (TypeError, ValueError):
+                return 20
+        if key == "main_user_voice_probability":
+            try:
+                raw = float(value)
+                return max(-1, min(100, int(round(raw * 100 if 0 <= raw <= 1 else raw))))
+            except (TypeError, ValueError):
+                return -1
+        if key == "main_user_mention_voice_probability":
+            try:
+                raw = float(value)
+                return max(0, min(100, int(round(raw * 100 if 0 <= raw <= 1 else raw))))
+            except (TypeError, ValueError):
+                return 0
         if key in {
             "check_interval_seconds",
             "daily_token_limit",
@@ -3187,6 +3327,8 @@ class PrivateCompanionPageApi:
             "atrelay_member_cache_minutes",
             "atrelay_multi_target_limit",
             "private_image_vision_cache_max_items",
+            "auto_voice_max_chars",
+            "auto_voice_cooldown_seconds",
         }:
             try:
                 parsed = max(0, int(value))
@@ -3219,6 +3361,11 @@ class PrivateCompanionPageApi:
                 return max(0.0, min(90.0, float(value)))
             except (TypeError, ValueError):
                 return 30.0
+        if key == "private_image_gif_max_frames":
+            try:
+                return max(1, min(8, int(value)))
+            except (TypeError, ValueError):
+                return 4
         if key in {
             "group_repeat_follow_probability",
             "group_repeat_interrupt_probability",
@@ -3290,6 +3437,8 @@ class PrivateCompanionPageApi:
             "enable_lunar_perception",
             "enable_solar_term_perception",
             "enable_almanac_perception",
+            "auto_voice_enabled",
+            "auto_voice_full_conversion_enabled",
             "enable_humanized_states",
             "inject_passive_states",
             "enable_cycle_state",
@@ -3309,6 +3458,7 @@ class PrivateCompanionPageApi:
             "enable_proactive_quote_trigger_message",
             "enable_local_photo_load_guard",
             "enable_private_image_self_recognition",
+            "enable_private_image_gif_enhancement",
             "enable_private_image_vision_cache",
             "enable_segmented_proactive_reply",
             "enable_segmented_proactive_content_cleanup",
@@ -3467,11 +3617,32 @@ class PrivateCompanionPageApi:
         except Exception:
             status = "LivingMemory：状态探测失败，已跳过协同。"
         return {
-            "enabled": bool(getattr(self.plugin, "enable_livingmemory_integration", False)),
+            "enabled": bool(available and getattr(self.plugin, "enable_livingmemory_integration", False)),
             "available": available,
             "tool_name": getattr(self.plugin, "livingmemory_tool_name", ""),
             "plugin_dir": plugin_dir,
             "status": status,
+        }
+
+    def _screen_companion_available(self) -> bool:
+        getter = getattr(self.plugin, "_get_screen_companion_plugin", None)
+        if callable(getter):
+            try:
+                return getter() is not None
+            except Exception:
+                return False
+        return False
+
+    def _screen_companion_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        available = self._screen_companion_available()
+        context = data.get("screen_diary_context") if isinstance(data.get("screen_diary_context"), dict) else {}
+        return {
+            "enabled": bool(available and getattr(self.plugin, "enable_yesterday_screen_diary_context", False)),
+            "available": available,
+            "source": context.get("source", ""),
+            "source_date": context.get("source_date", ""),
+            "context_available": bool(context.get("available")),
+            "summary_chars": len(str(context.get("summary") or "")),
         }
 
     def _bilibili_summary(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -3494,8 +3665,8 @@ class PrivateCompanionPageApi:
         except Exception:
             memory_api_available = False
         return {
-            "enabled": bool(getattr(self.plugin, "enable_bilibili_integration", False)),
-            "boredom_watch_enabled": bool(getattr(self.plugin, "enable_bilibili_boredom_watch", False)),
+            "enabled": bool(available and getattr(self.plugin, "enable_bilibili_integration", False)),
+            "boredom_watch_enabled": bool(available and getattr(self.plugin, "enable_bilibili_boredom_watch", False)),
             "available": available,
             "memory_api_available": memory_api_available,
             "watch_log": watch_log,
@@ -3798,10 +3969,9 @@ class PrivateCompanionPageApi:
         except Exception:
             available = False
         return {
-            "enabled": bool(getattr(self.plugin, "enable_qzone_integration", False)),
-            "life_publish_enabled": bool(getattr(self.plugin, "enable_qzone_life_publish", False)),
+            "enabled": bool(available and getattr(self.plugin, "enable_qzone_integration", False)),
+            "life_publish_enabled": bool(available and getattr(self.plugin, "enable_qzone_life_publish", False)),
             "available": available,
-            "manual_cookie_configured": bool(str(getattr(self.plugin, "qzone_cookie", "") or "").strip()),
             "last_life_publish_at": self.plugin._format_timestamp_elapsed(state.get("last_life_publish_at", 0)),
             "last_status": state.get("last_life_publish_status", ""),
             "last_text": state.get("last_life_publish_text", ""),
@@ -3815,9 +3985,9 @@ class PrivateCompanionPageApi:
             available = False
         album = state.get("last_album") if isinstance(state.get("last_album"), dict) else {}
         return {
-            "enabled": bool(getattr(self.plugin, "enable_jm_cosmos_integration", False)),
-            "boredom_read_enabled": bool(getattr(self.plugin, "enable_jm_cosmos_boredom_read", False)),
-            "ask_recommendation_enabled": bool(getattr(self.plugin, "enable_private_reading_ask_recommendation", False)),
+            "enabled": bool(available and getattr(self.plugin, "enable_jm_cosmos_integration", False)),
+            "boredom_read_enabled": bool(available and getattr(self.plugin, "enable_jm_cosmos_boredom_read", False)),
+            "ask_recommendation_enabled": bool(available and getattr(self.plugin, "enable_private_reading_ask_recommendation", False)),
             "available": available,
             "last_read_at": self.plugin._format_timestamp_elapsed(state.get("last_read_at", 0)),
             "last_status": state.get("last_status", ""),

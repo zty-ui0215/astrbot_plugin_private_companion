@@ -402,6 +402,11 @@ class IntegrationStatusMixin:
         ]
         if custom:
             base.append(f"自定义适配：{custom}")
+        knowledge_formatter = getattr(self, "_format_roleplay_knowledge_context", None)
+        if callable(knowledge_formatter):
+            knowledge_context = knowledge_formatter(purpose="worldview", max_chars=1800, max_chunks=10)
+            if knowledge_context:
+                base.append(knowledge_context)
         return "\n".join(base)
 
     def _livingmemory_plugin_dir(self) -> Path:

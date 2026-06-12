@@ -1051,6 +1051,12 @@ class EventDispatchMixin:
         normalized = str(text or "").strip()
         if not normalized:
             return []
+        tts_normalizer = getattr(self, "_normalize_tts_tags", None)
+        if callable(tts_normalizer) and re.search(r"</?t{2,}s\b", normalized, flags=re.IGNORECASE):
+            try:
+                normalized = str(tts_normalizer(normalized) or normalized).strip()
+            except Exception:
+                pass
         if image_path or extra_components:
             return [normalized]
         if not self.enable_segmented_proactive_reply:
@@ -1084,7 +1090,9 @@ class EventDispatchMixin:
                     logger.warning("[PrivateCompanion] 主动分段内容清理正则无效,跳过清理: %s", e)
 
         def _protected_cleanup_chunks(value: str) -> list[tuple[str, bool]]:
-            url_pattern = re.compile(r"(?i)\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+            protected_pattern = re.compile(
+                r"(?is)<tts\b[^>]*>.*?</tts>|(?i:\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
+            )
             bracket_pairs = {
                 "(": ")",
                 "（": "）",
@@ -1143,7 +1151,7 @@ class EventDispatchMixin:
                             flush()
                             protected = False
 
-            for match in url_pattern.finditer(text_value):
+            for match in protected_pattern.finditer(text_value):
                 feed_plain(text_value[last_pos:match.start()])
                 flush()
                 chunks.append((match.group(0), True))

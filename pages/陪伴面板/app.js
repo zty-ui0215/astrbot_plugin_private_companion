@@ -48,6 +48,7 @@ const providerLabels = {
   GROUP_FOLLOWUP_JUDGE_PROVIDER_ID: "群聊续接判断",
   FORWARD_MESSAGE_PROVIDER_ID: "合并消息转述",
   PLUGIN_VISION_PROVIDER_ID: "插件识图模型",
+  PRIVATE_READING_VISION_PROVIDER_ID: "夹层阅读视觉模型",
   NEWS_PROVIDER_ID: "新闻整理",
   WEB_EXPLORATION_PROVIDER_ID: "搜索决策/整理",
 };
@@ -65,13 +66,41 @@ const privateReadingConfigKeys = new Set([
   "private_reading_preference_max_terms",
   "private_reading_default_keywords",
   "private_reading_blocked_tags",
+  "PRIVATE_READING_VISION_PROVIDER_ID",
+]);
+
+const noFallbackProviderKeys = new Set([
+  "PRIVATE_READING_VISION_PROVIDER_ID",
 ]);
 
 function isPrivateReadingAvailable() {
   return Boolean(state.overview?.private_reading?.available);
 }
 
+const pluginIntegrationAvailabilityRules = {
+  enable_yesterday_screen_diary_context: () => Boolean(state.overview?.screen_companion?.available),
+  enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.available),
+  enable_bilibili_integration: () => Boolean(state.overview?.bilibili?.available),
+  enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
+  enable_qzone_integration: () => Boolean(state.overview?.qzone?.available),
+  enable_qzone_life_publish: () => Boolean(state.overview?.qzone?.available),
+};
+
+function unavailablePluginIntegrationOwner(key) {
+  if (pluginIntegrationAvailabilityRules[key]) {
+    return pluginIntegrationAvailabilityRules[key]() ? "" : key;
+  }
+  for (const [featureKey, settingKeys] of Object.entries(featureSettingGroups || {})) {
+    if (!pluginIntegrationAvailabilityRules[featureKey]) continue;
+    if ((settingKeys || []).includes(key) && !pluginIntegrationAvailabilityRules[featureKey]()) {
+      return featureKey;
+    }
+  }
+  return "";
+}
+
 function visibleConfigKey(key) {
+  if (unavailablePluginIntegrationOwner(key)) return false;
   return isPrivateReadingAvailable() || !privateReadingConfigKeys.has(key);
 }
 
@@ -172,9 +201,14 @@ const providerGuides = {
     fallback: "留空时跟随陪伴通用模型。",
   },
   PLUGIN_VISION_PROVIDER_ID: {
-    purpose: "插件自己的视觉理解模型，用于私聊图片/表情包、引用图片、合并消息图片、识屏和素材页理解。",
+    purpose: "插件自己的通用视觉理解模型，用于私聊图片/表情包、引用图片、合并消息图片和识屏。",
     fit: "适合确认支持图片输入、视觉描述可靠、能简短转述关键信息的多模态模型。",
     fallback: "留空时先尝试 AstrBot 本体图片转述模型，再回退到工具结果转述或主模型。",
+  },
+  PRIVATE_READING_VISION_PROVIDER_ID: {
+    purpose: "夹层阅读专用：理解封面和抽样页，生成页边批注、读后感、评分和偏好标签。",
+    fit: "必须是支持图片输入的视觉模型，最好能稳定输出 JSON，并能看懂漫画页图细节。",
+    fallback: "不回退。留空或模型不可用时，不生成本子批注和读后感。",
   },
   NEWS_PROVIDER_ID: {
     purpose: "从新闻标题和摘要候选里挑选适合分享的内容，并整理成 Bot 的内部印象。",
@@ -217,7 +251,7 @@ const providerGroups = [
     id: "media",
     title: "视觉与外界信息",
     desc: "识图、新闻和主动搜索相关模型。",
-    keys: ["PLUGIN_VISION_PROVIDER_ID", "NEWS_PROVIDER_ID", "WEB_EXPLORATION_PROVIDER_ID"],
+    keys: ["PLUGIN_VISION_PROVIDER_ID", "PRIVATE_READING_VISION_PROVIDER_ID", "NEWS_PROVIDER_ID", "WEB_EXPLORATION_PROVIDER_ID"],
   },
 ];
 
@@ -239,12 +273,12 @@ const featureMeta = {
   enable_open_loop_tracking: ["未完话头", "记录用户提到的待办、约定、之后再说的事。"],
   enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么，用于日程细化和主动理解。"],
   enable_humanized_states: ["拟人身体状态", "生成睡眠、梦境、健康、饥饿和周期等连续状态，影响日程、主动消息和被动回复。"],
-  enable_segmented_proactive_reply: ["主动分段发送", "把主动消息拆成更像聊天的短句，同时合并过短片段，避免“哈哈”“我也觉得”单独刷成一条。"],
+  enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
   inject_passive_states: ["被动状态注入", "普通聊天前把当前拟人状态注入提示词，让被动回复也受状态影响。"],
   enable_cycle_state: ["生理周期模拟", "允许符合人格的人类角色出现周期前、周期中和恢复期状态。"],
   enable_skill_growth_simulation: ["技能成长", "技能等级与能力边界。"],
   enable_message_debounce: ["消息收口防抖", "按文本、图片、转发消息分别等待用户补充，把连续补话合并为同一轮。"],
-  enable_private_image_self_recognition: ["图片转述增强", "私聊单图视觉转述和角色自我识别。"],
+  enable_private_image_self_recognition: ["图片转述增强", "处理私聊单图、引用图片、合并转发图片和 GIF 抽帧，并辅助判断角色归属。"],
   enable_environment_perception: ["环境感知", "注入当前时间、日期语境、平台、群聊/私聊和消息媒介信息。"],
   enable_holiday_perception: ["节假日感知", "识别工作日、周末、节假日和调休，影响生活节奏判断。"],
   enable_platform_perception: ["平台感知", "识别 QQ/平台、私聊/群聊、群号群名以及图片语音视频消息。"],
@@ -252,6 +286,7 @@ const featureMeta = {
   enable_lunar_perception: ["农历感知", "可用时注入农历日期，辅助节日、生活氛围和日记语境。"],
   enable_solar_term_perception: ["节气感知", "注入当天或临近节气，让日程和表达更贴合时令。"],
   enable_almanac_perception: ["轻量黄历", "生成宜/忌氛围标签，默认关闭，避免玄学感太强。"],
+  enable_yesterday_screen_diary_context: ["昨日屏幕日记", "每天只读取 screen_companion 的昨日观察日记脱敏摘要，作为今日状态和日程背景，不读取实时屏幕。"],
   enable_group_companion: ["群聊总开关", "控制是否处理群聊观察、画像、黑话和上下文注入。"],
   enable_group_slang_learning: ["群黑话学习", "记录群内常用梗、简称和特殊表达。"],
   enable_group_member_profiles: ["群成员画像", "记录成员发言习惯和群内角色，帮助判断气氛。"],
@@ -290,12 +325,29 @@ const featureMeta = {
   enable_private_reading_ask_recommendation: ["征求推荐", "空档或无聊时，低频私聊询问用户有没有好看的本子或漫画推荐。"],
   enable_private_reading_preference_influence: ["私密偏好影响", "评分样本足够后，把稳定偏好作为私聊私密互动的弱背景。"],
   enable_unanswered_screen_peek_followup: ["沉默后窥屏", "主动消息后用户长时间没回、且 Bot 正好无聊时，可免日次数窥屏确认用户在做什么。"],
-  enable_proactive_quote_trigger_message: ["群回复/主动引用触发消息", "群聊被 @、引用、唤醒或连续对话保持时，回复引用当前触发消息；群主动插话也可引用，复读跟读/打断不引用。"],
+  enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制、朗读文本清洗和主用户触发。"],
+  enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；复读跟读/打断不引用。"],
   enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。"],
   creative_hidden_mode: ["低调创作模式", "默认不汇报创作，只在节点或用户询问时自然提起。"],
 };
 
 const featureGroups = [
+  {
+    title: "通用能力",
+    note: "私聊、群聊和主动链路都会参考的状态、媒介、收口与发送能力。",
+    keys: [
+      "enable_humanized_states",
+      "enable_segmented_proactive_reply",
+      "inject_passive_states",
+      "enable_cycle_state",
+      "enable_skill_growth_simulation",
+      "enable_message_debounce",
+      "enable_private_image_self_recognition",
+      "enable_forward_message_adaptation",
+      "enable_proactive_quote_trigger_message",
+      "enable_tts_enhancement",
+    ],
+  },
   {
     title: "私聊陪伴",
     note: "关系、记忆、回复策略和自然表达。",
@@ -311,13 +363,29 @@ const featureGroups = [
       "enable_dialogue_episode_memory",
       "enable_open_loop_tracking",
       "enable_user_habit_learning",
-      "enable_humanized_states",
-      "enable_segmented_proactive_reply",
-      "inject_passive_states",
-      "enable_cycle_state",
-      "enable_skill_growth_simulation",
-      "enable_message_debounce",
-      "enable_private_image_self_recognition",
+    ],
+  },
+  {
+    title: "群聊观察",
+    note: "群氛围、黑话、话题线、插话和隐私边界。",
+    keys: [
+      "enable_group_companion",
+      "enable_group_context_injection",
+      "enable_group_scene_awareness",
+      "enable_group_reality_promise_guard",
+      "enable_group_wakeup_enhancement",
+      "enable_group_high_intensity_mode",
+      "enable_group_conversation_followup",
+      "enable_group_slang_learning",
+      "enable_group_slang_meanings",
+      "enable_group_member_profiles",
+      "enable_group_topic_threads",
+      "enable_group_episode_memory",
+      "enable_group_relationship_graph",
+      "enable_group_interjection",
+      "enable_group_repeat_follow",
+      "enable_group_interjection_feedback",
+      "enable_group_privacy_guard",
     ],
   },
   {
@@ -331,31 +399,7 @@ const featureGroups = [
       "enable_lunar_perception",
       "enable_solar_term_perception",
       "enable_almanac_perception",
-    ],
-  },
-  {
-    title: "群聊观察",
-    note: "群氛围、黑话、话题线、插话和隐私边界。",
-    keys: [
-      "enable_group_companion",
-      "enable_group_context_injection",
-      "enable_forward_message_adaptation",
-      "enable_group_scene_awareness",
-      "enable_group_reality_promise_guard",
-      "enable_group_wakeup_enhancement",
-      "enable_group_high_intensity_mode",
-      "enable_group_conversation_followup",
-      "enable_group_slang_learning",
-      "enable_group_slang_meanings",
-      "enable_group_member_profiles",
-      "enable_group_topic_threads",
-      "enable_group_episode_memory",
-      "enable_group_relationship_graph",
-      "enable_proactive_quote_trigger_message",
-      "enable_group_interjection",
-      "enable_group_repeat_follow",
-      "enable_group_interjection_feedback",
-      "enable_group_privacy_guard",
+      "enable_yesterday_screen_diary_context",
     ],
   },
   {
@@ -424,6 +468,20 @@ const configLabels = {
   schedule_worldview_prompt: "世界观/生活背景",
   roleplay_user_profile_prompt: "用户与关系补充",
   max_daily_messages: "每日主动上限",
+  enable_tts_enhancement: "TTS强化",
+  tts_generation_mode: "TTS生成路径",
+  tts_voice_language: "TTS语音语种",
+  tts_conversion_provider_id: "TTS转换模型Provider ID",
+  tts_extra_prompt: "TTS补充规则",
+  auto_voice_enabled: "自动语音转换",
+  auto_voice_full_conversion_enabled: "自动语音完整转换",
+  auto_voice_probability: "自动语音触发概率(%)",
+  auto_voice_max_chars: "自动语音最大字数",
+  auto_voice_cooldown_seconds: "自动语音冷却秒数",
+  main_user_voice_probability: "主用户触发概率(%)",
+  main_user_mention_voice_keywords: "@主用户语音关键词",
+  main_user_mention_voice_probability: "@主用户关键词触发概率(%)",
+  main_user_mention_voice_prompt: "@主用户关键词提示词",
   inbound_message_debounce_seconds: "重复消息防抖秒数",
   enable_message_debounce: "消息收口防抖",
   text_message_debounce_seconds: "文本收口秒数",
@@ -431,13 +489,15 @@ const configLabels = {
   forward_message_debounce_seconds: "转发收口秒数",
   enable_semantic_message_debounce: "旧版语义收口等待",
   semantic_message_debounce_seconds: "旧版语义收口等待秒数",
-  enable_proactive_quote_trigger_message: "群回复/主动引用触发消息",
+  enable_proactive_quote_trigger_message: "引用触发消息",
   private_image_vision_wait_seconds: "单图等待识图秒数",
+  enable_private_image_gif_enhancement: "GIF 动图强化",
+  private_image_gif_max_frames: "GIF 抽帧数",
   enable_private_image_self_recognition: "图片转述增强",
   private_image_self_recognition_hint: "角色自我识别线索",
   enable_private_image_vision_cache: "重复图片转述缓存",
   private_image_vision_cache_max_items: "图片转述缓存上限",
-  enable_segmented_proactive_reply: "主动分段发送",
+  enable_segmented_proactive_reply: "分段发送",
   segmented_proactive_scope: "分段作用范围",
   segmented_proactive_threshold: "不分段字数阈值",
   segmented_proactive_min_segment_chars: "短片段合并阈值",
@@ -480,6 +540,9 @@ const configLabels = {
   enable_lunar_perception: "农历",
   enable_solar_term_perception: "节气",
   enable_almanac_perception: "轻量黄历",
+  enable_yesterday_screen_diary_context: "昨日屏幕日记",
+  screen_diary_context_max_chars: "昨日屏幕日记上下文字数",
+  passive_topic_memory_hours: "话题抑制记忆小时",
   idle_minutes: "空闲门槛分钟",
   min_interval_minutes: "最小主动间隔分钟",
   check_interval_seconds: "后台检查间隔秒",
@@ -563,6 +626,7 @@ const configLabels = {
   web_exploration_max_results: "搜索结果数",
   web_exploration_interests: "探索兴趣倾向",
   enable_web_exploration_boredom_search: "空档自主搜索",
+  QZONE_COOKIE: "QQ 空间手动 Cookie",
   qzone_life_publish_min_interval_hours: "说说最小间隔",
   qzone_life_publish_probability: "说说触发概率",
   enable_photo_text_action: "主动拍照/生图",
@@ -587,6 +651,7 @@ const configLabels = {
   private_reading_default_keywords: "默认搜索关键词",
   private_reading_blocked_tags: "过滤标签",
   private_reading_ask_probability: "征求推荐概率",
+  enable_private_reading_preference_influence: "私密偏好影响",
   private_reading_preference_min_ratings: "偏好生效最少评分数",
   private_reading_preference_max_terms: "偏好注入最多词条",
   unanswered_screen_peek_after_minutes: "沉默多久后窥屏",
@@ -620,9 +685,25 @@ const configDescriptions = {
   enable_lunar_perception: "开启后在依赖可用时注入农历日期。",
   enable_solar_term_perception: "开启后注入当天或近三天节气提示。",
   enable_almanac_perception: "开启后生成轻量宜忌氛围标签，只作表达参考。",
+  enable_yesterday_screen_diary_context: "读取 screen_companion 的昨日屏幕观察日记脱敏摘要，作为今日状态、日程和生活节奏背景；不会读取今天实时屏幕。",
+  screen_diary_context_max_chars: "注入给状态和日程模型的昨日屏幕观察摘要最大字符数。建议较短，只保留活动类型和节奏。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
   max_daily_messages: "每个私聊对象每天最多收到多少条插件主动消息。",
+  passive_topic_memory_hours: "记录最近被动回复主题的时间窗口，用来判断短时间内是否又在重复同类话题。",
+  tts_generation_mode: "hybrid：有 <tts> 就直接处理，没有时按自动语音规则转换；direct：只让主模型自己写 <tts>；convert：普通回复后统一交给转换模型生成 TTS 格式。适合实现“中文显示文本 + 外语语音块”。",
+  tts_voice_language: "控制真正送入 TTS 的语音正文语种。可让聊天文本保留中文，<tts> 内使用日语或英语朗读；日语模式会尽量避免明显非日语文本直接进入 TTS。",
+  tts_conversion_provider_id: "用于 convert 路径、hybrid 自动语音和语种修正。留空时显式 <tts> 标签仍可直接由 TTS provider 处理。",
+  tts_extra_prompt: "只填写本人格或声线的额外要求。基础格式、语种和 provider 自适应规则会自动生成，留空最稳。",
+  auto_voice_enabled: "开启后，hybrid 路径可按概率把纯文本短回复转换为语音。",
+  auto_voice_full_conversion_enabled: "开启后，自动语音尽量把整条回复完整转换成一段语音。",
+  auto_voice_probability: "普通纯文本回复参与自动语音转换的概率，填写 0-100。",
+  auto_voice_max_chars: "普通回复不超过该字数才参与自动语音。填 0 表示不限制。主用户单独概率命中时不受此限制。",
+  auto_voice_cooldown_seconds: "同一会话成功触发自动语音后的冷却秒数。主用户单独概率命中时不受普通冷却限制。",
+  main_user_voice_probability: "群聊中主用户本人发言或被 @ 到时的触发概率。填 -1 表示继承普通概率。主用户来自 target_user_ids 和私聊身份别名归并。",
+  main_user_mention_voice_keywords: "群聊 @ 到主用户且命中这些关键词时，参与强制语音判定。多个关键词可用逗号、空格或换行分隔。",
+  main_user_mention_voice_probability: "命中 @主用户语音关键词后的触发概率，填写 0-100。",
+  main_user_mention_voice_prompt: "关键词规则命中后注入给模型的补充要求，例如更短、更贴近、使用某种声线。",
   daily_token_limit: "插件内部 LLM 任务的每日硬限额，达到后跳过非豁免后台调用。0 表示不限。",
   enable_daily_token_soft_limit: "作为达到限额就停止插件/停止后台链路的替代方案。开启后，达到软限额时暂缓新闻、网页探索、创作、群整理、自检和主动生图等低优先级后台任务，优先保留用户当下触发的回复。",
   daily_token_soft_limit: "今日插件内部 LLM 消耗达到该值后进入软降载。0 表示关闭软限额，只保留每日硬限额。",
@@ -634,11 +715,13 @@ const configDescriptions = {
   enable_semantic_message_debounce: "旧版兼容项。新配置请使用“消息收口防抖”。",
   semantic_message_debounce_seconds: "旧版兼容项。新配置请使用文本/图片/转发收口秒数。",
   enable_proactive_quote_trigger_message: "开启后，群聊被 @、引用、唤醒或连续对话保持时，Bot 的普通回复会引用当前触发消息；群聊主动插话会引用触发消息；模型预约的私聊主动若能追溯到同一私聊消息，也会引用。复读跟读/打断不会引用。",
-  private_image_vision_wait_seconds: "私聊单图确认没有继续补充后，最多等待视觉转述多久。不是图片防抖时间；视觉提前完成会立刻进入主链。",
+  private_image_vision_wait_seconds: "私聊单图确认没有继续补充后，最多等待视觉转述多久。不是图片收口时间；视觉提前完成会立刻进入主链。",
+  enable_private_image_gif_enhancement: "图片转述增强的可选子功能。开启后动态 GIF 会抽取代表帧，让视觉模型理解动作、表情变化和文字变化；关闭后按普通 GIF/图片路径处理。",
+  private_image_gif_max_frames: "动态 GIF 进入视觉转述时最多抽取多少个代表帧。帧数越多越能理解动作变化，但会增加识图耗时和视觉输入量。",
   private_image_self_recognition_hint: "只补充当前角色自己的外观、头像、名字、表情包特征或聊天截图昵称，让视觉转述更容易判断图里是不是当前角色。不要写用户资料。",
   enable_private_image_vision_cache: "开启后，同一张图片或表情包会按内容哈希复用上次视觉摘要，避免重复调用识图模型；不会缓存最终聊天回复。",
   private_image_vision_cache_max_items: "最多保留多少条图片视觉摘要缓存。达到上限后会清理最久未命中的旧缓存，0 表示不限制。",
-  segmented_proactive_threshold: "主动文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
+  segmented_proactive_threshold: "纯文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
   segmented_proactive_scope: "插件主动只影响插件主动消息；全部 LLM 回复会额外拆普通模型纯文本回复，首段随主链立即发送，剩余片段后台按间隔补发。图片、语音、AT 或工具转述等复杂消息不会拆。",
   segmented_proactive_min_segment_chars: "分段后短于或等于该字数的片段会并入相邻消息，避免“哈哈”“我也觉得”这类附和语单独发出。",
   segmented_proactive_max_segments: "一次主动消息最多拆成几条。默认 3，过高会显得刷屏。",
@@ -724,6 +807,7 @@ const configDescriptions = {
   web_exploration_min_interval_hours: "两次自主搜索之间的最小间隔。",
   web_exploration_share_probability: "完成探索后，主动私聊分享的概率，0-1。",
   web_exploration_max_results: "每次调用 AstrBot 网页搜索时最多读取多少条结果。",
+  QZONE_COOKIE: "可填写浏览器 QQ 空间 Cookie，作为查看、点赞、评论和发布说说的优先凭据；留空时仍使用 OneBot 自动 Cookie。",
   qzone_life_publish_min_interval_hours: "两次低频生活说说之间的最小间隔。",
   qzone_life_publish_probability: "满足条件时发布生活说说的概率，0-1。",
   photo_action_max_daily: "每个私聊对象每天最多生成几张主动图片。真实生成成功就消耗额度，避免失败重试时反复生图。",
@@ -747,6 +831,7 @@ const configDescriptions = {
   private_reading_default_keywords: "私下阅读时默认搜索关键词。多个词可用逗号或换行分隔。",
   private_reading_blocked_tags: "过滤标签。匹配到这些标签时跳过对应素材。",
   private_reading_ask_probability: "无聊时向用户征求推荐的概率，0-1。",
+  enable_private_reading_preference_influence: "开启后，夹层阅读评分样本足够时会把稳定偏好作为私聊私密互动的弱背景；关闭后评分只用于素材挑选。",
   private_reading_preference_min_ratings: "累计评分达到这个数量后，偏好画像才会影响私聊私密互动。",
   private_reading_preference_max_terms: "每次注入最多参考多少个稳定偏好词，避免上下文太长或风格偏移。",
   unanswered_screen_peek_after_minutes: "主动消息发出后，用户沉默多久才允许尝试识屏观察。",
@@ -769,13 +854,13 @@ const configDescriptions = {
 };
 
 const featureSettingGroups = {
-  enable_mai_style_integration: ["default_style", "idle_minutes", "min_interval_minutes", "max_daily_messages"],
+  enable_mai_style_integration: ["default_style"],
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["max_learned_expression_items"],
   enable_companion_reply_planner: ["default_style"],
   enable_intent_emotion_analysis: ["default_style"],
   enable_response_self_review: [],
-  enable_passive_topic_suppression: ["min_interval_minutes"],
+  enable_passive_topic_suppression: ["passive_topic_memory_hours"],
   enable_relationship_state_machine: ["default_style"],
   enable_dialogue_episode_memory: ["episode_memory_refresh_messages", "episode_memory_refresh_minutes", "max_dialogue_episodes"],
   enable_open_loop_tracking: ["max_dialogue_episodes"],
@@ -786,15 +871,17 @@ const featureSettingGroups = {
   enable_cycle_state: ["humanized_state_intensity"],
   enable_skill_growth_simulation: ["skill_growth_rate", "skill_growth_custom_skills", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
   enable_message_debounce: ["inbound_message_debounce_seconds", "text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds"],
-  enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
+  enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
+  enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
   enable_semantic_message_debounce: ["inbound_message_debounce_seconds", "semantic_message_debounce_seconds"],
   enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception"],
   enable_holiday_perception: ["holiday_country"],
-  enable_platform_perception: ["environment_perception_timezone"],
+  enable_platform_perception: [],
   enable_model_perception: [],
   enable_lunar_perception: ["environment_perception_timezone"],
   enable_solar_term_perception: ["environment_perception_timezone"],
   enable_almanac_perception: ["environment_perception_timezone"],
+  enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
   enable_group_companion: ["max_group_recent_messages", "max_group_slang_terms"],
   enable_group_context_injection: ["max_group_recent_messages", "group_scene_recent_limit"],
   enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit"],
@@ -824,7 +911,7 @@ const featureSettingGroups = {
   enable_external_event_self_link: ["external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_share_probability", "web_exploration_share_probability"],
   enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
   enable_web_exploration_boredom_search: ["web_exploration_interests", "web_exploration_min_interval_hours", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
-  enable_qzone_integration: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
+  enable_qzone_integration: ["QZONE_COOKIE", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
   enable_photo_text_action: ["photo_action_max_daily", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "photo_generation_style", "photo_generation_style_custom_prompt"],
   enable_private_reading_integration: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
@@ -832,6 +919,7 @@ const featureSettingGroups = {
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
+  enable_tts_enhancement: ["tts_generation_mode", "tts_voice_language", "tts_conversion_provider_id", "tts_extra_prompt", "auto_voice_enabled", "auto_voice_full_conversion_enabled", "auto_voice_probability", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_creative_writing: ["creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects"],
   creative_hidden_mode: ["creative_share_probability"],
 };
@@ -854,6 +942,11 @@ const featureSettingSections = {
       title: "视觉等待",
       note: "收口结束后等待图片转述结果；视觉提前完成会直接进入主链。",
       keys: ["private_image_vision_wait_seconds"],
+    },
+    {
+      title: "GIF 动图强化",
+      note: "可选抽帧理解动态表情包和动图，不开启时按普通图片/GIF 处理。",
+      keys: ["enable_private_image_gif_enhancement", "private_image_gif_max_frames"],
     },
     {
       title: "重复图片缓存",
@@ -937,10 +1030,30 @@ const featureSettingSections = {
       keys: ["photo_generation_style", "photo_generation_style_custom_prompt"],
     },
   ],
+  enable_tts_enhancement: [
+    {
+      title: "生成路径",
+      note: "控制主模型写标签、后处理转换和 provider 情绪标签适配。",
+      keys: ["tts_generation_mode", "tts_voice_language", "tts_conversion_provider_id", "tts_extra_prompt"],
+    },
+    {
+      title: "自动语音",
+      note: "hybrid 模式下，符合条件的纯文本回复可按概率转换为语音。",
+      keys: ["auto_voice_enabled", "auto_voice_probability", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "auto_voice_full_conversion_enabled"],
+    },
+    {
+      title: "主用户触发",
+      note: "群聊中主用户本人发言，或消息 @ 到主用户并命中关键词时，提高语音触发概率。",
+      keys: ["main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
+    },
+  ],
 };
 
 const featureSettingTypes = {
   forward_message_mode: { type: "select", options: [["inject", "注入"], ["transcribe", "转述"]] },
+  tts_generation_mode: { type: "select", options: [["hybrid", "hybrid"], ["direct", "direct"], ["convert", "convert"]] },
+  tts_voice_language: { type: "select", options: [["ja", "日语"], ["zh", "中文"], ["en", "英语"]] },
+  tts_conversion_provider_id: { type: "provider" },
   photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["external", "在线图片 API"]] },
   photo_generation_style: { type: "select", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
   segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部 LLM 纯文本回复"]] },
@@ -949,7 +1062,11 @@ const featureSettingTypes = {
   atrelay_default_relay_style: { type: "select", options: [["persona", "语气转译"], ["soft", "委婉转述"], ["original", "原话模式"]] },
   worldbook_config_paths: { type: "textarea" },
   private_user_aliases: { type: "textarea" },
+  tts_extra_prompt: { type: "textarea" },
+  main_user_mention_voice_keywords: { type: "textarea" },
+  main_user_mention_voice_prompt: { type: "textarea" },
   skill_growth_custom_skills: { type: "textarea" },
+  QZONE_COOKIE: { type: "textarea" },
   news_sources: { type: "textarea" },
   news_hot_sources: { type: "textarea" },
   web_exploration_interests: { type: "textarea" },
@@ -989,6 +1106,8 @@ const percentSettingKeys = new Set([
   "group_wakeup_interest_probability",
   "group_wakeup_topic_interest_max_boost",
   "group_wakeup_debounce_pending_penalty",
+  "auto_voice_probability",
+  "main_user_mention_voice_probability",
   "local_photo_cpu_busy_percent",
   "local_photo_memory_busy_percent",
 ]);
@@ -4446,6 +4565,12 @@ function renderModuleSummary(settings) {
       tone: settings.worldview_adaptation_mode === "off" ? "off" : "ok",
     },
     {
+      label: "知识库参考",
+      value: `${state.overview?.knowledge?.selected_count || 0} 项`,
+      note: state.overview?.knowledge?.available ? "增强日程与世界观" : "未发现 AstrBot 知识库",
+      tone: Number(state.overview?.knowledge?.selected_count || 0) > 0 ? "ok" : "off",
+    },
+    {
       label: "记忆整理",
       value: `${settings.memory_refresh_interval_minutes ?? 0} 分钟`,
       note: `片段阈值 ${settings.episode_memory_refresh_messages ?? 0} 条消息`,
@@ -4581,7 +4706,10 @@ function fillForm(selector, values) {
     }
   });
   if (selector === "#longTermModuleForm") renderNewsSourceManager();
-  if (selector === "#roleplayProfileForm") hydrateRoleplayStandardFields();
+  if (selector === "#roleplayProfileForm") {
+    hydrateRoleplayStandardFields();
+    renderRoleplayKnowledgeSources();
+  }
 }
 
 function collectFormSettings(selector) {
@@ -4591,6 +4719,7 @@ function collectFormSettings(selector) {
   if (selector === "#roleplayProfileForm") {
     syncRoleplayStandardFieldsToFreeform();
     syncRoleplayCoreFieldsFromPersona();
+    syncRoleplayKnowledgeSelectionToInput();
   }
   form.querySelectorAll("[name]").forEach((input) => {
     if (input.disabled) return;
@@ -4603,6 +4732,76 @@ function collectFormSettings(selector) {
     }
   });
   return result;
+}
+
+function roleplayKnowledgeSelectedSet() {
+  const settings = state.overview?.settings || {};
+  const hidden = document.querySelector('#roleplayProfileForm [name="roleplay_knowledge_source_ids"]');
+  const raw = hidden?.value || settings.roleplay_knowledge_source_ids || state.overview?.knowledge?.selected_ids || [];
+  const items = Array.isArray(raw) ? raw : String(raw || "").split(/\r?\n|[,，;；]/);
+  return new Set(items.map((item) => String(item || "").trim()).filter(Boolean));
+}
+
+function syncRoleplayKnowledgeSelectionToInput() {
+  const hidden = document.querySelector('#roleplayProfileForm [name="roleplay_knowledge_source_ids"]');
+  if (!hidden) return;
+  const selected = [...document.querySelectorAll("[data-roleplay-knowledge-id]:checked")]
+    .map((input) => input.dataset.roleplayKnowledgeId || "")
+    .filter(Boolean);
+  hidden.value = selected.join("\n");
+  const badge = document.getElementById("roleplayKnowledgeCount");
+  if (badge) badge.textContent = String(selected.length);
+}
+
+function renderRoleplayKnowledgeSources() {
+  const box = document.getElementById("roleplayKnowledgeSources");
+  if (!box) return;
+  const knowledge = state.overview?.knowledge || {};
+  const sources = Array.isArray(knowledge.sources) ? knowledge.sources : [];
+  const selected = roleplayKnowledgeSelectedSet();
+  const badge = document.getElementById("roleplayKnowledgeCount");
+  if (badge) badge.textContent = String(selected.size);
+  if (!sources.length) {
+    box.innerHTML = `<div class="empty small">暂无可选择的 AstrBot 知识库。</div>`;
+    return;
+  }
+  box.innerHTML = sources.map((source) => {
+    const sourceId = String(source.id || "");
+    const docs = Array.isArray(source.documents) ? source.documents : [];
+    const docRows = docs.map((doc) => {
+      const docId = String(doc.id || "");
+      const chunkCount = Number(doc.chunk_count || 0);
+      return `
+        <label class="roleplay-knowledge-doc">
+          <input type="checkbox" data-roleplay-knowledge-id="${escapeHtml(docId)}" ${selected.has(docId) ? "checked" : ""} />
+          <span>
+            <b>${escapeHtml(doc.name || doc.doc_id || "未命名文档")}</b>
+            <small>${escapeHtml(doc.file_type || "doc")} · ${chunkCount} 段</small>
+          </span>
+        </label>
+      `;
+    }).join("");
+    return `
+      <article class="roleplay-knowledge-source">
+        <label class="roleplay-knowledge-base">
+          <input type="checkbox" data-roleplay-knowledge-id="${escapeHtml(sourceId)}" ${selected.has(sourceId) ? "checked" : ""} />
+          <span>
+            <b>${escapeHtml(source.emoji ? `${source.emoji} ${source.name || source.kb_id}` : (source.name || source.kb_id || "未命名知识库"))}</b>
+            <small>${Number(source.doc_count || docs.length)} 文档 · ${Number(source.chunk_count || 0)} 段</small>
+          </span>
+        </label>
+        ${source.description ? `<p>${escapeHtml(source.description)}</p>` : ""}
+        ${docRows ? `<div class="roleplay-knowledge-docs">${docRows}</div>` : ""}
+      </article>
+    `;
+  }).join("");
+  box.querySelectorAll("[data-roleplay-knowledge-id]").forEach((input) => {
+    input.addEventListener("change", () => {
+      syncRoleplayKnowledgeSelectionToInput();
+      markModuleFormDirty(document.getElementById("roleplayProfileForm"));
+    });
+  });
+  syncRoleplayKnowledgeSelectionToInput();
 }
 
 function escapeRegExp(text) {
@@ -5807,6 +6006,9 @@ function featureSettingInput(key, value) {
       </select>
     `;
   }
+  if (spec.type === "provider") {
+    return featureProviderSelect(key, value);
+  }
   if (spec.type === "textarea") {
     return `<textarea data-feature-param="${safeKey}" rows="3">${escapeHtml(Array.isArray(value) ? value.join("\n") : value ?? "")}</textarea>`;
   }
@@ -5824,6 +6026,39 @@ function featureSettingInput(key, value) {
       ${max ? `max="${max}"` : ""}
     />
   `;
+}
+
+function featureProviderSelect(key, value) {
+  const current = String(value || "").trim();
+  const known = state.availableProviders.some((item) => item.id === current);
+  const customValue = current && !known ? current : "";
+  const options = [
+    `<option value="">留空自动回退</option>`,
+    ...state.availableProviders.map((item) => {
+      const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
+      return `<option value="${escapeHtml(item.id)}" ${item.id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    }),
+    `<option value="__custom__" ${customValue ? "selected" : ""}>手动输入 Provider ID</option>`,
+  ].join("");
+  return `
+    <div class="feature-provider-select">
+      <select data-feature-provider-select="${escapeHtml(key)}">${options}</select>
+      <input data-feature-param="${escapeHtml(key)}" value="${escapeHtml(current)}" placeholder="自定义 Provider ID" ${customValue ? "" : "hidden"} />
+    </div>
+  `;
+}
+
+function syncFeatureProviderInput(select) {
+  const key = select.dataset.featureProviderSelect;
+  const input = document.querySelector(`[data-feature-param="${key}"]`);
+  if (!input) return;
+  if (select.value === "__custom__") {
+    input.hidden = false;
+    input.focus();
+  } else {
+    input.hidden = true;
+    input.value = select.value;
+  }
 }
 
 function collectFeatureDetailPayload(featureKey, root = document) {
@@ -5861,6 +6096,8 @@ function featureDependencyLines(key) {
   if (["enable_web_exploration", "enable_web_exploration_boredom_search"].includes(key)) dependencies.push(["依赖", "AstrBot 网页搜索"]);
   if (["enable_qzone_life_publish"].includes(key)) dependencies.push(["依赖", "QQ 空间动态层"]);
   if (key === "enable_photo_text_action") dependencies.push(["依赖", "ComfyUI 或在线图片 API"]);
+  if (key === "enable_tts_enhancement") dependencies.push(["依赖", "当前会话 TTS provider"]);
+  if (key === "enable_yesterday_screen_diary_context") dependencies.push(["依赖", "screen_companion 昨日观察日记"]);
   if (key.startsWith("enable_private_reading_")) dependencies.push(["依赖", "素材能力可用"]);
   if (key === "enable_private_image_self_recognition") dependencies.push(["依赖", "AstrBot 默认图片转述模型 / 插件识图模型"]);
   if (["enable_group_interjection", "enable_bilibili_boredom_watch", "enable_news_boredom_read", "enable_web_exploration_boredom_search", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_unanswered_screen_peek_followup"].includes(key)) {
@@ -5871,7 +6108,7 @@ function featureDependencyLines(key) {
 
 const featureDetailGuides = {
   enable_mai_style_integration: {
-    summary: "把插件整理出的关系、记忆、状态和说话风格放进普通回复里，是私聊拟人感的核心入口。",
+    summary: "把插件整理出的关系、记忆、状态和说话风格放进普通回复里，是陪伴回复增强的核心入口。",
     trigger: "每次 Bot 正常回复前生效。",
     enabled: "回复会参考关系阶段、长期画像、表达习惯和当前状态。",
     disabled: "其他学习内容仍可记录，但主回复更接近 AstrBot 原本的普通回复。",
@@ -5887,6 +6124,12 @@ const featureDetailGuides = {
     trigger: "私聊中出现可复用表达时低频记录。",
     enabled: "Bot 会在合适场景模仿或呼应你的表达习惯。",
     disabled: "不会继续学习新口癖，回复会更少带用户个人语气痕迹。",
+  },
+  enable_tts_enhancement: {
+    summary: "支持聊天文本保留中文、<tts> 内生成外语语音，并把 TTS 生成路径、标签规范化、语种控制和发送前朗读文本清洗统一收口处理。",
+    trigger: "LLM 请求、LLM 回复和发送前都会参与；hybrid/direct/convert 三种路径行为不同。",
+    enabled: "可处理标准或错拼 <tts> 标签，并按配置把纯文本短回复转换为语音。",
+    disabled: "只保留本插件原有主动 voice 行为，不额外改写普通回复。",
   },
   enable_companion_reply_planner: {
     summary: "回复前先判断这轮更适合安慰、接梗、转移、认真回答还是保持沉默感。",
@@ -5907,10 +6150,10 @@ const featureDetailGuides = {
     disabled: "回复少一次自检，速度略快但稳定性下降。",
   },
   enable_passive_topic_suppression: {
-    summary: "限制 Bot 短时间反复主动提同一件事，避免像卡在一个话题上。",
-    trigger: "准备主动提起话题或延续话题时。",
-    enabled: "相似主动话题会被压低优先级。",
-    disabled: "Bot 可能更频繁重复刚提过的内容。",
+    summary: "记录最近被动回复主题，限制短时间内反复把同类话题带回聊天，避免像卡在一个话题上。",
+    trigger: "私聊回复生成后和下一轮回复审校时。",
+    enabled: "相似话题会被标记为重复，回复自检可轻微改写或压低重复表达。",
+    disabled: "Bot 可能更频繁重复刚提过的内容或相似收尾。",
   },
   enable_relationship_state_machine: {
     summary: "维护陌生、熟悉、亲近、疏离等关系阶段，并把变化反馈给回复和主动行为。",
@@ -5943,10 +6186,10 @@ const featureDetailGuides = {
     disabled: "状态退化为较平稳的基础信息，拟人生活感会明显减少。",
   },
   enable_segmented_proactive_reply: {
-    summary: "把主动消息按自然聊天节奏拆成短句，并合并过短片段，避免刷屏或突兀附和。",
-    trigger: "Bot 发送主动私聊消息时。",
-    enabled: "主动消息更像一条条打出来，但会控制最小长度和最大段数。",
-    disabled: "主动消息一次性发送完整文本。",
+    summary: "把纯文本回复按自然聊天节奏拆成短句，并合并过短片段，避免刷屏或突兀附和。",
+    trigger: "插件主动消息发送时；若作用范围设为全部 LLM，也会处理普通模型纯文本回复。",
+    enabled: "符合条件的文本会按规则拆分，首段先发，剩余片段按自然间隔补发。",
+    disabled: "符合场景的文本一次性发送完整内容。",
   },
   inject_passive_states: {
     summary: "普通被动聊天也注入当前状态，让用户主动来聊时 Bot 能表现出刚睡醒、疲惫或正忙完的感觉。",
@@ -5973,10 +6216,10 @@ const featureDetailGuides = {
     disabled: "不做语义收口等待，只保留重复消息去重。",
   },
   enable_private_image_self_recognition: {
-    summary: "私聊单图视觉转述和角色自我识别。消息收口等待已拆到“消息收口防抖”里单独配置。",
-    trigger: "私聊用户只发图片、截图或表情包，并进入图片处理链时。",
-    enabled: "图片转述会带上当前角色名字、人设和自定义线索，主链更容易识别“这是你/你的表情包/不像你”。",
-    disabled: "不再额外做角色自我识别；图片是否收口等待由“消息收口防抖”控制。",
+    summary: "为私聊单图、引用图片、合并转发图片和动态 GIF 提供短视觉摘要、表达意图和角色归属辅助判断。",
+    trigger: "私聊图片进入视觉转述链路、引用图片被解析、合并转发含图片或动态 GIF 需要抽帧时。",
+    enabled: "视觉摘要会结合当前角色名字、人设和自定义线索，并尽量区分“当前角色/用户/无关图片/无法判断”。",
+    disabled: "不再额外做插件侧图片转述增强和角色自我识别；图片收口等待仍由“消息收口防抖”控制。",
   },
   enable_semantic_message_debounce: {
     summary: "旧版兼容开关。新配置请使用“消息收口防抖”。",
@@ -6026,6 +6269,12 @@ const featureDetailGuides = {
     enabled: "日程和表达可能带一点当天氛围。",
     disabled: "关闭这部分玄学感，默认更现实。",
   },
+  enable_yesterday_screen_diary_context: {
+    summary: "读取 screen_companion 的昨日屏幕观察日记脱敏摘要，用来推断今天的状态、作息惯性和日程背景。",
+    trigger: "每日生成日程、刷新状态或需要昨日屏幕背景时。",
+    enabled: "Bot 会参考昨天的活动类型和节奏，但不会读取今天实时屏幕，也不应直说“我昨天看到你”。",
+    disabled: "不再把昨日屏幕观察摘要注入状态和日程。已有 screen_companion 数据不会被删除。",
+  },
   enable_group_companion: {
     summary: "群聊能力总入口，控制群观察、上下文、话题线、关系网和群主动行为是否运行。",
     trigger: "收到群聊消息或后台整理群聊记录时。",
@@ -6039,8 +6288,8 @@ const featureDetailGuides = {
     disabled: "群回复主要依赖原始消息，上下文感会弱。",
   },
   enable_forward_message_adaptation: {
-    summary: "让 Bot 能阅读合并转发，把节点顺序、发言人和重点内容整理成可理解上下文。",
-    trigger: "用户发送合并消息时。",
+    summary: "让 Bot 能阅读合并转发，把节点顺序、发言人、嵌套记录和图片摘要整理成可理解上下文。",
+    trigger: "私聊或群聊里用户发送合并消息/聊天记录时。",
     enabled: "可选择直接注入摘要，或先用专门模型转述后再回复。",
     disabled: "合并消息只按 AstrBot 原始能力处理，理解能力可能不足。",
   },
@@ -6248,6 +6497,12 @@ const featureDetailGuides = {
     enabled: "这类识屏不受普通日次数限制，但仍受冷却控制。",
     disabled: "用户不回时不会因此额外识屏。",
   },
+  enable_proactive_quote_trigger_message: {
+    summary: "回复或主动消息能追溯到触发消息时，自动带引用，帮助用户确认 Bot 回的是哪一句。",
+    trigger: "群聊被 @、引用、唤醒、连续对话保持、群主动插话，或模型预约的私聊主动能追溯触发消息时。",
+    enabled: "普通群回复、群主动插话和可追溯的私聊主动会引用触发消息；复读跟读/打断不引用。",
+    disabled: "这些消息不主动附带引用，用户需要从上下文判断回复对象。",
+  },
   enable_creative_writing: {
     summary: "Bot 会在闲暇时从生活小事、梦境、日记或阅读灵感中可选地写一点文本作品，并放入书柜。",
     trigger: "日程处于休息、摸鱼、读书、写字等空闲片段，且灵感概率命中时。",
@@ -6285,14 +6540,26 @@ function featureImpactLines(key) {
   const lines = [];
   const group = featureGroupForKey(key);
   lines.push(["模块", group]);
-  if (key.startsWith("enable_group_") || key === "enable_atrelay_tools" || key === "enable_worldbook_member_recognition") {
+  if (["enable_humanized_states", "inject_passive_states", "enable_cycle_state", "enable_skill_growth_simulation"].includes(key)) {
+    lines.push(["场景", "日程 / 状态 / 私聊 / 群聊"]);
+  } else if (key === "enable_segmented_proactive_reply") {
+    lines.push(["场景", "主动消息 / LLM 纯文本回复"]);
+  } else if (key === "enable_message_debounce") {
+    lines.push(["场景", "私聊 / 群聊 / 图片 / 合并转发"]);
+  } else if (key === "enable_forward_message_adaptation") {
+    lines.push(["场景", "私聊合并消息 / 群聊合并消息"]);
+  } else if (key === "enable_proactive_quote_trigger_message") {
+    lines.push(["场景", "群回复 / 群主动 / 私聊主动"]);
+  } else if (key === "enable_tts_enhancement") {
+    lines.push(["场景", "私聊 / 群聊 / 主动语音"]);
+  } else if (key.startsWith("enable_group_") || key === "enable_atrelay_tools" || key === "enable_worldbook_member_recognition") {
     lines.push(["场景", "群聊 / 转述 / 关系网"]);
   } else if (key === "enable_private_image_self_recognition") {
-    lines.push(["场景", "私聊图片 / 表情包"]);
+    lines.push(["场景", "私聊图片 / 引用图片 / 合并图片 / GIF"]);
   } else if (key.startsWith("enable_bilibili_") || key.startsWith("enable_news_") || key === "enable_external_event_self_link" || key.startsWith("enable_web_exploration") || key.startsWith("enable_qzone_") || key === "enable_photo_text_action" || key.startsWith("enable_private_reading_") || key === "enable_creative_writing" || key === "creative_hidden_mode") {
     lines.push(["场景", "长线主动"]);
-  } else if (key.startsWith("enable_environment_") || key.includes("perception")) {
-    lines.push(["场景", "日程 / 状态 / 回复"]);
+  } else if (key.startsWith("enable_environment_") || key.includes("perception") || key === "enable_yesterday_screen_diary_context") {
+    lines.push(["场景", key === "enable_yesterday_screen_diary_context" ? "日程 / 状态 / 屏幕日记" : "日程 / 状态 / 回复"]);
   } else {
     lines.push(["场景", "私聊陪伴"]);
   }
@@ -6430,6 +6697,10 @@ function bindFeatureDetailActions() {
         });
       }
     });
+    form.querySelectorAll("[data-feature-provider-select]").forEach((select) => {
+      syncFeatureProviderInput(select);
+      select.addEventListener("change", () => syncFeatureProviderInput(select));
+    });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const featureKey = form.dataset.featureParamForm || state.selectedFeatureKey;
@@ -6493,8 +6764,9 @@ function providerCardMarkup(key, label, providers) {
   const selected = providers[key] || "";
   const resolved = resolveProviderId(key, providers);
   const configured = Boolean(selected);
+  const noFallback = noFallbackProviderKeys.has(key);
   const group = providerGroupByKey[key];
-  const statusLabel = configured ? "已单独配置" : "自动回退";
+  const statusLabel = configured ? "已单独配置" : (noFallback ? "未配置" : "自动回退");
   return `
     <article class="provider-card ${configured ? "configured" : "inherited"}">
       <div class="provider-card-head">
@@ -6510,7 +6782,7 @@ function providerCardMarkup(key, label, providers) {
       </label>
       <div class="provider-current">
         <span>当前使用</span>
-        <b>${escapeHtml(resolved || "AstrBot 默认模型")}</b>
+        <b>${escapeHtml(resolved || (noFallback ? "未配置" : "AstrBot 默认模型"))}</b>
       </div>
       ${providerGuideMarkup(key)}
       <div class="provider-row">
@@ -6559,7 +6831,8 @@ function providerMatchesFilter(key, label, providers) {
 function renderProviderSummary(providers) {
   const keys = Object.keys(providerLabels).filter((key) => visibleConfigKey(key));
   const configured = keys.filter((key) => Boolean(providers[key])).length;
-  const inherited = keys.length - configured;
+  const inherited = keys.filter((key) => !providers[key] && !noFallbackProviderKeys.has(key)).length;
+  const requiredMissing = keys.filter((key) => !providers[key] && noFallbackProviderKeys.has(key)).length;
   const available = state.availableProviders.length;
   const vision = providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述";
   $("#providerSummary").innerHTML = `
@@ -6573,6 +6846,13 @@ function renderProviderSummary(providers) {
       <b>${inherited}</b>
       <small>留空项会按兜底链路执行</small>
     </div>
+    ${requiredMissing ? `
+    <div class="provider-summary-card warn">
+      <span>未配置专用项</span>
+      <b>${requiredMissing}</b>
+      <small>这些任务留空时不会回退</small>
+    </div>
+    ` : ""}
     <div class="provider-summary-card">
       <span>可选 Provider</span>
       <b>${available}</b>
@@ -6590,7 +6870,7 @@ function providerSelect(key, value) {
   const known = state.availableProviders.some((item) => item.id === value);
   const customValue = value && !known ? value : "";
   const options = [
-    `<option value="">留空自动回退</option>`,
+    `<option value="">${noFallbackProviderKeys.has(key) ? "留空不启用" : "留空自动回退"}</option>`,
     ...state.availableProviders.map((item) => {
       const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
       return `<option value="${escapeHtml(item.id)}" ${item.id === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
@@ -6616,6 +6896,7 @@ function currentProviderValues() {
 
 function resolveProviderId(key, values = currentProviderValues()) {
   if (values[key]) return values[key];
+  if (noFallbackProviderKeys.has(key)) return "";
   if (key !== "LLM_PROVIDER_ID" && values.MAI_STYLE_PROVIDER_ID) return values.MAI_STYLE_PROVIDER_ID;
   return values.LLM_PROVIDER_ID || "";
 }
@@ -6724,7 +7005,7 @@ function renderProviderFlow(providers) {
     </div>
     <div class="flow-tasks">
       ${tasks.map(([key, label]) => {
-        const value = providers[key] || mai;
+        const value = providers[key] || (noFallbackProviderKeys.has(key) ? "未配置" : mai);
         const inherited = !providers[key];
         return `<span class="flow-node ${inherited ? "inherited" : "primary"}">${escapeHtml(label)}<br><b>${escapeHtml(value)}</b></span>`;
       }).join("")}

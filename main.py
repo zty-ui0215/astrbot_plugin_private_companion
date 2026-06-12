@@ -124,6 +124,7 @@ from .private_reading import PrivateReadingMixin
 from .news_exploration import NewsExplorationMixin
 from .core_store import CoreStoreMixin
 from .integration_status import IntegrationStatusMixin
+from .astrbot_knowledge import AstrBotKnowledgeMixin
 from .atrelay import AtRelayMixin
 from .proactive_engine import ProactiveEngineMixin
 from .proactive_message import ProactiveMessageMixin
@@ -132,6 +133,7 @@ from .state_views import StateViewsMixin
 from .interaction_utils import InteractionUtilsMixin
 from .llm_tool_actions import LlmToolActionsMixin
 from .command_handlers import CommandHandlersMixin
+from .tts_enhancement import TtsEnhancementMixin
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -297,12 +299,19 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "3.4.3",
+    "3.5.0",
 )
-class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
+class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
     def _cfg_bool(config: AstrBotConfig, key: str, default: bool = True) -> bool:
-        return bool(config.get(key, default))
+        value = config.get(key, default)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"true", "1", "yes", "on", "启用", "开启"}:
+                return True
+            if text in {"false", "0", "no", "off", "disabled", "停用", "关闭"}:
+                return False
+        return bool(value)
 
     @staticmethod
     def _cfg_str(config: AstrBotConfig, key: str, default: str = "", fallback: str = "") -> str:
@@ -346,6 +355,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
         self.enable_private_image_self_recognition = self._cfg_bool(c, "enable_private_image_self_recognition", True)
         self.enable_private_image_vision_cache = self._cfg_bool(c, "enable_private_image_vision_cache", True)
         self.private_image_vision_cache_max_items = self._cfg_int(c, "private_image_vision_cache_max_items", 300, 0, 3000)
+        self.enable_private_image_gif_enhancement = self._cfg_bool(c, "enable_private_image_gif_enhancement", True)
+        self.private_image_gif_max_frames = self._cfg_int(c, "private_image_gif_max_frames", 4, 1, 8)
         self.enable_group_conversation_followup = self._cfg_bool(c, "enable_group_conversation_followup", True)
         self.group_conversation_followup_seconds = self._cfg_int(c, "group_conversation_followup_seconds", 120, 0, 600)
         self.group_conversation_followup_max_turns = self._cfg_int(c, "group_conversation_followup_max_turns", 1, 0, 10)
@@ -359,6 +370,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
         self.require_private_opt_in = self._cfg_bool(c, "require_private_opt_in", True)
         self.target_user_ids = c.get("target_user_ids", [])
         self.private_user_aliases = self._parse_private_user_aliases(c.get("private_user_aliases", ""))
+        self._load_tts_enhancement_config(c)
         self.target_platform = self._cfg_str(c, "target_platform", "aiocqhttp", "aiocqhttp")
         self.default_enable_configured_targets = self._cfg_bool(c, "default_enable_configured_targets", True)
         self.enable_environment_perception = self._cfg_bool(c, "enable_environment_perception", True)
@@ -394,6 +406,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
         self.schedule_persona_prompt = self._cfg_str(c, "schedule_persona_prompt", "")
         self.schedule_worldview_prompt = self._cfg_str(c, "schedule_worldview_prompt", "")
         self.roleplay_user_profile_prompt = self._cfg_str(c, "roleplay_user_profile_prompt", "")
+        self.roleplay_knowledge_source_ids = self._normalize_roleplay_knowledge_source_ids(
+            c.get("roleplay_knowledge_source_ids", [])
+        )
         self.private_image_self_recognition_hint = self._cfg_str(c, "private_image_self_recognition_hint", "")
         self.daily_plan_item_count = self._cfg_int(c, "daily_plan_item_count", 10, 5, 16)
         self.enable_humanized_states = self._cfg_bool(c, "enable_humanized_states", True)
@@ -773,14 +788,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             "private_reading_blocked_tags",
             self._cfg_str(c, "jm_cosmos_blocked_tags", "連載中,長篇,青年漫"),
         )
+        self.plugin_vision_provider_id = self._cfg_str(c, "PLUGIN_VISION_PROVIDER_ID", "")
         self.jm_cosmos_vision_provider_id = self._cfg_str(
             c,
-            "PLUGIN_VISION_PROVIDER_ID",
-            self._cfg_str(
-                c,
-                "PRIVATE_READING_VISION_PROVIDER_ID",
-                self._cfg_str(c, "JM_COSMOS_VISION_PROVIDER_ID", ""),
-            ),
+            "PRIVATE_READING_VISION_PROVIDER_ID",
+            self._cfg_str(c, "JM_COSMOS_VISION_PROVIDER_ID", ""),
         )
         if isinstance(c, dict):
             legacy_private_reading_keys = {
@@ -798,8 +810,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                     if new_key not in c:
                         c[new_key] = c.get(old_key)
                     c.pop(old_key, None)
-            if "PLUGIN_VISION_PROVIDER_ID" not in c and c.get("PRIVATE_READING_VISION_PROVIDER_ID"):
-                c["PLUGIN_VISION_PROVIDER_ID"] = c.get("PRIVATE_READING_VISION_PROVIDER_ID")
         self.group_episode_refresh_minutes = self._cfg_int(c, "group_episode_refresh_minutes", 180, 30, 1440)
         self.group_slang_summary_minutes = self._cfg_int(c, "group_slang_summary_minutes", 360, 60, 2880)
         self.max_group_topic_threads = self._cfg_int(c, "max_group_topic_threads", 12, 3, 40)
@@ -925,6 +935,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             )
 
     @filter.on_decorating_result()
+    async def apply_tts_enhancement_before_send_hook(self, event: AstrMessageEvent):
+        """发送前处理 TTS强化标签和自动语音转换。"""
+        await self.apply_tts_enhancement_before_send(event)
+
+    @filter.on_decorating_result()
     async def strip_group_internal_identity_anchors(self, event: AstrMessageEvent):
         """发送前清理群聊内部身份锚点，避免调试标记泄露到回复。"""
         if not self.enabled:
@@ -1003,6 +1018,12 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                 event.set_result(self._build_result_from_chain(self._with_optional_reply([Plain(cleaned_text)], quote_message_id)))
             return
         logger.debug("[PrivateCompanion] 按插件规则分段 LLM 回复: %s -> %s 段", len(text), len(segments))
+        logger.info(
+            "[PrivateCompanion] 按插件规则分段 LLM 回复: segments=%s first=%s full=%s",
+            len(segments),
+            _single_line(segments[0], 120),
+            _single_line(text, 420),
+        )
         quote_message_id = self._group_current_reply_quote_message_id(event)
         first_chain = self._with_optional_reply([Plain(segments[0])], quote_message_id)
         event.set_result(self._build_result_from_chain(first_chain))
@@ -1026,16 +1047,49 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
     ) -> None:
         """后台补发被动分段的剩余片段，避免阻塞主链首包。"""
         prev = previous_segment
+        total = len([item for item in segments if str(item or "").strip()])
+        sent_index = 0
         for segment in segments:
             segment = str(segment or "").strip()
             if not segment:
                 continue
+            sent_index += 1
             try:
                 wait_for = prev or segment
                 delay = await self._calc_segmented_proactive_interval(wait_for)
                 if delay > 0:
                     await asyncio.sleep(delay)
-                await event.send(event.plain_result(segment))
+                sent_tts_chain = False
+                normalized_segment = segment
+                normalizer = getattr(self, "_normalize_tts_tags", None)
+                if callable(normalizer) and re.search(r"</?t{2,}s\b", normalized_segment, flags=re.IGNORECASE):
+                    try:
+                        normalized_segment = str(normalizer(normalized_segment) or normalized_segment).strip()
+                    except Exception:
+                        pass
+                if (
+                    bool(getattr(self, "enable_tts_enhancement", False))
+                    and re.search(r"<tts\b[^>]*>.*?</tts>", normalized_segment, flags=re.IGNORECASE | re.DOTALL)
+                ):
+                    processor = getattr(self, "_process_tts_tags", None)
+                    if callable(processor):
+                        fallback_plain = re.sub(r"</?t{2,}s\b[^>]*>", "", normalized_segment, flags=re.IGNORECASE).strip()
+                        chain = await processor(normalized_segment, event, fallback_plain=fallback_plain)
+                        if chain:
+                            try:
+                                await event.send(event.chain_result(chain))
+                            except Exception:
+                                await event.send(self._build_result_from_chain(chain))
+                            sent_tts_chain = True
+                if not sent_tts_chain:
+                    await event.send(event.plain_result(re.sub(r"</?t{2,}s\b[^>]*>", "", normalized_segment, flags=re.IGNORECASE).strip() or segment))
+                logger.info(
+                    "[PrivateCompanion] 分段 LLM 剩余片段已发送: source=%s index=%s/%s preview=%s",
+                    source or "unknown",
+                    sent_index,
+                    total,
+                    _single_line(segment, 120),
+                )
                 prev = segment
             except asyncio.CancelledError:
                 raise
@@ -1265,6 +1319,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                         setattr(req, attr, [])
                     except Exception:
                         pass
+        await self.apply_tts_enhancement_request(event, req)
         await self._append_forward_message_context_to_request(event, req)
         is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
         if not is_private_chat and self.enable_group_reality_promise_guard:
@@ -1382,11 +1437,19 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                 logger.info("[PrivateCompanion] 私聊图片视觉转述仍在进行,本轮先注入路径兜底")
             except Exception as exc:
                 logger.info("[PrivateCompanion] 私聊图片视觉转述获取失败: %s", _single_line(exc, 120))
+        buffered_images_include_gif = (
+            bool(getattr(self, "enable_private_image_gif_enhancement", True))
+            and self._private_image_sources_include_gif(buffered_images)
+            if buffered_images
+            else False
+        )
         if (
             buffered_images
-            and buffered_image_mode == "direct"
             and not buffered_image_vision
-            and not self._event_main_provider_supports_image(event)
+            and (
+                buffered_images_include_gif
+                or (buffered_image_mode == "direct" and not self._event_main_provider_supports_image(event))
+            )
         ):
             buffered_image_vision = _single_line(
                 await self._transcribe_private_inbound_images(
@@ -1407,7 +1470,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             inbound_text = _single_line(combined_text.replace("\n", " "), 260)
         if buffered_images:
             direct_image_mounted = False
-            if buffered_image_mode == "direct" and self._event_main_provider_supports_image(event):
+            if buffered_image_mode == "direct" and self._event_main_provider_supports_image(event) and not buffered_images_include_gif:
                 image_refs: list[str] = []
                 for image_ref in buffered_images[:4]:
                     for request_ref in self._private_image_sources_for_astrbot_request([image_ref]):
@@ -1437,14 +1500,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                     injection_parts.append(
                         "【本轮延迟图片】\n"
                         "用户刚刚先单独发了一张图片,随后补充了文字。图片已随本轮请求一起交给当前视觉主模型；"
-                        "请优先理解用户发这张图想表达的情绪、态度、文字或梗,再把图片和用户文字作为同一轮发言理解,不要提插件或处理过程。"
+                        "请同时理解画面内容和用户借图表达的情绪/态度/疑问/梗。图片类型只决定回复组织顺序，不代表可以弱化另一项。"
+                        "如果用户在问图里是什么,请先回答画面内容,再结合表达意图。不要提插件或处理过程。"
                         f"{self._private_image_identity_disambiguation_instruction()}"
                     )
                     direct_image_mounted = True
             if not direct_image_mounted and buffered_image_vision:
                 intent_line = self._private_image_intent_line(buffered_image_vision)
                 ownership_line = self._private_image_ownership_line(buffered_image_vision)
-                reply_objective = self._private_image_reply_objective(ownership_line)
+                reply_objective = self._private_image_reply_objective(ownership_line, vision_text=buffered_image_vision, user_text=inbound_text)
                 logger.info(
                     "[PrivateCompanion] 私聊延迟图片已注入视觉摘要: user=%s chars=%s intent=%s ownership=%s objective=%s preview=%s",
                     user_id,
@@ -1463,7 +1527,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                     "【本轮延迟图片】\n"
                     f"{image_context_intro}下面是视觉模型对刚才那张图的内部摘要；"
                     "这是当前这张图片的可靠内容摘要；即使当前主模型不能直接识图,也请按此摘要理解,不要回答“没看到图”或要求重发。"
-                    "请优先理解用户发这张图想表达的情绪、态度、文字或梗,再结合画面内容和用户本轮文字回复；不要提模型、插件或路径。"
+                    "请同时利用“可见内容”和“图像表达意图”；图片类型只影响回复组织顺序,不允许丢掉另一项。"
+                    "如果用户问图里是什么,必须先回答画面内容,再结合表达意图；不要提模型、插件或路径。"
                     f"{self._private_image_identity_disambiguation_instruction()}\n"
                     f"{reply_objective}\n"
                     f"{buffered_image_vision}"
@@ -1496,6 +1561,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                     "请不要沉默,也不要编造画面,可以自然地表示这边暂时没看清并等用户补一句。"
                 )
         reply_image_sources: list[str] = []
+        reply_image_prompt_anchor = ""
         if not buffered_images and not bool(getattr(event, "private_companion_deferred_private_image_only_ready", False)):
             reply_image_sources = await self._find_reply_image_sources_for_event(event)
             if reply_image_sources:
@@ -1509,7 +1575,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                 if reply_image_vision:
                     intent_line = self._private_image_intent_line(reply_image_vision)
                     ownership_line = self._private_image_ownership_line(reply_image_vision)
-                    reply_objective = self._private_image_reply_objective(ownership_line)
+                    reply_objective = self._private_image_reply_objective(ownership_line, vision_text=reply_image_vision, user_text=inbound_text)
                     logger.info(
                         "[PrivateCompanion] 私聊引用图片已注入视觉摘要: user=%s images=%s intent=%s ownership=%s objective=%s preview=%s",
                         user_id,
@@ -1519,11 +1585,23 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                         _single_line(reply_objective, 120),
                         _single_line(reply_image_vision, 220),
                     )
-                    injection_parts.append(
+                    reply_image_prompt_anchor = (
+                        "【当前引用图片锚点】\n"
+                        f"用户本轮是在问被引用图片：{inbound_text or '（空）'}。\n"
+                        "下面摘要只属于这一次被引用的图片。请把它当作当前问题的主要依据，忽略历史里其他图片、旧表情包、旧 TTS 文本或上一轮回复内容。\n"
+                        "请同时利用当前引用图片的可见内容和表达意图。"
+                        "如果用户问“图里是什么/这是什么/图里有啥”，请基于摘要直接概括当前引用图片的画面类型、可见主体和表达意图；"
+                        "涉及露骨内容时只做概括描述，不复述露骨台词，不展开色情细节。\n"
+                        f"{reply_objective}\n"
+                        f"{reply_image_vision}"
+                    )
+                    injection_parts.insert(
+                        0,
                         "【本轮引用图片】\n"
                         f"用户这轮引用/回复了一张图片,并发送文字：{inbound_text or '（空）'}。\n"
                         "下面是视觉模型对被引用图片的内部摘要。请优先回答用户当前这句文字针对引用图片提出的问题；"
-                        "不要把历史记忆里的旧图片、旧声音或旧描述当成当前引用目标。\n"
+                        "不要把历史记忆里的旧图片、旧声音、旧 TTS、旧表情包或上一轮回复当成当前引用目标。"
+                        "如果用户问图里是什么,必须基于本摘要直接回答当前引用图片内容,不要只泛泛反问来源。\n"
                         f"{self._private_image_identity_disambiguation_instruction()}\n"
                         f"{reply_objective}\n"
                         f"{reply_image_vision}"
@@ -1545,12 +1623,33 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                                 self._save_data_sync()
                         except Exception as exc:
                             logger.debug("[PrivateCompanion] 私聊引用图片视觉反馈目标记录失败: %s", exc)
+                    try:
+                        setattr(event, "private_companion_reply_image_vision_text", _single_line(reply_image_vision, 600))
+                        setattr(event, "private_companion_reply_image_user_text", inbound_text)
+                        setattr(
+                            event,
+                            "private_companion_reply_image_content_question",
+                            self._private_image_user_asks_content(inbound_text),
+                        )
+                    except Exception:
+                        pass
                 else:
                     injection_parts.append(
                         "【本轮引用图片】\n"
                         f"用户这轮引用/回复了一张图片,并发送文字：{inbound_text or '（空）'}。"
                         "当前未能拿到可用视觉摘要；如果用户问的是引用图片内容,请自然说明这边暂时没看清,不要编造。"
                     )
+        if reply_image_prompt_anchor:
+            try:
+                current_req_prompt = str(getattr(req, "prompt", "") or "")
+                if "<!-- private_companion_reply_image_anchor_v1 -->" not in current_req_prompt:
+                    req.prompt = (
+                        f"{current_req_prompt}\n\n"
+                        "<!-- private_companion_reply_image_anchor_v1 -->\n"
+                        f"{reply_image_prompt_anchor}"
+                    ).strip()
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 私聊引用图片 prompt 锚点写入失败: %s", exc)
         if not lightweight_passive:
             hidden_creative_context = self._format_hidden_creative_context_for_reply(inbound_text)
             if hidden_creative_context:
@@ -1624,6 +1723,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
         )
 
     @filter.on_llm_response()
+    async def normalize_tts_enhancement_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """规范化 TTS 标签错拼，避免 <ttts> 等内容漏到发送链路。"""
+        await self.protect_tts_enhancement_response_blocks(event, resp)
+
+    @filter.on_llm_response()
     async def capture_llm_timer_directive(self, event: AstrMessageEvent, resp: LLMResponse):
         """LLM 回复后捕获定时/状态指令，并做私聊回复审校。"""
         if not self.enabled:
@@ -1645,6 +1749,29 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             self._stop_passive_input_status_loop(event)
             return
         working_text = original_text
+        reply_image_vision = _single_line(getattr(event, "private_companion_reply_image_vision_text", ""), 600)
+        reply_image_user_text = _single_line(
+            getattr(event, "private_companion_reply_image_user_text", "") or current_user.get("last_user_message"),
+            260,
+        )
+        if (
+            reply_image_vision
+            and bool(getattr(event, "private_companion_reply_image_content_question", False))
+            and self._private_image_reply_misses_content_question(working_text)
+        ):
+            corrected = self._private_image_content_answer_from_vision(
+                reply_image_vision,
+                user_text=reply_image_user_text,
+            )
+            if corrected:
+                logger.info(
+                    "[PrivateCompanion] 私聊引用图片回复疑似被历史话题污染,已按视觉摘要纠偏: user=%s before=%s after=%s",
+                    user_id,
+                    _single_line(working_text, 120),
+                    _single_line(corrected, 160),
+                )
+                working_text = corrected
+                resp.completion_text = corrected
         if self.enable_llm_timer_scheduling and "<timer" in original_text.lower():
             cleaned_text, payloads = self._extract_timer_directives(original_text)
             if cleaned_text != original_text:
@@ -1762,7 +1889,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             "重置夹层密码", "重设夹层密码", "重新生成夹层密码", "重置书柜密码", "重设书柜密码", "重新生成书柜密码",
             "发说说", "发QQ空间", "发布说说", "空间发布", "发布空间",
             "测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布",
-            "诊断空间", "空间诊断", "诊断说说", "诊断QQ空间", "qzone诊断",
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI早报", "ai早报", "早报",
         }
 
@@ -1782,7 +1908,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             "重置夹层密码", "重设夹层密码", "重新生成夹层密码", "重置书柜密码", "重设书柜密码", "重新生成书柜密码",
             "发说说", "发QQ空间", "发布说说", "空间发布", "发布空间",
             "测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布",
-            "诊断空间", "空间诊断", "诊断说说", "诊断QQ空间", "qzone诊断",
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI早报", "ai早报", "早报",
             "日期添加", "添加日期", "重要日期添加",
             "日期删除", "删除日期", "重要日期删除",
@@ -1887,8 +2012,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                 response = "正在发布 QQ 空间说说。"
             elif action in {"测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布"}:
                 response = "正在模拟 QQ 空间发布链路。"
-            elif action in {"诊断空间", "空间诊断", "诊断说说", "诊断QQ空间", "qzone诊断"}:
-                response = "正在诊断 QQ 空间 Cookie 和权限链路。"
             elif action in {"新闻", "今日新闻", "AI新闻", "ai新闻", "AI早报", "ai早报", "早报"}:
                 response = "正在读今天的新闻源。"
             elif action in {"生成日记", "刷新日记"}:
@@ -1958,11 +2081,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
         if action in {"测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布"}:
             await self._reply(event, response)
             await self._reply(event, await self._test_qzone_publish_tool_chain(event))
-            event.stop_event()
-            return
-        if action in {"诊断空间", "空间诊断", "诊断说说", "诊断QQ空间", "qzone诊断"}:
-            await self._reply(event, response)
-            await self._reply(event, await self._diagnose_qzone_cookie_chain(event))
             event.stop_event()
             return
         if action in {"新闻", "今日新闻", "AI新闻", "ai新闻", "AI早报", "ai早报", "早报"}:
@@ -2168,7 +2286,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                         return
                     buffers[key]["images"] = persisted_images
                     buffers[key]["original_event"] = event
-                    direct_image_mode = bool(persisted_images) and self._event_main_provider_supports_image(event)
+                    has_dynamic_gif_sources = (
+                        bool(getattr(self, "enable_private_image_gif_enhancement", True))
+                        and self._private_image_sources_include_gif(persisted_images)
+                    )
+                    direct_image_mode = (
+                        bool(persisted_images)
+                        and self._event_main_provider_supports_image(event)
+                        and not has_dynamic_gif_sources
+                    )
                     buffers[key]["image_mode"] = "direct" if direct_image_mode else "caption"
                     if persisted_images and not direct_image_mode:
                         buffers[key]["vision_task"] = asyncio.create_task(
