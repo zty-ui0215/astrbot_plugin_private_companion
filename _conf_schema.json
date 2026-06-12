@@ -1336,6 +1336,15 @@
     "hint": "整合 QQ 空间查看、点赞、评论和发布说说入口。用于让 Bot 理解空间动态是公开生活札记,并在用户明确要求时使用工具处理。",
     "default": true
   },
+  "QZONE_COOKIE": {
+    "description": "QQ 空间 Cookie（可选）",
+    "type": "string",
+    "hint": "可选手动覆盖项。填入浏览器 QQ 空间复制的 Cookie 后，本插件会优先使用它发布/读取空间；留空则继续使用 OneBot 自动获取的 Cookie。Cookie 属于敏感信息，不要发给他人。",
+    "default": "",
+    "condition": {
+      "enable_qzone_integration": true
+    }
+  },
   "enable_qzone_life_publish": {
     "description": "低频发布生活说说",
     "type": "bool",

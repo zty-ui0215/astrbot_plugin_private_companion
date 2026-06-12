@@ -297,7 +297,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "3.4.0",
+    "3.4.3",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -698,6 +698,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
         )
         self.web_exploration_provider_id = self._cfg_str(c, "WEB_EXPLORATION_PROVIDER_ID", "")
         self.enable_qzone_integration = self._cfg_bool(c, "enable_qzone_integration", True)
+        self.qzone_cookie = self._cfg_str(c, "QZONE_COOKIE", "")
         self.enable_qzone_life_publish = self._cfg_bool(c, "enable_qzone_life_publish", False)
         self.qzone_life_publish_min_interval_hours = self._cfg_int(c, "qzone_life_publish_min_interval_hours", 24, 4, 168)
         self.qzone_life_publish_probability = min(1.0, self._cfg_float(c, "qzone_life_publish_probability", 0.18, 0.0))
@@ -1761,6 +1762,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             "重置夹层密码", "重设夹层密码", "重新生成夹层密码", "重置书柜密码", "重设书柜密码", "重新生成书柜密码",
             "发说说", "发QQ空间", "发布说说", "空间发布", "发布空间",
             "测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布",
+            "诊断空间", "空间诊断", "诊断说说", "诊断QQ空间", "qzone诊断",
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI早报", "ai早报", "早报",
         }
 
@@ -1780,6 +1782,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
             "重置夹层密码", "重设夹层密码", "重新生成夹层密码", "重置书柜密码", "重设书柜密码", "重新生成书柜密码",
             "发说说", "发QQ空间", "发布说说", "空间发布", "发布空间",
             "测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布",
+            "诊断空间", "空间诊断", "诊断说说", "诊断QQ空间", "qzone诊断",
             "新闻", "今日新闻", "AI新闻", "ai新闻", "AI早报", "ai早报", "早报",
             "日期添加", "添加日期", "重要日期添加",
             "日期删除", "删除日期", "重要日期删除",
@@ -1884,6 +1887,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
                 response = "正在发布 QQ 空间说说。"
             elif action in {"测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布"}:
                 response = "正在模拟 QQ 空间发布链路。"
+            elif action in {"诊断空间", "空间诊断", "诊断说说", "诊断QQ空间", "qzone诊断"}:
+                response = "正在诊断 QQ 空间 Cookie 和权限链路。"
             elif action in {"新闻", "今日新闻", "AI新闻", "ai新闻", "AI早报", "ai早报", "早报"}:
                 response = "正在读今天的新闻源。"
             elif action in {"生成日记", "刷新日记"}:
@@ -1953,6 +1958,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, IntegrationStatusMixin, PrivateImag
         if action in {"测试说说链路", "测试空间发布", "测试QQ空间发布", "测试qzone发布"}:
             await self._reply(event, response)
             await self._reply(event, await self._test_qzone_publish_tool_chain(event))
+            event.stop_event()
+            return
+        if action in {"诊断空间", "空间诊断", "诊断说说", "诊断QQ空间", "qzone诊断"}:
+            await self._reply(event, response)
+            await self._reply(event, await self._diagnose_qzone_cookie_chain(event))
             event.stop_event()
             return
         if action in {"新闻", "今日新闻", "AI新闻", "ai新闻", "AI早报", "ai早报", "早报"}:

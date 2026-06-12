@@ -236,6 +236,14 @@ class QzoneMixin:
         }
 
     async def _qzone_get_cookies(self, event: AstrMessageEvent | None = None) -> str:
+        manual_cookie = str(getattr(self, "qzone_cookie", "") or "").strip()
+        if manual_cookie:
+            try:
+                ctx = self._qzone_context_from_cookies(manual_cookie)
+                if ctx.get("uin") and ctx.get("gtk"):
+                    return self._qzone_cookie_header(ctx.get("cookies") or self._qzone_parse_cookie_text(manual_cookie))
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 手动 QZone Cookie 无效,回退 OneBot Cookie: %s", exc)
         bot = getattr(event, "bot", None) if event is not None else getattr(self, "_qzone_last_bot", None)
         if bot is not None:
             self._qzone_last_bot = bot
@@ -673,6 +681,124 @@ class QzoneMixin:
         else:
             lines.append("- 草稿生成：失败或为空")
         lines.append("结果：模拟完成。若要真实发布,请使用 `陪伴 发说说 <正文>` 或让模型调用带 text 的 `pc_qzone_publish_feed`。")
+        return "\n".join(lines)
+
+    async def _diagnose_qzone_cookie_chain(self, event: AstrMessageEvent | None = None) -> str:
+        lines = ["QQ 空间 Cookie/权限诊断："]
+        lines.append(f"- 整合开关：{'开启' if self.enable_qzone_integration else '关闭'}")
+        lines.append("- 真实发布：否，本指令只诊断登录态和读取权限")
+        if not self.enable_qzone_integration:
+            lines.append("结果：整合开关关闭。")
+            return "\n".join(lines)
+
+        manual_cookie = str(getattr(self, "qzone_cookie", "") or "").strip()
+        if manual_cookie:
+            try:
+                manual_ctx = self._qzone_context_from_cookies(manual_cookie)
+                manual_fields = self._qzone_parse_cookie_text(manual_cookie)
+                lines.append(
+                    "- 手动 Cookie：已配置"
+                    f"｜QQ {manual_ctx.get('uin')}"
+                    f"｜p_skey={'有' if (manual_fields.get('p_skey') or manual_fields.get('pskey')) else '无'}"
+                    f"｜skey={'有' if manual_fields.get('skey') else '无'}"
+                    f"｜g_tk 可计算"
+                )
+                try:
+                    posts = await self._qzone_query_feeds(event, target_id=str(manual_ctx.get("uin")), pos=0, num=1, with_detail=False)
+                    lines.append("- 手动 Cookie 读取本人空间：成功" + (f"（返回 {len(posts)} 条）" if posts else "（空列表）"))
+                except Exception as exc:
+                    lines.append(f"- 手动 Cookie 读取本人空间：失败，{_single_line(exc, 160)}")
+            except Exception as exc:
+                lines.append(f"- 手动 Cookie：已配置但无效，{_single_line(exc, 160)}")
+        else:
+            lines.append("- 手动 Cookie：未配置，将使用 OneBot 自动 Cookie")
+
+        bot = getattr(event, "bot", None) if event is not None else getattr(self, "_qzone_last_bot", None)
+        if bot is not None:
+            self._qzone_last_bot = bot
+        if bot is None:
+            lines.append("- OneBot：不可用，当前没有可获取自动 Cookie 的连接")
+            if manual_cookie:
+                lines.append("结果：已完成手动 Cookie 诊断；真实发布会优先使用手动 Cookie。")
+            else:
+                lines.append("结果：请先在真实 QQ/OneBot 会话中触发一次插件命令，或配置 QZONE_COOKIE。")
+            return "\n".join(lines)
+        lines.append("- OneBot：已连接")
+
+        domains = [
+            "user.qzone.qq.com",
+            "qzone.qq.com",
+            "h5.qzone.qq.com",
+            "mobile.qzone.qq.com",
+            "taotao.qzone.qq.com",
+        ]
+        actions = ("get_cookies", "get_credentials")
+        api = getattr(bot, "api", None)
+        call_action = getattr(api, "call_action", None)
+        merged: dict[str, str] = {}
+        diagnostics: list[str] = []
+        for domain in domains:
+            domain_fields: set[str] = set()
+            domain_ok = False
+            domain_errors: list[str] = []
+            for action in actions:
+                direct = getattr(bot, action, None)
+                for kwargs in ({"domain": domain}, {}):
+                    result = None
+                    try:
+                        if callable(direct):
+                            maybe = direct(**kwargs)
+                            result = await maybe if hasattr(maybe, "__await__") else maybe
+                        if result is None and callable(call_action):
+                            maybe = call_action(action, **kwargs)
+                            result = await maybe if hasattr(maybe, "__await__") else maybe
+                    except Exception as exc:
+                        domain_errors.append(f"{action}:{exc.__class__.__name__}")
+                        continue
+                    cookie_text = self._qzone_extract_cookie_text(result)
+                    if not cookie_text:
+                        continue
+                    parsed = self._qzone_parse_cookie_text(cookie_text)
+                    if parsed:
+                        domain_ok = True
+                        merged.update(parsed)
+                        for key in ("uin", "p_uin", "skey", "p_skey", "pskey", "pt4_token", "ptcz", "qzonetoken"):
+                            if parsed.get(key):
+                                domain_fields.add("p_skey" if key == "pskey" else key)
+            field_text = "、".join(sorted(domain_fields)) if domain_fields else "无关键字段"
+            if domain_ok:
+                diagnostics.append(f"- {domain}：可获取 Cookie（{field_text}）")
+            elif domain_errors:
+                diagnostics.append(f"- {domain}：获取失败（{'; '.join(dict.fromkeys(domain_errors))}）")
+            else:
+                diagnostics.append(f"- {domain}：未返回可识别 Cookie")
+        lines.extend(diagnostics)
+
+        if not merged:
+            lines.append("结果：OneBot 未返回任何可识别 QZone Cookie。")
+            return "\n".join(lines)
+
+        uin = self._qzone_normalize_uin(merged)
+        has_skey = bool(merged.get("skey"))
+        has_p_skey = bool(merged.get("p_skey") or merged.get("pskey"))
+        has_pt4 = bool(merged.get("pt4_token"))
+        lines.append(f"- 合并 Cookie：uin={'有' if uin else '无'}｜skey={'有' if has_skey else '无'}｜p_skey={'有' if has_p_skey else '无'}｜pt4_token={'有' if has_pt4 else '无'}")
+        try:
+            ctx = self._qzone_context_from_cookies(self._qzone_cookie_header(merged))
+            lines.append(f"- 登录 QQ：{ctx.get('uin')}")
+            lines.append(f"- g_tk：可计算（{str(ctx.get('gtk') or '')[:3]}***）")
+        except Exception as exc:
+            lines.append(f"- g_tk：不可用，{_single_line(exc, 120)}")
+            lines.append("结果：Cookie 字段不完整，优先检查 OneBot 是否能返回 qzone 域 p_skey/skey。")
+            return "\n".join(lines)
+
+        try:
+            posts = await self._qzone_query_feeds(event, target_id=str(uin), pos=0, num=1, with_detail=False)
+            lines.append("- 读取本人空间：成功" + (f"（返回 {len(posts)} 条）" if posts else "（空列表）"))
+        except Exception as exc:
+            lines.append(f"- 读取本人空间：失败，{_single_line(exc, 160)}")
+
+        lines.append("判断：如果读取失败或真实发布提示“请先登录空间/无权限”，通常是 QZone 域 Cookie 失效、缺少 p_skey，或账号触发空间风控。")
         return "\n".join(lines)
 
     async def _test_qzone_integration(self, event: AstrMessageEvent, target_id: str = "") -> str:
