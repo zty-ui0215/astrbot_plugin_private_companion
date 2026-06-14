@@ -2979,6 +2979,7 @@ function worldbookMemberCard(item) {
   const previewItems = worldbookMemberPreviewItems(item, memories);
   const isExternal = item.identity_type === "external" || !/^\d+$/.test(String(item.user_id || ""));
   const identityLabel = isExternal ? "外部身份" : "身份 QQ";
+  const genderText = String(item.gender || "").trim();
   const bindLine = item.linked_qq_user_id
     ? ` · 已绑定 QQ ${escapeHtml(item.linked_qq_user_id)}`
     : (item.linked_bili_profile_id ? ` · B站 ${escapeHtml(item.linked_bili_profile_id)}` : "");
@@ -3000,6 +3001,7 @@ function worldbookMemberCard(item) {
       <div class="worldbook-compact-meta">
         <span>${escapeHtml(aliases.length)} 个别名</span>
         <span>${escapeHtml(observed.length)} 个曾见群名片</span>
+        ${genderText ? `<span>性别：${escapeHtml(genderText)}</span>` : ""}
         ${externalIds.length ? `<span>${escapeHtml(externalIds.length)} 个外部身份</span>` : ""}
         <span>${escapeHtml((item.important_memories || []).length)} 条记忆</span>
         ${pending.length ? `<span>${escapeHtml(pending.length)} 条待确认观察</span>` : ""}
@@ -3022,6 +3024,9 @@ function worldbookMemberCard(item) {
         </label>
         <label>名称
           <input data-worldbook-name="${escapeHtml(item.user_id || "")}" value="${escapeHtml(item.name || "")}" />
+        </label>
+        <label>性别
+          <input data-worldbook-gender="${escapeHtml(item.user_id || "")}" placeholder="可填男、女、未知或自定义描述" value="${escapeHtml(item.gender || "")}" />
         </label>
         <label>注入优先级
           <input data-worldbook-priority="${escapeHtml(item.user_id || "")}" type="number" value="${escapeHtml(item.priority ?? 120)}" />
@@ -3080,6 +3085,7 @@ function worldbookMemberPreviewItems(item, memories = []) {
     if (text && !rows.some(([, existing]) => existing === text)) rows.push([label, text]);
   };
   add("资料", item.content || item.note, 130);
+  add("性别", item.gender, 60);
   add("身份", item.identity_note, 120);
   add("边界", item.boundary_note, 110);
   const memory = memories.find((entry) => entry && entry.enabled !== false && String(entry.content || "").trim());
@@ -3136,6 +3142,7 @@ async function handleWorldbookMemberAction(button) {
     const identityInput = findWorldbookField("identity-note", userId);
     const boundaryInput = findWorldbookField("boundary-note", userId);
     const nameInput = findWorldbookField("name", userId);
+    const genderInput = findWorldbookField("gender", userId);
     const priorityInput = findWorldbookField("priority", userId);
     const contentInput = findWorldbookField("content", userId);
     const linkedQqInput = findWorldbookField("linked-qq", userId);
@@ -3146,6 +3153,7 @@ async function handleWorldbookMemberAction(button) {
     const payload = {
       user_id: userId,
       name: nameInput?.value || "",
+      gender: genderInput?.value || "",
       priority: Number(priorityInput?.value || 120),
       content: contentInput?.value || "",
       identity_note: identityInput?.value || "",

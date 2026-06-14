@@ -278,9 +278,11 @@ class WorldbookMixin:
             if isinstance(raw.get("aliases"), list)
             else []
         )
+        gender = _single_line(raw.get("gender") or raw.get("性别"), 40)
         return {
             "template": self._worldbook_entry_template(raw),
             "name": name,
+            "gender": gender,
             "enabled": bool(raw.get("enabled", True)),
             "priority": _safe_int(raw.get("priority"), 100, -1000, 10000),
             "scope": scope,
@@ -339,6 +341,7 @@ class WorldbookMixin:
                         {
                             "user_id": user_id,
                             "name": item.get("name") or user_id,
+                            "gender": "",
                             "aliases": [],
                             "content": "",
                             "identity_note": "",
@@ -361,6 +364,8 @@ class WorldbookMixin:
                         profile["note"] = content
                     if content and not profile.get("identity_note"):
                         profile["identity_note"] = content
+                    if item.get("gender") and not profile.get("gender"):
+                        profile["gender"] = item.get("gender")
                     profile["enabled"] = bool(profile.get("enabled", True) and item.get("enabled", True))
                     profile["source_entries"].append(item.get("name") or user_id)
             elif template == "group":
@@ -381,9 +386,10 @@ class WorldbookMixin:
         for user_id, profile in profiles.items():
             old = old_profiles.get(user_id) if isinstance(old_profiles.get(user_id), dict) else {}
             if old.get("manual_edit_ts"):
-                for key in ("name", "aliases", "content", "identity_note", "boundary_note", "important_memories", "enabled", "priority", "note", "manual_edit_ts"):
+                for key in ("name", "gender", "aliases", "content", "identity_note", "boundary_note", "important_memories", "enabled", "priority", "note", "manual_edit_ts"):
                     if key in old:
                         profile[key] = old[key]
+            profile["gender"] = _single_line(profile.get("gender"), 40)
             observed = old.get("observed_names") if isinstance(old.get("observed_names"), list) else []
             profile["observed_names"] = [_single_line(item, 40) for item in observed if _single_line(item, 40)]
             old_note = str(old.get("note") or "").strip()
@@ -496,6 +502,9 @@ class WorldbookMixin:
             f"身份锚点：{stable_name}[QQ:{uid}] 当前群名片/显示名是“{display}”,这只是临时显示名,不能覆盖 QQ 号对应的稳定身份。"
         ]
         if isinstance(profile, dict):
+            gender = _single_line(profile.get("gender"), 40)
+            if gender:
+                note_parts.append(f"性别：{gender}")
             identity_note = _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), limit)
             if identity_note:
                 note_parts.append(f"关系网备注：{identity_note}")
@@ -519,7 +528,13 @@ class WorldbookMixin:
         profile = self._worldbook_profile_by_user_id(user_id)
         if not isinstance(profile, dict):
             return ""
-        return _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), limit)
+        gender = _single_line(profile.get("gender"), 40)
+        note = _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), limit)
+        if gender and note:
+            return _single_line(f"性别：{gender}；{note}", limit)
+        if gender:
+            return _single_line(f"性别：{gender}", limit)
+        return note
 
     def _worldbook_member_matches_name(self, profile: dict[str, Any], keyword: str) -> bool:
         query = _single_line(keyword, 40).lower()
@@ -549,6 +564,7 @@ class WorldbookMixin:
                 matches.append({
                     "user_id": str(user_id),
                     "name": _single_line(profile.get("name"), 60) or str(user_id),
+                    "gender": _single_line(profile.get("gender"), 40),
                     "aliases": self._normalize_string_list(profile.get("aliases"), limit=8, item_limit=40),
                     "observed_names": self._normalize_string_list(profile.get("observed_names"), limit=8, item_limit=40),
                     "identity_note": _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), 160),
@@ -735,6 +751,7 @@ class WorldbookMixin:
         profile = {
             "user_id": sender_id,
             "name": name,
+            "gender": "",
             "aliases": aliases,
             "content": content,
             "identity_note": f"QQ {sender_id}，自称{name}。",
@@ -1158,10 +1175,13 @@ class WorldbookMixin:
             aliases = "、".join(token for token in self._worldbook_profile_tokens(profile)[:8] if token != profile_uid)
             reason = _single_line(profile.get("_match_reason"), 80)
             confidence = "已确认" if profile.get("_match_confidence") == "confirmed" else "被提及"
+            gender = _single_line(profile.get("gender"), 40)
             identity = _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), 220)
             boundary = _single_line(profile.get("boundary_note"), 140)
             memories = self._worldbook_profile_memory_lines(profile, limit=3)
             parts = []
+            if gender:
+                parts.append(f"性别：{gender}")
             if identity:
                 parts.append(f"身份：{identity}")
             if boundary:

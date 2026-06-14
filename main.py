@@ -299,7 +299,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "3.6.2",
+    "3.7.1",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -324,6 +324,111 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     @staticmethod
     def _cfg_float(config: AstrBotConfig, key: str, default: float, minimum: float = 0.0) -> float:
         return _safe_float(config.get(key, default), default, minimum)
+
+    def _user_rest_silence_until(self, user: dict[str, Any], *, now: float | None = None) -> float:
+        check_now = _now_ts() if now is None else now
+        rest_until = _safe_float(user.get("user_rest_until"), 0)
+        if rest_until <= 0:
+            return 0.0
+        if rest_until <= check_now:
+            user["user_rest_until"] = 0
+            user["user_rest_reason"] = ""
+            user["user_rest_set_at"] = 0
+            return 0.0
+        return rest_until
+
+    def _next_user_rest_morning_ts(self, *, now: float) -> float:
+        timezone_name = _single_line(getattr(self, "environment_perception_timezone", ""), 64) or "Asia/Shanghai"
+        try:
+            tz = zoneinfo.ZoneInfo(timezone_name)
+        except Exception:
+            tz = zoneinfo.ZoneInfo("Asia/Shanghai")
+        current = datetime.fromtimestamp(now, tz)
+        target = current.replace(hour=8, minute=30, second=0, microsecond=0)
+        if target.timestamp() <= now + 3600:
+            target += timedelta(days=1)
+        return max(target.timestamp(), now + 6 * 3600)
+
+    def _detect_user_rest_silence_until(self, text: str, *, now: float | None = None) -> float:
+        cleaned = _single_line(text, 260).lower()
+        if not cleaned:
+            return 0.0
+        check_now = _now_ts() if now is None else now
+        cancel_pattern = (
+            r"(?:我|俺|咱|人家).{0,10}(?:醒了|起床了|睡醒了|不睡了|回来了|可以聊)"
+            r"|(?:睡醒了|起床了|不睡了|可以聊了|回来了)"
+        )
+        if re.search(cancel_pattern, cleaned):
+            return -1.0
+        hard_quiet = re.search(r"(?:别|不要|先别|暂时别).{0,10}(?:打扰|吵|主动|发消息)", cleaned)
+        tomorrow = re.search(r"明天再(?:聊|说|回|看)", cleaned)
+        nap = re.search(r"(?:我|俺|咱|人家).{0,10}(?:午休|眯一会|歇会|躺会|休息一下|休息会)", cleaned)
+        sleep = re.search(
+            r"(?:晚安|睡觉去了|先睡了|去睡了|睡了哈|睡啦|我睡了|我先睡|我去睡|我困了|困死了|补觉)",
+            cleaned,
+        )
+        rest = re.search(r"(?:我|俺|咱|人家).{0,10}(?:休息|歇一下|躺一下|缓一会)", cleaned)
+        if hard_quiet or tomorrow or sleep:
+            return self._next_user_rest_morning_ts(now=check_now)
+        if nap:
+            return check_now + 2.5 * 3600
+        if rest:
+            return check_now + 3.5 * 3600
+        return 0.0
+
+    def _clear_user_rest_pending_plan_fallback(self, user: dict[str, Any]) -> None:
+        for key, value in (
+            ("next_proactive_at", 0),
+            ("planned_proactive_reason", ""),
+            ("planned_proactive_action", ""),
+            ("planned_proactive_source", ""),
+            ("planned_proactive_motive", ""),
+            ("planned_proactive_topic", ""),
+            ("planned_event_chain", []),
+            ("planned_opener_mode", ""),
+            ("planned_followup_kind", ""),
+            ("planned_proactive_quota_exempt", False),
+            ("planned_candidate_id", ""),
+        ):
+            user[key] = value
+        clear_trigger = getattr(self, "_clear_planned_proactive_trigger", None)
+        if callable(clear_trigger):
+            try:
+                clear_trigger(user)
+            except Exception:
+                pass
+
+    def _apply_user_rest_silence_from_message(
+        self,
+        user: dict[str, Any],
+        text: str,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        check_now = _now_ts() if now is None else now
+        rest_until = self._detect_user_rest_silence_until(text, now=check_now)
+        if rest_until < 0:
+            if _safe_float(user.get("user_rest_until"), 0) > check_now:
+                user["user_rest_until"] = 0
+                user["user_rest_reason"] = ""
+                user["user_rest_set_at"] = 0
+                logger.info("[PrivateCompanion] 用户休息静默已解除: user=%s", user.get("user_id") or user.get("id") or "")
+                return True
+            return False
+        if rest_until <= check_now:
+            return False
+        user["user_rest_until"] = rest_until
+        user["user_rest_reason"] = _single_line(text, 120)
+        user["user_rest_set_at"] = check_now
+        if str(user.get("planned_proactive_source") or "") != "timer":
+            self._clear_user_rest_pending_plan_fallback(user)
+        logger.info(
+            "[PrivateCompanion] 已记录用户休息静默: user=%s until=%s reason=%s",
+            user.get("user_id") or user.get("id") or "",
+            datetime.fromtimestamp(rest_until).strftime("%m-%d %H:%M"),
+            _single_line(text, 80),
+        )
+        return True
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -1526,6 +1631,67 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             lines.append("群里刚才较密集，回复要更像收口：集中一个重点，避免逐条点名回应。")
         return "\n".join(lines)
 
+    def _append_non_target_private_identity_guard_to_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        marker = "<!-- private_companion_non_target_private_guard_v1 -->"
+        current_prompt = req.system_prompt or ""
+        if marker in current_prompt:
+            return
+        try:
+            user_id = str(event.get_sender_id())
+        except Exception:
+            user_id = ""
+        user_id = _single_line(user_id, 40)
+        if not user_id or self._is_bot_self_user_id(user_id):
+            return
+        raw_users = self.data.get("users", {})
+        current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
+        if self._is_target_private_user(user_id, current_user if isinstance(current_user, dict) else None):
+            return
+        display_name = ""
+        try:
+            display_name = _single_line(self._sender_display_name(event), 40)
+        except Exception:
+            display_name = ""
+        lines = [
+            "【私聊身份防串】",
+            f"当前私聊对象稳定 ID：{user_id}",
+            "这个用户不是插件配置的目标陪伴用户/主用户。",
+            "如果基础人格里包含“主人”“恋人”“专属称呼”或只属于主用户的关系设定,不要套用到当前私聊对象身上。",
+            "可以保留人格的通用说话风格,但关系身份、亲密度、记忆和承诺必须按当前用户重新判断。",
+            "除非当前用户明确提出角色扮演或临时设定,否则不要把对方当成主人、恋人或目标陪伴对象。",
+        ]
+        if display_name and display_name != user_id:
+            lines.append(f"平台当前显示名：{display_name}。显示名只作称呼线索,不能覆盖稳定 ID。")
+        profile = None
+        try:
+            profile = self._worldbook_profile_by_user_id(user_id)
+        except Exception:
+            profile = None
+        if isinstance(profile, dict) and profile.get("enabled", True):
+            name = _single_line(profile.get("name"), 40)
+            gender = _single_line(profile.get("gender"), 40)
+            identity = _single_line(profile.get("identity_note") or profile.get("note") or profile.get("content"), 220)
+            boundary = _single_line(profile.get("boundary_note"), 140)
+            aliases = []
+            for item in profile.get("aliases") if isinstance(profile.get("aliases"), list) else []:
+                alias = _single_line(item, 24)
+                if alias and alias != user_id and alias not in aliases:
+                    aliases.append(alias)
+            lines.append("【当前用户关系网资料】")
+            lines.append("以下资料来自当前私聊 QQ 号的精确匹配,只用于识别当前用户,不能外推到主用户。")
+            if name and name != user_id:
+                lines.append(f"登记名：{name}")
+            if gender:
+                lines.append(f"性别：{gender}")
+            if aliases:
+                lines.append(f"可用称呼线索：{'、'.join(aliases[:6])}")
+            if identity:
+                lines.append(f"身份备注：{identity}")
+            if boundary:
+                lines.append(f"互动边界：{boundary}")
+            lines.append("即使此用户资料中有亲昵称呼,也必须服从上面的防串规则：不要把目标陪伴用户的专属关系套给 TA。")
+        req.system_prompt = f"{current_prompt}\n\n{marker}\n{chr(10).join(lines)}".strip()
+
     @filter.on_llm_request()
     async def inject_humanized_state(self, event: AstrMessageEvent, req: ProviderRequest):
         """LLM 请求前注入陪伴状态、群聊上下文、工具边界和合并消息阅读上下文。"""
@@ -1551,6 +1717,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             await self._append_capability_boundary_to_request(event, req)
         if not is_private_chat:
             await self._mark_group_conversation_from_llm_request(event)
+        else:
+            self._append_non_target_private_identity_guard_to_request(event, req)
         if not self.inject_passive_states:
             await self._append_conditional_tool_instructions_to_request(event, req)
             await self._append_environment_perception_to_request(event, req)

@@ -1156,6 +1156,7 @@ class PrivateCompanionPageApi:
                     profile = {
                         "user_id": user_id,
                         "name": user_id,
+                        "gender": "",
                         "aliases": [],
                         "content": "",
                         "identity_note": "",
@@ -1173,6 +1174,8 @@ class PrivateCompanionPageApi:
                     profile["enabled"] = bool(payload.get("enabled"))
                 if "name" in payload:
                     profile["name"] = self._single_line(payload.get("name"), 80) or user_id
+                if "gender" in payload:
+                    profile["gender"] = self._single_line(payload.get("gender"), 40)
                 if "aliases" in payload and isinstance(payload.get("aliases"), list):
                     profile["aliases"] = [self._single_line(item, 40) for item in payload.get("aliases", []) if self._single_line(item, 40)]
                 if "content" in payload:
@@ -3619,6 +3622,7 @@ class PrivateCompanionPageApi:
             target = {
                 "user_id": target_id,
                 "name": self._single_line(source_profile.get("name"), 80) or target_id,
+                "gender": self._single_line(source_profile.get("gender"), 40),
                 "aliases": [],
                 "content": "",
                 "identity_note": f"QQ {target_id}，由外部身份绑定创建。",
@@ -3632,6 +3636,9 @@ class PrivateCompanionPageApi:
             profiles[target_id] = target
         target["user_id"] = target_id
         target["identity_type"] = "qq"
+        source_gender = self._single_line(source_profile.get("gender"), 40)
+        if source_gender and not self._single_line(target.get("gender"), 40):
+            target["gender"] = source_gender
         live_names = self._worldbook_string_list(source_profile.get("observed_names"), limit=12, item_limit=40)
         live_name = self._single_line(source_profile.get("name"), 40)
         if live_name and live_name != target_id:
@@ -3800,6 +3807,7 @@ class PrivateCompanionPageApi:
                     "user_id": self._single_line(user_id, 40),
                     "identity_type": self._single_line(item.get("identity_type") or ("qq" if str(user_id).isdigit() else "external"), 20),
                     "name": self._single_line(item.get("name"), 60),
+                    "gender": self._single_line(item.get("gender"), 40),
                     "enabled": bool(item.get("enabled", True)),
                     "priority": item.get("priority", 120),
                     "aliases": [self._single_line(alias, 40) for alias in aliases if self._single_line(alias, 40)],
