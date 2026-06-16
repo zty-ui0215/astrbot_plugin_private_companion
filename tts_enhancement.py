@@ -128,6 +128,7 @@ class TtsEnhancementMixin:
         self.enable_tts_local_playback = self._cfg_bool(config, "enable_tts_local_playback", False)
         self.enable_tts_live_subtitle_sync = self._cfg_bool(config, "enable_tts_live_subtitle_sync", False)
         self.tts_live_subtitle_url = self._cfg_str(config, "tts_live_subtitle_url", "http://127.0.0.1:18081/show", "http://127.0.0.1:18081/show")
+        self.tts_local_playback_volume = self._cfg_int(config, "tts_local_playback_volume", 35, 0, 100)
         self.tts_local_playback_min_interval_seconds = self._cfg_float(config, "tts_local_playback_min_interval_seconds", 0.0, 0.0)
         self._tts_local_playback_last_at = 0.0
         self._tts_auto_voice_last_at: dict[str, float] = {}
@@ -695,23 +696,21 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
         path = str(audio_path or "").strip()
         if not path:
             return
+        volume = max(0, min(100, _safe_int(getattr(self, "tts_local_playback_volume", 35), 35)))
         if sys.platform.startswith("win"):
-            self._play_tts_audio_file_windows_silent(path)
+            self._play_tts_audio_file_windows_silent(path, volume=volume)
             return
         if sys.platform == "darwin":
             subprocess.run(["afplay", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             return
-        subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-volume", str(volume), path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
-    def _play_tts_audio_file_windows_silent(self, path: str) -> None:
+    def _play_tts_audio_file_windows_silent(self, path: str, *, volume: int = 35) -> None:
         if Path(path).suffix.lower() == ".wav":
-            import winsound
-            playable_path = self._prepare_windows_wav_for_playback(path)
-            winsound.PlaySound(playable_path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+            path = self._prepare_windows_wav_for_playback(path)
+        if self._run_windows_media_player_script(path, use_wpf=True, volume=volume):
             return
-        if self._run_windows_media_player_script(path, use_wpf=True):
-            return
-        if self._run_windows_media_player_script(path, use_wpf=False):
+        if self._run_windows_media_player_script(path, use_wpf=False, volume=volume):
             return
         raise RuntimeError("Windows 后台播放器均未能播放该音频")
 
@@ -765,12 +764,15 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
             logger.debug("[PrivateCompanion] 修正 WAV 播放头失败，使用原文件: %s", _single_line(exc, 120))
             return path
 
-    def _run_windows_media_player_script(self, path: str, *, use_wpf: bool) -> bool:
+    def _run_windows_media_player_script(self, path: str, *, use_wpf: bool, volume: int = 35) -> bool:
+        volume = max(0, min(100, int(volume)))
         if use_wpf:
             script = (
                 "$p = [System.IO.Path]::GetFullPath($args[0]); "
+                "$vol = [Math]::Max(0, [Math]::Min(100, [int]$args[1])); "
                 "Add-Type -AssemblyName PresentationCore; "
                 "$player = New-Object System.Windows.Media.MediaPlayer; "
+                "$player.Volume = $vol / 100.0; "
                 "$player.Open([Uri]::new($p)); "
                 "$deadline = (Get-Date).AddSeconds(10); "
                 "while (-not $player.NaturalDuration.HasTimeSpan -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 50 }; "
@@ -779,19 +781,20 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
                 "Start-Sleep -Milliseconds ([Math]::Min([Math]::Max([int]$duration + 300, 800), 90000)); "
                 "$player.Close()"
             )
-            args = ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script, path]
+            args = ["powershell", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script, path, str(volume)]
         else:
             script = (
                 "$p = [System.IO.Path]::GetFullPath($args[0]); "
+                "$vol = [Math]::Max(0, [Math]::Min(100, [int]$args[1])); "
                 "$player = New-Object -ComObject WMPlayer.OCX; "
-                "$player.settings.volume = 100; "
+                "$player.settings.volume = $vol; "
                 "$player.URL = $p; "
                 "$player.controls.play(); "
                 "$deadline = (Get-Date).AddSeconds(90); "
                 "while ($player.playState -notin 1,8 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }; "
                 "$player.close()"
             )
-            args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, path]
+            args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script, path, str(volume)]
         result = subprocess.run(
             args,
             capture_output=True,

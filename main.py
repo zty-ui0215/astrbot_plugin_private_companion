@@ -300,7 +300,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "3.8.0",
+    "3.8.1",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -579,7 +579,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.voice_prompt_provider_id = self._cfg_str(c, "VOICE_PROMPT_PROVIDER_ID", "")
         self.history_summary_provider_id = self._cfg_str(c, "HISTORY_SUMMARY_PROVIDER_ID", "")
         self.enable_llm_proactive_message = self._cfg_bool(c, "enable_llm_proactive_message", True)
-        self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", True)
+        self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", False)
         self.enable_proactive_decorating_hooks = self._cfg_bool(c, "enable_proactive_decorating_hooks", True)
         self.enable_precise_platform_send = self._cfg_bool(c, "enable_precise_platform_send", True)
         self.enable_proactive_quote_trigger_message = self._cfg_bool(c, "enable_proactive_quote_trigger_message", False)
@@ -968,6 +968,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self._data_save_task: asyncio.Task | None = None
         self._data_save_dirty = False
         self._framework_captured_send_cache: dict[str, list[Any]] = {}
+        self._framework_session_locks: dict[str, asyncio.Lock] = {}
         self._last_input_status_at: dict[str, float] = {}
         self._passive_input_status_tasks: dict[str, asyncio.Task] = {}
         self._recent_inbound_activity_by_scope: dict[str, dict[str, Any]] = {}
@@ -1107,6 +1108,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not bool(getattr(event, "is_private_chat", lambda: False)()):
             return
         self._stop_passive_input_status_loop(event)
+        self._release_framework_session_lock_for_event(event, label="decorating_result")
 
     @filter.on_decorating_result()
     async def strip_outbound_control_blocks_before_send(self, event: AstrMessageEvent):
@@ -1459,7 +1461,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
 
         Args:
             text(string): 要发布到 QQ 空间的说说正文。
-            use_latest_draft(boolean): 可选，是否使用最近生成的生活草稿。
+            use_latest_draft(boolean): 可选,是否使用最近生成的生活说说草稿。
         """
         return await self._pc_qzone_publish_feed_impl(event, text, **kwargs)
 
@@ -1828,7 +1830,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             return
         if not self._is_target_private_user(user_id, current_user) or not current_user.get("enabled", True):
             return
-        self._start_passive_input_status_loop(event, user_id)
+        await self._acquire_framework_session_lock_for_event(event, label="private_llm_request")
+        if not bool(getattr(event, "private_companion_skip_passive_input_status", False)):
+            self._start_passive_input_status_loop(event, user_id)
 
         state = await self._ensure_daily_state(skip_conversation_summary=True, passive_fast=True)
         inbound_text = _single_line(getattr(event, "message_str", "") or current_user.get("last_user_message"), 260)
@@ -2209,83 +2213,96 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     @filter.on_llm_response()
     async def capture_llm_timer_directive(self, event: AstrMessageEvent, resp: LLMResponse):
         """LLM 回复后捕获定时/状态指令，并做私聊回复审校。"""
-        if not self.enabled:
-            return
-        if not bool(getattr(event, "is_private_chat", lambda: False)()):
-            return
-        original_text = str(resp.completion_text or "").strip()
-        if not original_text:
-            self._stop_passive_input_status_loop(event)
-            return
+        release_now = False
         try:
-            user_id = str(event.get_sender_id())
-        except Exception:
-            self._stop_passive_input_status_loop(event)
-            return
-        raw_users = self.data.get("users", {})
-        current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
-        if not isinstance(current_user, dict):
-            self._stop_passive_input_status_loop(event)
-            return
-        working_text = original_text
-        reply_image_vision = _single_line(getattr(event, "private_companion_reply_image_vision_text", ""), 600)
-        reply_image_user_text = _single_line(
-            getattr(event, "private_companion_reply_image_user_text", "") or current_user.get("last_user_message"),
-            260,
-        )
-        if (
-            reply_image_vision
-            and bool(getattr(event, "private_companion_reply_image_content_question", False))
-            and self._private_image_reply_misses_content_question(working_text)
-        ):
-            corrected = self._private_image_content_answer_from_vision(
-                reply_image_vision,
-                user_text=reply_image_user_text,
+            if not self.enabled:
+                release_now = True
+                return
+            if not bool(getattr(event, "is_private_chat", lambda: False)()):
+                release_now = True
+                return
+            original_text = str(resp.completion_text or "").strip()
+            if not original_text:
+                self._stop_passive_input_status_loop(event)
+                release_now = True
+                return
+            try:
+                user_id = str(event.get_sender_id())
+            except Exception:
+                self._stop_passive_input_status_loop(event)
+                release_now = True
+                return
+            raw_users = self.data.get("users", {})
+            current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
+            if not isinstance(current_user, dict):
+                self._stop_passive_input_status_loop(event)
+                release_now = True
+                return
+            working_text = original_text
+            reply_image_vision = _single_line(getattr(event, "private_companion_reply_image_vision_text", ""), 600)
+            reply_image_user_text = _single_line(
+                getattr(event, "private_companion_reply_image_user_text", "") or current_user.get("last_user_message"),
+                260,
             )
-            if corrected:
-                logger.info(
-                    "[PrivateCompanion] 私聊引用图片回复疑似被历史话题污染,已按视觉摘要纠偏: user=%s before=%s after=%s",
-                    user_id,
-                    _single_line(working_text, 120),
-                    _single_line(corrected, 160),
+            if (
+                reply_image_vision
+                and bool(getattr(event, "private_companion_reply_image_content_question", False))
+                and self._private_image_reply_misses_content_question(working_text)
+            ):
+                corrected = self._private_image_content_answer_from_vision(
+                    reply_image_vision,
+                    user_text=reply_image_user_text,
                 )
-                working_text = corrected
-                resp.completion_text = corrected
-        if self.enable_llm_timer_scheduling and "<timer" in original_text.lower():
-            cleaned_text, payloads = self._extract_timer_directives(original_text)
-            if cleaned_text != original_text:
-                working_text = cleaned_text
-                resp.completion_text = working_text
-            if payloads:
-                await self._schedule_llm_timer(
-                    user_id,
-                    payloads[-1],
-                    source_text=working_text,
-                    source_origin="llm_response",
-                    trigger_message_id=self._event_message_id(event),
-                    trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
-                )
+                if corrected:
+                    logger.info(
+                        "[PrivateCompanion] 私聊引用图片回复疑似被历史话题污染,已按视觉摘要纠偏: user=%s before=%s after=%s",
+                        user_id,
+                        _single_line(working_text, 120),
+                        _single_line(corrected, 160),
+                    )
+                    working_text = corrected
+                    resp.completion_text = corrected
+            if self.enable_llm_timer_scheduling and "<timer" in original_text.lower():
+                cleaned_text, payloads = self._extract_timer_directives(original_text)
+                if cleaned_text != original_text:
+                    working_text = cleaned_text
+                    resp.completion_text = working_text
+                if payloads:
+                    await self._schedule_llm_timer(
+                        user_id,
+                        payloads[-1],
+                        source_text=working_text,
+                        source_origin="llm_response",
+                        trigger_message_id=self._event_message_id(event),
+                        trigger_umo=str(getattr(event, "unified_msg_origin", "") or ""),
+                    )
 
-        inbound_text = _single_line(current_user.get("last_user_message"), 260)
-        reviewed_text = await self._review_and_rewrite_response(current_user, inbound_text, working_text)
-        if reviewed_text != working_text:
-            resp.completion_text = reviewed_text
-            working_text = reviewed_text
+            inbound_text = _single_line(current_user.get("last_user_message"), 260)
+            reviewed_text = await self._review_and_rewrite_response(current_user, inbound_text, working_text)
+            if reviewed_text != working_text:
+                resp.completion_text = reviewed_text
+                working_text = reviewed_text
+                async with self._data_lock:
+                    current = self._get_user(user_id)
+                    stats = current.setdefault("postprocess_stats", {})
+                    if not isinstance(stats, dict):
+                        stats = {}
+                        current["postprocess_stats"] = stats
+                    stats["rewritten"] = _safe_int(stats.get("rewritten"), 0, 0) + 1
+                    stats["last_rewritten_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M")
+                    self._save_data_sync()
+
             async with self._data_lock:
                 current = self._get_user(user_id)
-                stats = current.setdefault("postprocess_stats", {})
-                if not isinstance(stats, dict):
-                    stats = {}
-                    current["postprocess_stats"] = stats
-                stats["rewritten"] = _safe_int(stats.get("rewritten"), 0, 0) + 1
-                stats["last_rewritten_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M")
+                current["last_companion_message"] = _single_line(_strip_internal_message_blocks(working_text), 500)
+                self._remember_passive_reply_topic(current, working_text, inbound_text)
                 self._save_data_sync()
-
-        async with self._data_lock:
-            current = self._get_user(user_id)
-            current["last_companion_message"] = _single_line(_strip_internal_message_blocks(working_text), 500)
-            self._remember_passive_reply_topic(current, working_text, inbound_text)
-            self._save_data_sync()
+        except Exception:
+            release_now = True
+            raise
+        finally:
+            if release_now:
+                self._release_framework_session_lock_for_event(event, label="llm_response_finally")
 
     async def _debug_prompt_text(self, kind: str, user: dict[str, Any]) -> str:
         normalized = str(kind or "").strip().lower()

@@ -1208,6 +1208,7 @@ class ProactiveMessageMixin:
         *,
         target_session: str,
         runner_factory: Any,
+        max_steps: int = 20,
     ) -> tuple[Any, list[_CapturedSendMessageCall]]:
         captured: list[_CapturedSendMessageCall] = []
         try:
@@ -1241,7 +1242,7 @@ class ProactiveMessageMixin:
             result = await runner_factory()
             runner = getattr(result, "agent_runner", None) if result is not None else None
             if runner is not None and hasattr(runner, "step_until_done"):
-                async for _ in runner.step_until_done(20):
+                async for _ in runner.step_until_done(max_steps):
                     pass
         finally:
             SendMessageToUserTool.call = original_call
@@ -1265,6 +1266,116 @@ class ProactiveMessageMixin:
                 logger.debug("[PrivateCompanion] 会话数据库操作失败: %s error=%s", label, exc)
                 raise
 
+    def _framework_session_lock(self, session_key: str) -> asyncio.Lock:
+        normalized = str(session_key or "").strip() or "global"
+        locks = getattr(self, "_framework_session_locks", None)
+        if not isinstance(locks, dict):
+            locks = {}
+            self._framework_session_locks = locks
+        lock = locks.get(normalized)
+        if not isinstance(lock, asyncio.Lock):
+            lock = asyncio.Lock()
+            locks[normalized] = lock
+        if len(locks) > 300:
+            for key, item in list(locks.items()):
+                if key != normalized and isinstance(item, asyncio.Lock) and not item.locked():
+                    locks.pop(key, None)
+                if len(locks) <= 240:
+                    break
+        return lock
+
+    def _framework_session_key_from_event(self, event: AstrMessageEvent) -> str:
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if umo:
+            return umo
+        try:
+            return f"private:{event.get_sender_id()}"
+        except Exception:
+            return "unknown"
+
+    def _is_sqlite_locked_error(self, exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return "database is locked" in text or "sqlite3.operationalerror" in text or "sqlalche.me/e/20/e3q8" in text
+
+    async def _acquire_framework_session_lock_for_event(self, event: AstrMessageEvent, *, label: str = "llm") -> None:
+        if bool(getattr(event, "private_companion_framework_session_lock_acquired", False)):
+            return
+        if bool(getattr(event, "private_companion_proactive_framework", False)):
+            return
+        if not bool(getattr(event, "is_private_chat", lambda: False)()):
+            return
+        session_key = self._framework_session_key_from_event(event)
+        lock = self._framework_session_lock(session_key)
+        if lock.locked():
+            logger.info(
+                "[PrivateCompanion] 同一私聊会话已有主链请求在执行,本轮排队等待: label=%s session=%s",
+                label,
+                _single_line(session_key, 120),
+            )
+        await lock.acquire()
+        try:
+            setattr(event, "private_companion_framework_session_lock_acquired", True)
+            setattr(event, "private_companion_framework_session_lock", lock)
+            setattr(event, "private_companion_framework_session_key", session_key)
+            setattr(event, "private_companion_framework_session_lock_label", label)
+            watchdog = asyncio.create_task(
+                self._framework_session_lock_watchdog(event, lock, session_key, label)
+            )
+            setattr(event, "private_companion_framework_session_lock_watchdog", watchdog)
+        except Exception:
+            pass
+
+    async def _framework_session_lock_watchdog(
+        self,
+        event: AstrMessageEvent,
+        lock: asyncio.Lock,
+        session_key: str,
+        label: str,
+        *,
+        timeout_seconds: float = 180.0,
+    ) -> None:
+        try:
+            await asyncio.sleep(timeout_seconds)
+            if (
+                bool(getattr(event, "private_companion_framework_session_lock_acquired", False))
+                and getattr(event, "private_companion_framework_session_lock", None) is lock
+                and lock.locked()
+            ):
+                setattr(event, "private_companion_framework_session_lock_acquired", False)
+                setattr(event, "private_companion_framework_session_lock", None)
+                lock.release()
+                logger.warning(
+                    "[PrivateCompanion] 私聊主链会话锁超时释放: label=%s session=%s",
+                    label,
+                    _single_line(session_key, 120),
+                )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 私聊主链会话锁看门狗异常: %s", _single_line(exc, 120))
+
+    def _release_framework_session_lock_for_event(self, event: AstrMessageEvent, *, label: str = "llm") -> None:
+        if not bool(getattr(event, "private_companion_framework_session_lock_acquired", False)):
+            return
+        lock = getattr(event, "private_companion_framework_session_lock", None)
+        session_key = str(getattr(event, "private_companion_framework_session_key", "") or "")
+        watchdog = getattr(event, "private_companion_framework_session_lock_watchdog", None)
+        if isinstance(watchdog, asyncio.Task) and not watchdog.done():
+            watchdog.cancel()
+        try:
+            setattr(event, "private_companion_framework_session_lock_acquired", False)
+            setattr(event, "private_companion_framework_session_lock", None)
+            setattr(event, "private_companion_framework_session_lock_watchdog", None)
+        except Exception:
+            pass
+        if isinstance(lock, asyncio.Lock) and lock.locked():
+            lock.release()
+            logger.debug(
+                "[PrivateCompanion] 已释放私聊主链会话锁: label=%s session=%s",
+                label,
+                _single_line(session_key, 120),
+            )
+
     async def _get_current_conversation_safely(self, umo: str, *, label: str = "conversation") -> Any:
         async def _read():
             conv_id = await self.context.conversation_manager.get_curr_conversation_id(umo)
@@ -1273,6 +1384,106 @@ class ProactiveMessageMixin:
             return await self.context.conversation_manager.get_conversation(umo, conv_id)
 
         return await self._conversation_db_operation(label, _read)
+
+    def _proactive_synthetic_event(self, umo: str, *, prompt: str, name: str) -> AstrMessageEvent | None:
+        session = self._parse_message_session(umo)
+        if not session:
+            return None
+        return SyntheticPrivateWakeEvent(
+            context=self.context,
+            session=session,
+            message=prompt,
+            sender_name=name or "PrivateCompanion",
+        )
+
+    async def _run_framework_agent_text(
+        self,
+        *,
+        umo: str,
+        prompt: str,
+        name: str,
+        label: str,
+        max_steps: int = 20,
+    ) -> str:
+        event = self._proactive_synthetic_event(umo, prompt=prompt, name=name)
+        if event is None:
+            return ""
+        try:
+            setattr(event, "private_companion_skip_external_token_stats", True)
+            setattr(event, "private_companion_proactive_framework", True)
+            setattr(event, "private_companion_skip_passive_input_status", True)
+        except Exception:
+            pass
+        cfg = self.context.get_config(umo=umo) if umo else self.context.get_config()
+        provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
+        build_cfg = MainAgentBuildConfig(
+            tool_call_timeout=int(provider_settings.get("tool_call_timeout", 120) or 120),
+            llm_safety_mode=False,
+            streaming_response=False,
+        )
+        req = ProviderRequest(
+            prompt=prompt,
+            conversation=None,
+            session_id=getattr(event, "session_id", None) or umo,
+        )
+
+        captured_tool_sends: list[Any] = []
+        result = None
+        session_lock = self._framework_session_lock(umo)
+        async with session_lock:
+            for attempt in range(3):
+                try:
+                    conv = await self._get_current_conversation_safely(umo, label=f"{label}_framework_read")
+                    req.conversation = conv
+                    await self.inject_humanized_state(event, req)
+
+                    async def _runner_factory():
+                        return await build_main_agent(
+                            event=event,
+                            plugin_context=self.context,
+                            config=build_cfg,
+                            req=req,
+                        )
+
+                    result, captured_tool_sends = await self._capture_framework_send_message_calls(
+                        target_session=umo,
+                        runner_factory=_runner_factory,
+                        max_steps=max_steps,
+                    )
+                    break
+                except Exception as exc:
+                    if self._is_sqlite_locked_error(exc) and attempt < 2:
+                        wait_seconds = 0.35 * (attempt + 1)
+                        logger.info(
+                            "[PrivateCompanion] 主动主链遇到会话库锁,稍后重试: label=%s session=%s retry=%s",
+                            label,
+                            _single_line(umo, 120),
+                            attempt + 1,
+                        )
+                        await asyncio.sleep(wait_seconds)
+                        continue
+                    raise
+        runner = getattr(result, "agent_runner", None) if result else None
+        llm_resp = runner.get_final_llm_resp() if runner else None
+        text = str(getattr(llm_resp, "completion_text", "") or "").strip()
+        if not text and captured_tool_sends:
+            captured_text_parts: list[str] = []
+            for call in reversed(captured_tool_sends):
+                messages = getattr(call, "messages", [])
+                if not isinstance(messages, list):
+                    continue
+                for item in messages:
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("type") or "").strip().lower() != "plain":
+                        continue
+                    text_value = self._sanitize_captured_plain_text(item.get("text"))
+                    if text_value:
+                        captured_text_parts.append(text_value)
+                if captured_text_parts:
+                    break
+            text = "\n".join(captured_text_parts).strip()
+        return text
 
     async def _generate_proactive_message_via_framework(
         self,
@@ -1286,30 +1497,6 @@ class ProactiveMessageMixin:
         umo = str(user.get("umo") or "").strip()
         if not umo:
             return ""
-        try:
-            session = MessageSession.from_str(umo)
-        except Exception:
-            logger.debug("[PrivateCompanion] 无法从 umo 构造会话: %s", umo)
-            return ""
-        conv = await self._get_current_conversation_safely(umo, label="proactive_framework_read")
-        if not conv:
-            logger.debug("[PrivateCompanion] 未拿到当前私聊对话,跳过框架式主动生成: %s", umo)
-            return ""
-
-        synthetic_event = SyntheticPrivateWakeEvent(
-            context=self.context,
-            session=session,
-            message="[PrivateCompanion internal proactive wakeup: bot is about to initiate; user did not send this message]",
-            sender_name=name or "PrivateCompanion",
-        )
-        setattr(synthetic_event, "private_companion_skip_external_token_stats", True)
-        cfg = self.context.get_config(umo=umo)
-        provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
-        build_cfg = MainAgentBuildConfig(
-            tool_call_timeout=int(provider_settings.get("tool_call_timeout", 120) or 120),
-            llm_safety_mode=False,
-            streaming_response=False,
-        )
         prompt = self._build_framework_proactive_prompt(
             user=user,
             name=name,
@@ -1318,65 +1505,31 @@ class ProactiveMessageMixin:
             action_context=action_context,
             motive=motive,
         )
-        req = ProviderRequest(
-            prompt=prompt,
-            conversation=conv,
-            session_id=umo,
-        )
-        start = time.time()
         try:
-            async def _runner_factory():
-                return await build_main_agent(
-                    event=synthetic_event,
-                    plugin_context=self.context,
-                    config=build_cfg,
-                    req=req,
-                )
-
-            framework_lock = getattr(self, "_framework_agent_lock", None)
-            if not isinstance(framework_lock, asyncio.Lock):
-                framework_lock = asyncio.Lock()
-                self._framework_agent_lock = framework_lock
-            async with framework_lock:
-                result, captured_tool_sends = await self._capture_framework_send_message_calls(
-                    target_session=umo,
-                    runner_factory=_runner_factory,
-                )
-            if not result:
-                return ""
-            runner = result.agent_runner
-            llm_resp = runner.get_final_llm_resp()
-            if not llm_resp or llm_resp.role != "assistant":
-                return ""
-            raw_text = llm_resp.completion_text or ""
-            self._record_llm_usage(
-                provider_id="framework",
-                task="proactive_framework",
+            raw_text = await self._run_framework_agent_text(
+                umo=umo,
                 prompt=prompt,
-                completion=raw_text,
-                elapsed_ms=int((time.time() - start) * 1000),
-                success=True,
-                resp=llm_resp,
-                budget_exempt=True,
+                name=name,
+                label="proactive_message",
+                max_steps=20,
             )
+            raw_text = str(raw_text or "")
+            if not raw_text:
+                return ""
             cleaned_text, payloads = self._extract_timer_directives(raw_text)
             if payloads:
                 await self._schedule_llm_timer(
                     str(user.get("user_id") or ""),
                     payloads[-1],
                     source_text=cleaned_text or raw_text,
-                    source_origin="framework_proactive",
-                )
-            if captured_tool_sends:
-                self._framework_captured_send_cache[umo] = list(captured_tool_sends)
-                logger.info(
-                    "[PrivateCompanion] 本次框架主动生成尝试通过工具直接发送，已改为仅捕获不直发: session=%s count=%s",
-                    umo,
-                    len(captured_tool_sends),
+                    source_origin="proactive_llm",
                 )
             return cleaned_text
         except Exception as exc:
-            logger.warning("[PrivateCompanion] 框架式主动生成失败: %s", exc)
+            if self._is_sqlite_locked_error(exc):
+                logger.warning("[PrivateCompanion] 主动消息主链被会话数据库锁住,本轮跳过并等待下次调度: %s", _single_line(umo, 120))
+            else:
+                logger.warning("[PrivateCompanion] 主动消息主链生成失败: %s", exc)
             return ""
 
     def _pop_framework_captured_send_payload(
@@ -1444,30 +1597,6 @@ class ProactiveMessageMixin:
         umo = str(user.get("umo") or target or "").strip()
         if not umo:
             return ""
-        try:
-            session = MessageSession.from_str(umo)
-        except Exception:
-            logger.debug("[PrivateCompanion] 无法从 umo 构造语音会话: %s", umo)
-            return ""
-        conv = await self._get_current_conversation_safely(umo, label="voice_framework_read")
-        if not conv:
-            logger.debug("[PrivateCompanion] 未拿到当前私聊对话,跳过框架式语音生成: %s", umo)
-            return ""
-
-        synthetic_event = SyntheticPrivateWakeEvent(
-            context=self.context,
-            session=session,
-            message="[PrivateCompanion internal proactive voice wakeup: bot is about to initiate; user did not send this message]",
-            sender_name=name or "PrivateCompanion",
-        )
-        setattr(synthetic_event, "private_companion_skip_external_token_stats", True)
-        cfg = self.context.get_config(umo=umo)
-        provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
-        build_cfg = MainAgentBuildConfig(
-            tool_call_timeout=int(provider_settings.get("tool_call_timeout", 120) or 120),
-            llm_safety_mode=False,
-            streaming_response=False,
-        )
         prompt = self._build_framework_voice_prompt(
             user=user,
             name=name,
@@ -1475,44 +1604,20 @@ class ProactiveMessageMixin:
             target=target,
             strict_tts=strict_tts,
         )
-        req = ProviderRequest(
-            prompt=prompt,
-            conversation=conv,
-            session_id=umo,
-        )
-        start = time.time()
         try:
-            framework_lock = getattr(self, "_framework_agent_lock", None)
-            if not isinstance(framework_lock, asyncio.Lock):
-                framework_lock = asyncio.Lock()
-                self._framework_agent_lock = framework_lock
-            async with framework_lock:
-                result = await build_main_agent(
-                    event=synthetic_event,
-                    plugin_context=self.context,
-                    config=build_cfg,
-                    req=req,
-                )
-            if not result:
-                return ""
-            runner = result.agent_runner
-            llm_resp = runner.get_final_llm_resp()
-            if not llm_resp or llm_resp.role != "assistant":
-                return ""
-            raw_text = str(llm_resp.completion_text or "")
-            self._record_llm_usage(
-                provider_id="framework",
-                task="voice_framework",
+            raw_text = await self._run_framework_agent_text(
+                umo=umo,
                 prompt=prompt,
-                completion=raw_text,
-                elapsed_ms=int((time.time() - start) * 1000),
-                success=True,
-                resp=llm_resp,
-                budget_exempt=True,
+                name=name,
+                label="proactive_voice",
+                max_steps=20,
             )
-            return raw_text.strip()
+            return str(raw_text or "").strip()
         except Exception as exc:
-            logger.warning("[PrivateCompanion] 框架式语音内容生成失败: %s", exc)
+            if self._is_sqlite_locked_error(exc):
+                logger.warning("[PrivateCompanion] 主动语音主链被会话数据库锁住,本轮跳过并等待下次调度: %s", _single_line(umo, 120))
+            else:
+                logger.warning("[PrivateCompanion] 主动语音主链内容生成失败: %s", exc)
             return ""
 
     async def _generate_proactive_message_with_llm(

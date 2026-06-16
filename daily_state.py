@@ -6392,9 +6392,18 @@ class DailyStateMixin:
         return "\n".join(lines)
 
     def _debug_tick_skip(self, user_id: str, reason: str, *, prefix: str = "跳过") -> None:
+        reason_text = _single_line(reason, 120) or "未知原因"
+        should_record = prefix != "跳过" or reason_text not in {"未到候选主动时间", "已安排下一次候选主动时间"}
+        if should_record:
+            try:
+                current = self._get_user(str(user_id or ""))
+                current["last_proactive_skip_at"] = _now_ts()
+                current["last_proactive_skip_reason"] = reason_text
+                current["last_proactive_skip_prefix"] = _single_line(prefix, 20)
+            except Exception:
+                pass
         if prefix == "跳过":
             return
-        reason_text = _single_line(reason, 120) or "未知原因"
         key = f"{prefix}:{user_id}"
         now = _now_ts()
         cache = getattr(self, "_tick_skip_log_cache", None)
@@ -6412,15 +6421,23 @@ class DailyStateMixin:
                     cache.pop(old_key, None)
         logger.debug(f"[PrivateCompanion] {prefix} {user_id}: {reason_text}")
 
+    async def _run_proactive_maintenance_tasks(self) -> None:
+        for label, task_factory in (
+            ("技能成长结算", self._maybe_settle_skill_growth),
+            ("B站无聊观看", self._maybe_trigger_bilibili_boredom_watch),
+            ("网页探索", self._maybe_trigger_web_exploration),
+            ("AI日报追踪", self._maybe_track_ai_daily),
+            ("新闻无聊阅读", self._maybe_trigger_news_boredom_read),
+            ("夹层无聊阅读", self._maybe_trigger_jm_cosmos_boredom_read),
+            ("QQ空间生活说说", self._maybe_publish_qzone_life_post),
+            ("夹层推荐请求", self._maybe_schedule_private_reading_recommendation_request),
+        ):
+            try:
+                await task_factory()
+            except Exception as exc:
+                logger.warning("[PrivateCompanion] 主动维护任务失败,不阻塞私聊主动: %s error=%s", label, _single_line(exc, 160))
+
     async def _tick(self):
-        await self._maybe_settle_skill_growth()
-        await self._maybe_trigger_bilibili_boredom_watch()
-        await self._maybe_trigger_web_exploration()
-        await self._maybe_track_ai_daily()
-        await self._maybe_trigger_news_boredom_read()
-        await self._maybe_trigger_jm_cosmos_boredom_read()
-        await self._maybe_publish_qzone_life_post()
-        await self._maybe_schedule_private_reading_recommendation_request()
         async with self._data_lock:
             if self._maybe_schedule_bilibili_video_share():
                 self._save_data_sync()
@@ -6762,4 +6779,6 @@ class DailyStateMixin:
                 self._save_data_sync()
                 current_snapshot = dict(current)
             asyncio.create_task(self._refresh_persona_relationship(user_id, current_snapshot))
+
+        await self._run_proactive_maintenance_tasks()
 

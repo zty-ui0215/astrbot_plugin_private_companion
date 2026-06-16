@@ -845,14 +845,20 @@ class ProactiveMixin:
                     self._stop_event.wait(), timeout=timeout
                 )
             except asyncio.TimeoutError:
-                await self._ensure_daily_state()
-                await self._ensure_daily_plan()
-                await self._ensure_detail_enhancement()
-                await self._ensure_current_detail_presence_status()
-                await self._ensure_daily_diary()
-                await self._maybe_advance_creative_projects()
-                await self._refresh_passive_injection_cache()
                 await self._tick()
+                for label, task_factory in (
+                    ("日常状态", self._ensure_daily_state),
+                    ("今日日程", self._ensure_daily_plan),
+                    ("当前细化", self._ensure_detail_enhancement),
+                    ("当前在线感", self._ensure_current_detail_presence_status),
+                    ("日记", self._ensure_daily_diary),
+                    ("创作推进", self._maybe_advance_creative_projects),
+                    ("被动注入缓存", self._refresh_passive_injection_cache),
+                ):
+                    try:
+                        await task_factory()
+                    except Exception as exc:
+                        logger.warning("[PrivateCompanion] 主动循环维护步骤失败,已跳过: %s error=%s", label, _single_line(exc, 160))
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -860,14 +866,20 @@ class ProactiveMixin:
 
     async def _kick_proactive_loop_once(self) -> None:
         try:
-            await self._ensure_daily_state()
-            await self._ensure_daily_plan()
-            await self._ensure_detail_enhancement()
-            await self._ensure_current_detail_presence_status()
-            await self._ensure_daily_diary()
-            await self._maybe_advance_creative_projects()
-            await self._refresh_passive_injection_cache()
             await self._tick()
+            for label, task_factory in (
+                ("日常状态", self._ensure_daily_state),
+                ("今日日程", self._ensure_daily_plan),
+                ("当前细化", self._ensure_detail_enhancement),
+                ("当前在线感", self._ensure_current_detail_presence_status),
+                ("日记", self._ensure_daily_diary),
+                ("创作推进", self._maybe_advance_creative_projects),
+                ("被动注入缓存", self._refresh_passive_injection_cache),
+            ):
+                try:
+                    await task_factory()
+                except Exception as exc:
+                    logger.warning("[PrivateCompanion] 主动链即时维护步骤失败,已跳过: %s error=%s", label, _single_line(exc, 160))
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 主动链即时唤醒失败: {e}", exc_info=True)
 

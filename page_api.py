@@ -109,6 +109,7 @@ class PrivateCompanionPageApi:
                     "knowledge": self.plugin._roleplay_knowledge_summary(),
                     "worldbook": self._worldbook_summary(data),
                     "proactive_candidates": self._proactive_candidate_summary(data),
+                    "proactive_tasks": self._proactive_task_summary(data),
                     "bilibili": self._bilibili_summary(data),
                     "news": self._news_summary(data),
                     "web_exploration": self._web_exploration_summary(data),
@@ -1593,6 +1594,10 @@ class PrivateCompanionPageApi:
             "last_sent_ts": last_sent,
             "last_sent": self.plugin._format_timestamp_elapsed(last_sent),
             "sent_today": user.get("sent_today", 0),
+            "last_proactive_skip_ts": self._float(user.get("last_proactive_skip_at")),
+            "last_proactive_skip": self.plugin._format_timestamp_elapsed(user.get("last_proactive_skip_at", 0)),
+            "last_proactive_skip_reason": self._single_line(user.get("last_proactive_skip_reason"), 120),
+            "last_proactive_skip_prefix": self._single_line(user.get("last_proactive_skip_prefix"), 20),
             "effective_daily_limit": (
                 self.plugin._effective_user_daily_limit(user)
                 if hasattr(self.plugin, "_effective_user_daily_limit")
@@ -4951,6 +4956,74 @@ class PrivateCompanionPageApi:
                 reverse=True,
             ),
             "items": items[:60],
+        }
+
+    def _proactive_task_summary(self, data: dict[str, Any]) -> dict[str, Any]:
+        users = data.get("users") if isinstance(data.get("users"), dict) else {}
+        now = time.time()
+        items: list[dict[str, Any]] = []
+        source_counts: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
+
+        for user_id, user in users.items():
+            if not isinstance(user, dict):
+                continue
+            scheduled_ts = self._float(user.get("next_proactive_at"))
+            timer_event = user.get("llm_timer_event") if isinstance(user.get("llm_timer_event"), dict) else {}
+            if scheduled_ts <= 0 and timer_event:
+                scheduled_ts = self._float(timer_event.get("scheduled_ts"))
+            if scheduled_ts <= 0:
+                continue
+            source = self._single_line(user.get("planned_proactive_source"), 40)
+            if not source and timer_event:
+                source = "timer"
+            source = source or "proactive"
+            status = "due" if scheduled_ts <= now else "scheduled"
+            if scheduled_ts < now - 15 * 60:
+                status = "overdue"
+            user_summary = self._user_summary(str(user_id), user)
+            source_counts[source] = source_counts.get(source, 0) + 1
+            status_counts[status] = status_counts.get(status, 0) + 1
+            items.append(
+                {
+                    "user_id": str(user_id),
+                    "user_label": user_summary.get("display_name") or str(user_id),
+                    "user_role": user_summary.get("relationship_role") or "",
+                    "user_role_label": user_summary.get("relationship_role_label") or "",
+                    "source": source,
+                    "status": status,
+                    "action": self._single_line(user.get("planned_proactive_action"), 40)
+                    or self._single_line(timer_event.get("action"), 40)
+                    or "message",
+                    "reason": self._single_line(user.get("planned_proactive_reason"), 40)
+                    or self._single_line(timer_event.get("reason"), 40),
+                    "topic": self._single_line(user.get("planned_proactive_topic"), 80)
+                    or self._single_line(timer_event.get("topic"), 80),
+                    "motive": self._single_line(user.get("planned_proactive_motive"), 180)
+                    or self._single_line(timer_event.get("motive"), 180),
+                    "scheduled_ts": scheduled_ts,
+                    "scheduled": self.plugin._format_timestamp_elapsed(scheduled_ts),
+                    "last_skip": self.plugin._format_timestamp_elapsed(user.get("last_proactive_skip_at", 0)),
+                    "last_skip_ts": self._float(user.get("last_proactive_skip_at")),
+                    "last_skip_reason": self._single_line(user.get("last_proactive_skip_reason"), 120),
+                    "last_skip_prefix": self._single_line(user.get("last_proactive_skip_prefix"), 20),
+                    "created_ts": self._float(timer_event.get("created_at")),
+                    "created": self.plugin._format_timestamp_elapsed(timer_event.get("created_at", 0)),
+                    "origin": self._single_line(timer_event.get("origin"), 40),
+                    "raw_time": self._single_line(timer_event.get("raw_time"), 40),
+                    "trigger_message_id": self._single_line(timer_event.get("trigger_message_id"), 120),
+                    "trigger_umo": self._single_line(timer_event.get("trigger_umo"), 160),
+                    "has_timer_event": bool(timer_event),
+                    "silence_until_due": bool(timer_event.get("silence_until_due")) if timer_event else False,
+                }
+            )
+
+        items.sort(key=lambda item: self._float(item.get("scheduled_ts")))
+        return {
+            "total": len(items),
+            "source_counts": source_counts,
+            "status_counts": status_counts,
+            "items": items[:80],
         }
 
     def _creative_summary(self, data: dict[str, Any]) -> dict[str, Any]:

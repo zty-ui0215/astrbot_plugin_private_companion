@@ -8,7 +8,7 @@
     "description": "启用插件",
     "type": "bool",
     "hint": "总开关。关闭后后台主动消息循环不会启动，但配置仍保留。",
-    "default": true
+    "default": false
   },
   "bot_name": {
     "description": "Bot 名字 / 页面展示名",
@@ -3029,6 +3029,17 @@
     "hint": "开启后，TTS 生成音频时会把朗读文本同步推送到“我会直播圈米养你”的打字机字幕 overlay。需要直播插件字幕服务已启用并运行。",
     "condition": {
       "enable_tts_enhancement": true
+    }
+  },
+  "tts_local_playback_volume": {
+    "description": "本机播放音量",
+    "type": "int",
+    "default": 35,
+    "min": 0,
+    "max": 100,
+    "hint": "TTS 生成后在本机播放时使用的音量百分比。默认 35，避免突然满音量播放；0 表示静音。",
+    "condition": {
+      "enable_tts_local_playback": true
     }
   },
   "tts_live_subtitle_url": {

@@ -5089,6 +5089,64 @@ input[type="search"] {
   min-width: 0;
 }
 
+.proactive-tasks {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.proactive-task,
+.proactive-task-empty {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface);
+}
+
+.proactive-task-empty {
+  border-style: dashed;
+  background: linear-gradient(135deg, rgba(242,239,231,0.78), #fff 72%);
+  color: var(--muted);
+}
+
+.proactive-task-empty b {
+  color: var(--ink);
+}
+
+.proactive-task-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.proactive-task-head b {
+  display: block;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.proactive-task-head span,
+.proactive-task p {
+  color: var(--muted);
+}
+
+.proactive-task p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.proactive-task.due {
+  background: linear-gradient(135deg, #fff, rgba(226, 241, 236, 0.92) 170%);
+}
+
+.proactive-task.overdue {
+  background: linear-gradient(135deg, #fff, #f3e4e1 170%);
+}
+
 .proactive-filters {
   position: sticky;
   top: 12px;

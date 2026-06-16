@@ -268,6 +268,7 @@ const featureMeta = {
   enable_companion_reply_planner: ["回复规划", "先判断接话策略，再生成回复，减少机械问答。"],
   enable_intent_emotion_analysis: ["意图情绪", "识别用户情绪和真实意图，用于关系与回复策略。"],
   enable_response_self_review: ["回复自检", "发送前检查是否生硬、越界、太像系统提示。"],
+  enable_llm_timer_scheduling: ["隐藏预约定时", "允许模型输出隐藏 <timer> 标签预约下一次主动开口；关闭后只保留 AstrBot 原生主动任务路径。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
   enable_relationship_state_machine: ["关系状态机", "维护陌生、熟悉、亲近等关系阶段。"],
   enable_dialogue_episode_memory: ["私聊片段", "把连续对话整理成共同经历和可续话头。"],
@@ -352,6 +353,7 @@ const featureGroups = [
       "enable_recall_enhancement",
       "enable_private_image_self_recognition",
       "enable_forward_message_adaptation",
+      "enable_llm_timer_scheduling",
       "enable_proactive_quote_trigger_message",
       "enable_tts_enhancement",
     ],
@@ -484,6 +486,7 @@ const configLabels = {
   tts_conversion_provider_id: "TTS转换模型Provider ID",
   tts_extra_prompt: "TTS补充规则",
   enable_tts_local_playback: "TTS生成后本机播放",
+  tts_local_playback_volume: "本机播放音量",
   enable_tts_live_subtitle_sync: "同步到直播打字机字幕",
   tts_live_subtitle_url: "直播字幕推送地址",
   tts_local_playback_min_interval_seconds: "本机播放最小间隔秒数",
@@ -723,6 +726,7 @@ const configDescriptions = {
   tts_conversion_provider_id: "用于 convert 路径、hybrid 自动语音和语种修正。留空时显式 <tts> 标签仍可直接由 TTS provider 处理。",
   tts_extra_prompt: "只填写本人格或声线的额外要求。基础格式、语种和 provider 自适应规则会自动生成，留空最稳。",
   enable_tts_local_playback: "开启后，TTS 音频生成成功时会在运行 AstrBot 的电脑上直接播放。默认关闭，避免群聊自动语音频繁出声。",
+  tts_local_playback_volume: "TTS 生成后在本机播放时使用的音量百分比。默认 35，避免突然满音量播放；0 表示静音。",
   enable_tts_live_subtitle_sync: "开启后，TTS 生成音频时会把朗读文本同步推送到“我会直播圈米养你”的打字机字幕 overlay。",
   tts_live_subtitle_url: "直播插件字幕 overlay 的 /show 接口地址。默认对应 127.0.0.1:18081/show。",
   tts_local_playback_min_interval_seconds: "两次 TTS 本机播放之间的最小间隔。0 表示不限制。",
@@ -966,7 +970,7 @@ const featureSettingGroups = {
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
-  enable_tts_enhancement: ["tts_generation_mode", "tts_voice_language", "tts_conversion_provider_id", "tts_extra_prompt", "enable_tts_local_playback", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_full_conversion_enabled", "auto_voice_probability", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
+  enable_tts_enhancement: ["tts_generation_mode", "tts_voice_language", "tts_conversion_provider_id", "tts_extra_prompt", "enable_tts_local_playback", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_full_conversion_enabled", "auto_voice_probability", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_creative_writing: ["creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects"],
   creative_hidden_mode: ["creative_share_probability"],
 };
@@ -1091,7 +1095,7 @@ const featureSettingSections = {
     {
       title: "本机与直播联动",
       note: "TTS 音频生成后可在运行 AstrBot 的电脑播放，并同步推送到直播插件打字机字幕。",
-      keys: ["enable_tts_local_playback", "tts_local_playback_min_interval_seconds", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url"],
+      keys: ["enable_tts_local_playback", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url"],
     },
     {
       title: "主用户触发",
@@ -4507,6 +4511,7 @@ function renderProactiveCandidates() {
   ].join("");
   $("#proactiveSourceChart").innerHTML = donutChart(sourceCounts);
   $("#proactiveStatusChart").innerHTML = donutChart(counts || {});
+  renderProactiveTasks();
   renderProactiveCandidateFilters(users, selectedFilter, data.total || allItems.length, total, items.length);
   if (!items.length) {
     $("#proactiveCandidateList").innerHTML = `<div class="empty small">暂无符合筛选的主动候选</div>`;
@@ -4539,6 +4544,70 @@ function renderProactiveCandidates() {
       </section>
     `;
   }).join("");
+}
+
+function renderProactiveTasks() {
+  const root = $("#proactiveTaskList");
+  if (!root) return;
+  const data = state.overview?.proactive_tasks || {};
+  const items = Array.isArray(data.items) ? data.items : [];
+  if (!items.length) {
+    root.innerHTML = `
+      <div class="proactive-task-empty">
+        <b>当前没有已登记的主动任务</b>
+        <span>如果 Bot 只是说“我等一下提醒你”，但这里没有记录，就说明没有真正进入插件主动调度。</span>
+      </div>
+    `;
+    return;
+  }
+  root.innerHTML = items.map((item) => {
+    const status = proactiveTaskStatusLabel(item.status);
+    const source = proactiveTaskSourceLabel(item.source, item.has_timer_event);
+    const title = item.topic || item.reason || "未命名主动任务";
+    const meta = [
+      `用户：${item.user_label || item.user_id || "-"}`,
+      `来源：${source}`,
+      `动作：${item.action || "message"}`,
+      `计划：${item.scheduled || "-"}`,
+      item.last_skip_reason ? `最近${item.last_skip_prefix || "跳过"}：${item.last_skip_reason}` : "",
+      item.last_skip_ts ? `记录：${item.last_skip || "-"}` : "",
+      item.created_ts ? `登记：${item.created || "-"}` : "",
+      item.raw_time ? `原始时间：${item.raw_time}` : "",
+      item.trigger_message_id ? `触发消息：${item.trigger_message_id}` : "",
+      item.silence_until_due ? "到点前静默" : "",
+    ].filter(Boolean);
+    return `
+      <section class="proactive-task ${escapeHtml(item.status || "scheduled")}">
+        <div class="proactive-task-head">
+          <div>
+            <b>${escapeHtml(title)}</b>
+            <span>${escapeHtml(item.user_label || item.user_id || "-")} · ${escapeHtml(item.user_role_label || "-")} · ${escapeHtml(source)}</span>
+          </div>
+          <span class="badge">${escapeHtml(status)}</span>
+        </div>
+        <p>${escapeHtml(item.motive || "暂无登记动机")}</p>
+        <div class="proactive-meta">
+          ${meta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}
+        </div>
+      </section>
+    `;
+  }).join("");
+}
+
+function proactiveTaskStatusLabel(status) {
+  return {
+    scheduled: "已登记",
+    due: "已到点",
+    overdue: "超时未发",
+  }[status] || status || "未知";
+}
+
+function proactiveTaskSourceLabel(source, hasTimerEvent = false) {
+  if (source === "timer" || hasTimerEvent) return "插件隐藏预约";
+  if (source === "candidate") return "主动候选";
+  if (source === "followup") return "链式追问";
+  if (source === "external") return "外部主动能力";
+  return source || "插件主动";
 }
 
 function validProactiveCandidateFilter(data, value) {
