@@ -1431,6 +1431,16 @@ class GroupObservationMixin:
             f"正向 {feedback.get('positive', 0)}｜负向 {feedback.get('negative', 0)}"
         )
 
+    def _clean_group_interjection_reply(self, value: Any) -> str:
+        text = _single_line(value, 80)
+        text = re.sub(r"^```(?:text)?|```$", "", text).strip()
+        text = text.strip("\"'“”‘’` ")
+        if not text or text in {"空字符串", "不适合说话", "不说", "不回复", "无"}:
+            return ""
+        if re.fullmatch(r"[.。…~～\s\"'“”‘’`-]{1,12}", text):
+            return ""
+        return text
+
     def _group_interjection_allowed(self, group: dict[str, Any], text: str) -> tuple[bool, str]:
         if not self.enable_group_interjection:
             return False, "群聊主动插话未开启"
@@ -1777,8 +1787,8 @@ class GroupObservationMixin:
             provider_id=self._task_provider(self.group_interject_provider_id, self.mai_style_provider_id),
             task="group_interject",
         )
-        reply = _single_line(generated, 80)
-        if not reply or reply in {"空字符串", "不适合说话"}:
+        reply = self._clean_group_interjection_reply(generated)
+        if not reply:
             return
         if self._response_review_flags(reply, {}):
             return

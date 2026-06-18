@@ -989,7 +989,7 @@ class DailyStateMixin:
                 {
                     "window": "17:20-19:10",
                     "reason": "activity_share",
-                    "action": "message",
+                    "action": "photo_text" if self._photo_text_available() else "message",
                     "why": "傍晚天色好看时,很容易把一点路上的画面顺手递过去。",
                     "topic": "傍晚路上",
                     "motive": "天色往下落的时候,刚好有一点想把路上的画面递给你",
@@ -1208,6 +1208,95 @@ class DailyStateMixin:
                 "ts": _now_ts(),
                 "signature": signature,
                 "text": _single_line(text or topic or motive, 120),
+            }
+        )
+        del recent[:-12]
+
+    def _activity_share_global_signature(self, user: dict[str, Any], *, text: str = "", action_summary: str = "") -> str:
+        state = self.data.get("daily_state", {})
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        parts: list[Any] = [
+            user.get("planned_proactive_topic"),
+            user.get("planned_proactive_motive"),
+            action_summary,
+        ]
+        if isinstance(current_item, dict):
+            parts.extend(
+                [
+                    current_item.get("time"),
+                    current_item.get("activity"),
+                    current_item.get("message_seed"),
+                ]
+            )
+        if isinstance(state, dict):
+            parts.extend(
+                [
+                    state.get("activity"),
+                    state.get("current_activity"),
+                    state.get("message_seed"),
+                    state.get("mood_bias"),
+                ]
+            )
+        parts.append(text)
+        signature = self._proactive_topic_signature(*parts)
+        if signature:
+            return signature
+        raw = " ".join(_single_line(part, 120) for part in parts if _single_line(part, 120))
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:16] if raw else ""
+
+    def _cleanup_global_activity_share_topics(self, *, now: float | None = None) -> list[dict[str, Any]]:
+        check_now = now or _now_ts()
+        runtime = self.data.setdefault("proactive_runtime", {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+            self.data["proactive_runtime"] = runtime
+        raw = runtime.get("recent_activity_shares")
+        if not isinstance(raw, list):
+            raw = []
+        kept = [
+            item for item in raw
+            if isinstance(item, dict) and check_now - _safe_float(item.get("ts"), 0) <= 90 * 60
+        ]
+        runtime["recent_activity_shares"] = kept[-12:]
+        return runtime["recent_activity_shares"]
+
+    def _activity_share_recently_sent_elsewhere(
+        self,
+        user_id: str,
+        user: dict[str, Any],
+        *,
+        text: str = "",
+        action_summary: str = "",
+        now: float | None = None,
+    ) -> str:
+        signature = self._activity_share_global_signature(user, text=text, action_summary=action_summary)
+        if not signature:
+            return ""
+        for item in self._cleanup_global_activity_share_topics(now=now):
+            if str(item.get("user_id") or "") == str(user_id):
+                continue
+            if self._topic_signature_similar(signature, str(item.get("signature") or "")):
+                return _single_line(item.get("text"), 80) or "同一日常碎片刚刚已分享给其他私聊对象"
+        return ""
+
+    def _remember_global_activity_share(
+        self,
+        user_id: str,
+        user: dict[str, Any],
+        *,
+        text: str = "",
+        action_summary: str = "",
+    ) -> None:
+        signature = self._activity_share_global_signature(user, text=text, action_summary=action_summary)
+        if not signature:
+            return
+        recent = self._cleanup_global_activity_share_topics()
+        recent.append(
+            {
+                "ts": _now_ts(),
+                "user_id": str(user_id),
+                "signature": signature,
+                "text": _single_line(text or user.get("planned_proactive_topic") or user.get("planned_proactive_motive"), 120),
             }
         )
         del recent[:-12]
@@ -6503,6 +6592,22 @@ class DailyStateMixin:
             proactive_quote_message_id = self._planned_proactive_quote_message_id(user, str(user.get("umo") or ""))
             planned_opener_mode_for_send = str(user.get("planned_opener_mode") or "")
             planned_followup_kind_for_send = str(user.get("planned_followup_kind") or "")
+            if (
+                planned_action_for_send == "message"
+                and str(user.get("planned_proactive_reason") or "") in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}
+                and self._photo_text_available(user)
+                and self._strong_photo_share_intent(
+                    planned_motive_for_send,
+                    user.get("planned_proactive_topic"),
+                    self._format_plan_item_for_prompt(self._get_current_plan_item(self.data.get("daily_plan", {}))),
+                )
+            ):
+                planned_action_for_send = "photo_text"
+                async with self._data_lock:
+                    current_for_upgrade = self._get_user(user_id)
+                    current_for_upgrade["planned_proactive_action"] = "photo_text"
+                    self._mark_planned_candidate_status(current_for_upgrade, "accepted", "检测到明确可拍画面,发送前升级为发图")
+                    self._save_data_sync()
             load_defer_note = self._photo_text_load_defer_note(planned_action_for_send, force_refresh=True)
             if load_defer_note:
                 async with self._data_lock:
@@ -6561,6 +6666,40 @@ class DailyStateMixin:
                     self._update_proactive_audit(audit_id, status="failed", note=f"生成失败: {_single_line(e, 140)}")
                     self._save_data_sync()
                 continue
+            if reason == "activity_share":
+                async with self._data_lock:
+                    current_for_dedupe = self._get_user(user_id)
+                    duplicate_note = self._activity_share_recently_sent_elsewhere(
+                        user_id,
+                        current_for_dedupe,
+                        text=text,
+                        action_summary=action_summary,
+                    )
+                    if duplicate_note:
+                        current_for_dedupe["proactive_sending"] = False
+                        current_for_dedupe["proactive_sending_started_at"] = 0
+                        current_for_dedupe["next_proactive_at"] = 0
+                        current_for_dedupe["planned_proactive_reason"] = ""
+                        current_for_dedupe["planned_proactive_action"] = ""
+                        current_for_dedupe["planned_proactive_source"] = ""
+                        current_for_dedupe["planned_proactive_motive"] = ""
+                        current_for_dedupe["planned_proactive_topic"] = ""
+                        current_for_dedupe["planned_event_chain"] = []
+                        current_for_dedupe["planned_opener_mode"] = ""
+                        current_for_dedupe["planned_followup_kind"] = ""
+                        current_for_dedupe["planned_proactive_quota_exempt"] = False
+                        self._mark_planned_candidate_status(current_for_dedupe, "blocked", "同一日常碎片刚刚已分享给其他私聊对象")
+                        self._update_proactive_audit(audit_id, status="cancelled", note=f"跨用户活动分享去重: {duplicate_note}")
+                        self._schedule_next_proactive(current_for_dedupe, now=_now_ts(), delay_hours=(1.5, 4.0))
+                        self._save_data_sync()
+                if duplicate_note:
+                    logger.info(
+                        "[PrivateCompanion] 取消重复活动分享: user=%s duplicate=%s",
+                        user_id,
+                        _single_line(duplicate_note, 100),
+                    )
+                    self._debug_tick_skip(user_id, "同一日常碎片刚刚已分享给其他私聊对象", prefix="取消")
+                    continue
             async with self._data_lock:
                 current_after_render = self._get_user(user_id)
                 has_new_user_message = (
@@ -6693,6 +6832,13 @@ class DailyStateMixin:
                     topic=current.get("planned_proactive_topic"),
                     motive=planned_motive_for_send,
                 )
+                if reason == "activity_share":
+                    self._remember_global_activity_share(
+                        user_id,
+                        current,
+                        text=visible_text or text,
+                        action_summary=action_summary,
+                    )
                 self._mark_planned_candidate_status(current, "sent", "已发送")
                 self._update_proactive_audit(
                     audit_id,

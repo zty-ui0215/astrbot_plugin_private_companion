@@ -1595,10 +1595,15 @@ class PrivateImageMixin:
                 key = high_key
                 force_consume = True
             else:
-                wait = self._message_debounce_seconds("group")
-                if wait <= 0:
-                    return ""
                 key = self._semantic_buffer_key(scope, sender_id)
+                if isinstance(buffers, dict) and isinstance(buffers.get(key), dict):
+                    buffer_wait = _safe_float(buffers.get(key, {}).get("wait_seconds"), 0.0, 0.0)
+                    if buffer_wait <= 0:
+                        return ""
+                else:
+                    wait = self._message_debounce_seconds("group")
+                    if wait <= 0:
+                        return ""
         buffers = getattr(self, "_semantic_message_buffers", None)
         if not isinstance(buffers, dict):
             return ""

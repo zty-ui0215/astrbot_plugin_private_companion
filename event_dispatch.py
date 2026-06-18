@@ -1099,7 +1099,7 @@ class EventDispatchMixin:
         if isinstance(current, dict) and now - _safe_float(current.get("updated_ts"), current.get("first_ts"), 0) <= wait + 0.8:
             current["wait_seconds"] = wait
             current["kind"] = buffer_kind
-            if buffer_kind == "group_high_intensity" and _safe_float(current.get("deadline_ts"), 0) <= 0:
+            if buffer_kind in {"group_high_intensity", "group_short_wakeup"} and _safe_float(current.get("deadline_ts"), 0) <= 0:
                 first_ts = _safe_float(current.get("first_ts"), now, now)
                 current["deadline_ts"] = first_ts + wait
             if smart_debounce:
@@ -1133,7 +1133,7 @@ class EventDispatchMixin:
             "kind": buffer_kind,
             "messages": [{"ts": now, "text": cleaned, "sender_name": _single_line(sender_name, 40)}],
         }
-        if buffer_kind == "group_high_intensity":
+        if buffer_kind in {"group_high_intensity", "group_short_wakeup"}:
             buffer["deadline_ts"] = now + wait
         buffers[key] = buffer
         if smart_debounce:
@@ -1358,6 +1358,69 @@ class EventDispatchMixin:
         if not self._smart_message_debounce_heuristic_incomplete(compact):
             return "未命中补话特征"
         return ""
+
+    def _group_short_wakeup_wait_seconds(
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        *,
+        smart_result: dict[str, Any] | None = None,
+    ) -> float:
+        if not bool(getattr(self, "enable_group_wakeup_enhancement", True)):
+            return 0.0
+        wait = max(0.0, min(30.0, _safe_float(getattr(self, "group_wakeup_short_text_wait_seconds", 0.0), 0.0, 0.0)))
+        if wait <= 0:
+            return 0.0
+        cleaned = _single_line(text, 80)
+        compact = re.sub(r"\s+", "", cleaned)
+        if not compact or len(compact) > 2:
+            return 0.0
+        if re.search(r"[?？。.!！~～…]$", compact):
+            return 0.0
+        if re.fullmatch(r"(好+|嗯+|哦+|啊+|哈+|草+|在|早|晚|是|不|行|可|对|谢谢|谢了)", compact):
+            return 0.0
+        scene = getattr(event, "private_companion_group_scene", None)
+        if not isinstance(scene, dict) or str(scene.get("talking_to") or "") != "bot":
+            return 0.0
+        trigger = str(scene.get("trigger") or "")
+        if trigger not in {
+            "at_bot",
+            "reply_bot",
+            "mention_bot_name",
+            "group_wakeup_direct_word",
+            "group_wakeup_context_word",
+            "group_wakeup_interest",
+            "bot_conversation_followup",
+        }:
+            return 0.0
+        decision = str((smart_result or {}).get("decision") or "")
+        reason = str((smart_result or {}).get("reason") or "")
+        if decision and decision != "complete":
+            return 0.0
+        if reason and reason not in {"短句完整", "未命中补话特征"}:
+            return 0.0
+        try:
+            setattr(
+                event,
+                "private_companion_smart_message_debounce_result",
+                {
+                    "decision": "incomplete",
+                    "wait_seconds": wait,
+                    "original_wait_seconds": _safe_float((smart_result or {}).get("original_wait_seconds"), 0.0, 0.0),
+                    "elapsed_ms": _safe_int((smart_result or {}).get("elapsed_ms"), 0, 0),
+                    "source": "group_short_wakeup",
+                    "reason": "群聊短唤醒等待补话",
+                },
+            )
+        except Exception:
+            pass
+        logger.info(
+            "[PrivateCompanion] 群聊短唤醒进入补话等待: wait=%.1fs trigger=%s text=%s",
+            wait,
+            trigger,
+            _single_line(cleaned, 40),
+        )
+        return wait
 
     def _parse_smart_message_debounce_decision(self, raw: str) -> tuple[str, float, str]:
         text = str(raw or "").strip()
@@ -2177,6 +2240,9 @@ class EventDispatchMixin:
         extra_components: list[Any] | None = None,
         disable_segmenting: bool = False,
     ) -> list[str]:
+        # Media attachments are sent by the caller as separate components/messages.
+        # Segment limits only apply to text, so image_path/extra_components are
+        # intentionally ignored here and kept only for compatibility.
         normalized = str(text or "").strip()
         if not normalized:
             return []
@@ -2186,8 +2252,6 @@ class EventDispatchMixin:
                 normalized = str(tts_normalizer(normalized) or normalized).strip()
             except Exception:
                 pass
-        if image_path or extra_components:
-            return [normalized]
         if disable_segmenting:
             return [normalized]
         if not self.enable_segmented_proactive_reply:

@@ -301,7 +301,7 @@ _PLATFORM_DISPLAY_NAMES = {
     PLUGIN_NAME,
     "Codex",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.0.0",
+    "4.0.1",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -309,10 +309,22 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         value = config.get(key, default)
         if isinstance(value, str):
             text = value.strip().lower()
-            if text in {"true", "1", "yes", "on", "启用", "开启"}:
-                return True
-            if text in {"false", "0", "no", "off", "disabled", "停用", "关闭"}:
-                return False
+            parsed: bool | None = None
+            if text in {"true", "1", "yes", "y", "on", "enable", "enabled", "启用", "开启", "开", "是"}:
+                parsed = True
+            elif text in {"false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", ""}:
+                parsed = False
+            if parsed is not None:
+                try:
+                    config[key] = parsed
+                except Exception:
+                    setter = getattr(config, "set", None)
+                    if callable(setter):
+                        try:
+                            setter(key, parsed)
+                        except Exception:
+                            pass
+                return parsed
         return bool(value)
 
     @staticmethod
@@ -776,6 +788,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.group_wakeup_fatigue_limit = self._cfg_int(c, "group_wakeup_fatigue_limit", 5, 1, 20)
         self.group_wakeup_fatigue_decay_minutes = self._cfg_int(c, "group_wakeup_fatigue_decay_minutes", 90, 5, 720)
         self.group_wakeup_log_limit = self._cfg_int(c, "group_wakeup_log_limit", 80, 10, 300)
+        self.group_wakeup_short_text_wait_seconds = self._cfg_float(c, "group_wakeup_short_text_wait_seconds", 15.0, 0.0)
         self.enable_group_high_intensity_mode = self._cfg_bool(c, "enable_group_high_intensity_mode", True)
         self.group_high_intensity_wakeup_window_seconds = self._cfg_int(c, "group_high_intensity_wakeup_window_seconds", 60, 15, 600)
         self.group_high_intensity_wakeup_threshold = self._cfg_int(c, "group_high_intensity_wakeup_threshold", 3, 2, 20)
@@ -3542,6 +3555,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             group_smart_result = getattr(event, "private_companion_smart_message_debounce_result", None)
             group_smart_decision = str(group_smart_result.get("decision") or "") if isinstance(group_smart_result, dict) else ""
             group_smart_handled = group_smart_decision in {"complete", "incomplete"}
+            short_wait = self._group_short_wakeup_wait_seconds(event, text, smart_result=group_smart_result)
+            if short_wait > 0:
+                group_smart_wait = max(group_smart_wait, short_wait)
+                group_smart_decision = "incomplete"
+                group_smart_handled = True
             if (
                 talking_to_bot
                 and not high_intensity_state.get("active")
@@ -3551,7 +3569,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     sender_name=sender_name,
                     wait_seconds=group_smart_wait if group_smart_handled else None,
                     smart_debounce={"enabled": group_smart_handled, "decision": group_smart_decision or "fixed"},
-                    kind="group_text",
+                    kind="group_short_wakeup" if short_wait > 0 else "group_text",
                 )
             ):
                 self._save_data_sync()

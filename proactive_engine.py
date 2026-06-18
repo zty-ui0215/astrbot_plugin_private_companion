@@ -1686,6 +1686,12 @@ class ProactiveEngineMixin:
         combined_hint = f"{event_text} {motive}"
         if self._screen_glance_available(user) and reason in {"check_in", "quiet_care", "background_schedule"}:
             candidates.append(("screen_peek", 1.15))
+        if (
+            self._photo_text_available(user)
+            and reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}
+            and self._strong_photo_share_intent(event_text, motive, user.get("planned_proactive_topic"))
+        ):
+            return "photo_text"
         if self._photo_text_available(user) and (
             reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}
             or any(token in combined_hint for token in self._visual_share_tokens())
@@ -2618,6 +2624,19 @@ class ProactiveEngineMixin:
             "小物", "随手", "涂", "画", "包装", "屏幕", "边角",
         )
 
+    def _strong_photo_share_intent(self, *parts: Any) -> bool:
+        text = " ".join(_single_line(part, 160) for part in parts if _single_line(part, 160))
+        if not text:
+            return False
+        strong_tokens = ("拍了张照", "拍了照", "拍照", "照片", "图片", "发你看", "给你看", "你看看")
+        if any(token in text for token in strong_tokens):
+            return True
+        visual_tokens = (
+            "花", "颜色", "蓝紫", "矮牵牛", "雨", "小雨", "毛毛雨", "路边", "校门",
+            "晚霞", "阳光", "云", "窗边", "倒影", "影子", "小猫", "桌面", "杯", "包装",
+        )
+        return sum(1 for token in visual_tokens if token in text) >= 2
+
     def _pick_life_thought_topic(self, reason: str = "") -> str:
         terms = self._worldview_terms()
         if reason == "group_share":
@@ -2938,8 +2957,6 @@ class ProactiveEngineMixin:
     def _photo_text_available(self, user: dict[str, Any] | None = None) -> bool:
         if not self.enable_photo_text_action:
             return False
-        if isinstance(user, dict) and self._private_user_role(user) == "friend":
-            return bool(self._recent_owner_generated_photo_path())
         if self._daily_token_soft_limit_should_defer("photo_prompt"):
             return False
         if self.photo_generation_backend == "comfyui":
@@ -3092,6 +3109,12 @@ class ProactiveEngineMixin:
             if energy < 50:
                 weight += 0.12
             weighted.append(("screen_peek", weight))
+        if (
+            self._photo_text_available(user)
+            and reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}
+            and self._strong_photo_share_intent(motive, user.get("planned_proactive_topic") if isinstance(user, dict) else "")
+        ):
+            return "photo_text"
         visual_hint = any(token in motive for token in self._visual_share_tokens())
         if self._photo_text_available(user) and reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}:
             weight = 0.38 + (0.18 if action_profile["visual"] else 0.0) + motive_bias["photo_text"] * 0.65 + affinity_bias["photo_text"]
@@ -3662,7 +3685,7 @@ class ProactiveEngineMixin:
             raw_action_context = "\n".join(part for part in (raw_action_context, jm_context) if part).strip()
         if reason == "jm_cosmos_recommendation_request":
             ask_context = user.get("jm_cosmos_recommendation_context") if isinstance(user.get("jm_cosmos_recommendation_context"), dict) else {}
-            ask_text = _single_line(ask_context.get("hint"), 160) or "想向用户问有没有好看的本子或漫画推荐。"
+            ask_text = _single_line(ask_context.get("hint"), 160) or "想向用户问有没有适合私下看的阅读素材推荐。"
             raw_action_context = "\n".join(part for part in (raw_action_context, f"夹层阅读推荐征求：{ask_text}") if part).strip()
         if reason == "creative_share":
             creative_context = self._format_creative_share_action_context(user)
@@ -3703,6 +3726,8 @@ class ProactiveEngineMixin:
         if "photo_text" in planned_action and self._contains_inline_image_tag(text):
             image_path = ""
             extra_components = []
+        if not image_path and not extra_components:
+            text = self._remove_unbacked_media_claims(text)
         text = self._visible_text_without_tts_reading(text, limit=1000)
         text = self._normalize_proactive_sentence_flow(text)
         if not text:

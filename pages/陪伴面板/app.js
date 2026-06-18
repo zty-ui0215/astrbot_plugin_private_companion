@@ -94,6 +94,19 @@ function isPrivateReadingAvailable() {
   return Boolean(state.overview?.private_reading?.available);
 }
 
+function toBool(value) {
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (["true", "1", "yes", "y", "on", "enable", "enabled", "启用", "开启", "开", "是"].includes(text)) return true;
+    if (["false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", ""].includes(text)) return false;
+  }
+  return Boolean(value);
+}
+
+function normalizeFeatureDraft(features = {}) {
+  return Object.fromEntries(Object.entries(features || {}).map(([key, value]) => [key, toBool(value)]));
+}
+
 const pluginIntegrationAvailabilityRules = {
   enable_yesterday_screen_diary_context: () => Boolean(state.overview?.screen_companion?.available),
   enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.available),
@@ -101,7 +114,7 @@ const pluginIntegrationAvailabilityRules = {
   enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
   enable_qzone_integration: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_life_publish: () => Boolean(state.overview?.qzone?.available),
-  enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && state.featureDraft?.enable_emotion_simulation),
+  enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
 };
 
 function unavailablePluginIntegrationOwner(key) {
@@ -625,7 +638,7 @@ const configLabels = {
   segmented_proactive_chat_scope: "分段会话范围",
   segmented_proactive_threshold: "不分段字数阈值",
   segmented_proactive_min_segment_chars: "短片段合并阈值",
-  segmented_proactive_max_segments: "最多分段数",
+  segmented_proactive_max_segments: "文本最多分段数",
   segmented_proactive_send_as_forward: "分段后合并发送",
   segmented_proactive_split_mode: "分段模式",
   segmented_proactive_regex: "分段正则",
@@ -700,6 +713,7 @@ const configLabels = {
   group_wakeup_fatigue_limit: "唤醒疲劳阈值",
   group_wakeup_fatigue_decay_minutes: "疲劳恢复分钟",
   group_wakeup_log_limit: "唤醒记录上限",
+  group_wakeup_short_text_wait_seconds: "短唤醒补话等待",
   enable_group_high_intensity_mode: "群聊高强度收口",
   group_high_intensity_wakeup_window_seconds: "高强度窗口秒数",
   group_high_intensity_wakeup_threshold: "高强度唤醒阈值",
@@ -871,10 +885,10 @@ const configDescriptions = {
   enable_private_image_vision_cache: "开启后，同一张图片或表情包会按内容哈希复用上次视觉摘要，避免重复调用识图模型；会保留压缩预览图用于管理，不保留原始大图，也不会缓存最终聊天回复。",
   private_image_vision_cache_max_items: "最多保留多少条图片视觉摘要缓存。达到上限后会清理最久未命中的旧缓存，0 表示不限制。",
   segmented_proactive_threshold: "纯文本短于或等于该字数时才考虑分段；太长的内容保持一整条，避免读起来散。",
-  segmented_proactive_scope: "插件主动只影响插件主动消息；全部 LLM 回复会额外拆普通模型纯文本回复，首段随主链立即发送，剩余片段后台按间隔补发。图片、语音、AT 或工具转述等复杂消息不会拆；创作分享会自动保持整段。",
+  segmented_proactive_scope: "插件主动只影响插件主动消息的文本部分；全部 LLM 回复会额外拆普通模型纯文本回复，首段随主链立即发送，剩余片段后台按间隔补发。图片、语音、AT 或工具转述等复杂消息本身不会被拆；插件主动媒体会在文本分段后继续单独发送，创作分享会自动保持整段。",
   segmented_proactive_chat_scope: "控制分段在哪类会话生效：全部、仅私聊或仅群聊。不匹配的会话会保持整条发送。",
   segmented_proactive_min_segment_chars: "分段后短于或等于该字数的片段会并入相邻消息，避免“哈哈”“我也觉得”这类附和语单独发出。",
-  segmented_proactive_max_segments: "一次主动消息最多拆成几条。默认 3，过高会显得刷屏。",
+  segmented_proactive_max_segments: "一次主动文本最多拆成几条。默认 3，过高会显得刷屏；图片、语音和附加组件不占用这个文本段数。",
   segmented_proactive_send_as_forward: "开启后，切出多段时优先打包成合并转发消息发送；平台不支持时自动回退为普通逐条分段。",
   segmented_proactive_split_mode: "regex 使用正则切句；words 使用分段词列表，更适合清理句号、空格等固定分隔符。网址会自动保护，不会被按点号或斜杠拆开。",
   segmented_proactive_regex: "分段模式为 regex 时使用的切分正则。",
@@ -909,6 +923,7 @@ const configDescriptions = {
   group_wakeup_fatigue_limit: "短时间多次唤醒累计到多少点后，Bot 会更保守、更省力。强唤醒词仍然能叫到它。",
   group_wakeup_fatigue_decay_minutes: "每隔多少分钟自然恢复 1 点唤醒疲劳。数值越大，越会保留“刚被频繁叫到”的感觉。",
   group_wakeup_log_limit: "每个群最多保留多少条唤醒命中、冷却拦截和兴趣未触发记录。",
+  group_wakeup_short_text_wait_seconds: "群聊里已经判定在叫 Bot、但内容只有 1-2 个字且不像完整短互动时，额外等待同一群友补充。设为 0 可关闭。",
   enable_group_high_intensity_mode: "短时间连续被明确叫到后自动进入收口降载，合并同群后续唤醒消息，并暂停弱相关/兴趣唤醒、群片段整理、黑话释义刷新和主动插话。",
   group_high_intensity_wakeup_window_seconds: "统计连续唤醒的时间窗口。默认 60 秒，即一分钟内连续被叫到才进入高强度收口。",
   group_high_intensity_wakeup_threshold: "窗口内达到多少次唤醒后进入收口。默认 3 次，用于减少连续 @、连续引用造成的多次 LLM 调用。",
@@ -1090,6 +1105,7 @@ const featureSettingGroups = {
     "group_wakeup_fatigue_limit",
     "group_wakeup_fatigue_decay_minutes",
     "group_wakeup_log_limit",
+    "group_wakeup_short_text_wait_seconds",
     "enable_group_high_intensity_mode",
     "group_high_intensity_wakeup_window_seconds",
     "group_high_intensity_wakeup_threshold",
@@ -1110,7 +1126,7 @@ const featureSettingGroups = {
   enable_group_persona_denoise: [],
   enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit"],
   enable_group_scene_awareness: ["group_scene_recent_limit", "enable_group_conversation_followup", "group_conversation_followup_seconds", "group_conversation_followup_max_turns"],
-  enable_group_wakeup_enhancement: ["group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_interest_keywords", "group_wakeup_interest_probability", "group_wakeup_topic_interest_max_boost", "group_wakeup_debounce_pending_penalty", "group_wakeup_cooldown_seconds", "group_wakeup_generated_keyword_limit", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit", "enable_group_high_intensity_mode", "group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_scene_recent_limit"],
+  enable_group_wakeup_enhancement: ["group_wakeup_direct_words", "group_wakeup_context_words", "group_wakeup_interest_keywords", "group_wakeup_interest_probability", "group_wakeup_topic_interest_max_boost", "group_wakeup_debounce_pending_penalty", "group_wakeup_short_text_wait_seconds", "group_wakeup_cooldown_seconds", "group_wakeup_generated_keyword_limit", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes", "group_wakeup_log_limit", "enable_group_high_intensity_mode", "group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds", "group_scene_recent_limit"],
   enable_group_high_intensity_mode: ["group_high_intensity_wakeup_window_seconds", "group_high_intensity_wakeup_threshold", "group_high_intensity_cooldown_seconds", "group_high_intensity_merge_seconds"],
   enable_group_conversation_followup: ["group_conversation_followup_seconds", "group_conversation_followup_max_turns"],
   enable_group_slang_learning: ["max_group_slang_terms", "max_group_recent_messages", "enable_group_slang_meanings"],
@@ -1359,7 +1375,7 @@ const featureSettingSections = {
     {
       title: "节流与拟人感",
       note: "控制冷却、收口等待和被频繁叫到后的疲劳感。",
-      keys: ["group_wakeup_cooldown_seconds", "group_wakeup_debounce_pending_penalty", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes"],
+      keys: ["group_wakeup_cooldown_seconds", "group_wakeup_short_text_wait_seconds", "group_wakeup_debounce_pending_penalty", "group_wakeup_fatigue_limit", "group_wakeup_fatigue_decay_minutes"],
     },
     {
       title: "高强度收口",
@@ -1555,6 +1571,12 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function cleanInterjectionText(value) {
+  const text = String(value ?? "").trim().replace(/^["'“”‘’` ]+|["'“”‘’` ]+$/g, "");
+  if (!text || /^[.。…~～\s"'“”‘’`-]{0,12}$/.test(text)) return "";
+  return text;
+}
+
 function bookshelfImageTag(src, alt) {
   const imageSrc = String(src || "");
   if (!imageSrc) return "";
@@ -1738,7 +1760,7 @@ async function loadAll() {
     state.diagnostics = diagnostics.items || [];
     state.availableProviders = availableProviders.items || [];
     state.tokenStats = tokenStats || null;
-    state.featureDraft = { ...(overview.features || {}) };
+    state.featureDraft = normalizeFeatureDraft(overview.features || {});
     if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
     if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
     renderAll();
@@ -3773,7 +3795,7 @@ function groupInterjectionFeedbackView(detail) {
       <div class="group-feedback-meter" title="正向 / 负向">
         <i style="width:${Math.round((positive / total) * 100)}%"></i>
       </div>
-      ${last.text ? `<p><span>上次插话</span>${escapeHtml(last.text)}</p>` : `<p class="muted">暂无最近插话内容</p>`}
+      ${cleanInterjectionText(last.text) ? `<p><span>上次插话</span>${escapeHtml(cleanInterjectionText(last.text))}</p>` : `<p class="muted">暂无最近插话内容</p>`}
     </div>
   `;
 }
@@ -6176,7 +6198,7 @@ function fillForm(selector, values) {
   form.querySelectorAll("[name]").forEach((input) => {
     const value = values[input.name];
     if (input.type === "checkbox") {
-      input.checked = Boolean(value);
+      input.checked = toBool(value);
     } else if (Array.isArray(value)) {
       input.value = value.join("\n");
     } else {
@@ -6967,7 +6989,7 @@ function segmentedJoinPair(left, right) {
 function segmentedControlValue(root, key) {
   const control = root?.querySelector?.(`[name="${key}"], [data-feature-param="${key}"], [data-feature-detail-toggle="${key}"]`);
   if (!control) {
-    if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) return Boolean(state.featureDraft[key]);
+    if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) return toBool(state.featureDraft[key]);
     return state.overview?.settings?.[key];
   }
   if (control.type === "checkbox") return Boolean(control.checked);
@@ -7002,9 +7024,9 @@ function segmentedPreviewValues(root = document) {
     const value = segmentedControlValue(root, key);
     values[key] = value == null ? settings[key] : value;
   });
-  values.enable_segmented_proactive_reply = Boolean(values.enable_segmented_proactive_reply);
-  values.segmented_proactive_send_as_forward = Boolean(values.segmented_proactive_send_as_forward);
-  values.enable_segmented_proactive_content_cleanup = Boolean(values.enable_segmented_proactive_content_cleanup);
+  values.enable_segmented_proactive_reply = toBool(values.enable_segmented_proactive_reply);
+  values.segmented_proactive_send_as_forward = toBool(values.segmented_proactive_send_as_forward);
+  values.enable_segmented_proactive_content_cleanup = toBool(values.enable_segmented_proactive_content_cleanup);
   values.segmented_proactive_content_cleanup_scope = String(values.segmented_proactive_content_cleanup_scope || "all");
   values.segmented_proactive_split_words = String(values.segmented_proactive_split_words ?? "");
   values.segmented_proactive_content_cleanup_words = String(values.segmented_proactive_content_cleanup_words ?? "");
@@ -7398,9 +7420,9 @@ function renderFeatureSwitches() {
     : featureGroups;
   const visibleDraftKeys = visibleTopLevelFeatureKeys(state.featureDraft || {});
   const total = visibleDraftKeys.length;
-  const enabled = visibleDraftKeys.filter((key) => state.featureDraft[key]).length;
+  const enabled = visibleDraftKeys.filter((key) => toBool(state.featureDraft[key])).length;
   const riskyEnabled = ["enable_group_interjection", "enable_bilibili_boredom_watch", isPrivateReadingAvailable() ? "enable_private_reading_boredom_read" : "", isPrivateReadingAvailable() ? "enable_private_reading_ask_recommendation" : "", "enable_unanswered_screen_peek_followup"]
-    .filter((key) => state.featureDraft[key]).length;
+    .filter((key) => toBool(state.featureDraft[key])).length;
   $("#featureSwitchSummary").innerHTML = `
     <section class="feature-summary-card ok">
       <span>已开启</span>
@@ -7409,7 +7431,7 @@ function renderFeatureSwitches() {
     </section>
     <section class="feature-summary-card">
       <span>基础安全项</span>
-      <b>${escapeHtml(safeFeatureKeys.filter((key) => state.featureDraft[key]).length)} / ${escapeHtml(safeFeatureKeys.length)}</b>
+      <b>${escapeHtml(safeFeatureKeys.filter((key) => toBool(state.featureDraft[key])).length)} / ${escapeHtml(safeFeatureKeys.length)}</b>
       <small>隐私、记忆、回复稳定性</small>
     </section>
     <section class="feature-summary-card ${riskyEnabled ? "warn" : ""}">
@@ -7438,7 +7460,7 @@ function renderFeatureSwitches() {
       return featureSearchText(key).includes(filter);
     });
     if (!visibleKeys.length) return "";
-    const groupEnabled = visibleKeys.filter((key) => state.featureDraft[key]).length;
+    const groupEnabled = visibleKeys.filter((key) => toBool(state.featureDraft[key])).length;
     return `
       <section class="feature-switch-group">
         <header>
@@ -7469,7 +7491,7 @@ function renderFeatureSwitches() {
 }
 
 function featureSwitchItem(key) {
-  const checked = Boolean(state.featureDraft[key]);
+  const checked = toBool(state.featureDraft[key]);
   return `
     <section class="feature-switch-item ${checked ? "on" : "off"}" title="${escapeHtml(featureDescription(key))}">
       <label class="feature-toggle-hit" aria-label="${escapeHtml(featureLabel(key))}">
@@ -7589,7 +7611,7 @@ function syncFeatureProviderInput(select) {
 }
 
 function collectFeatureDetailPayload(featureKey, root = document) {
-  const features = { [featureKey]: Boolean(state.featureDraft[featureKey]) };
+  const features = { [featureKey]: toBool(state.featureDraft[featureKey]) };
   const settings = {};
   const overviewSettings = state.overview?.settings || {};
   root.querySelectorAll("[data-feature-param]").forEach((input) => {
@@ -7603,11 +7625,11 @@ function collectFeatureDetailPayload(featureKey, root = document) {
     } else {
       value = input.value;
     }
-    if (Object.prototype.hasOwnProperty.call(overviewSettings, key)) {
+    if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) {
+      features[key] = toBool(value);
+      state.featureDraft[key] = toBool(value);
+    } else if (Object.prototype.hasOwnProperty.call(overviewSettings, key)) {
       settings[key] = value;
-    } else if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) {
-      features[key] = Boolean(value);
-      state.featureDraft[key] = Boolean(value);
     } else {
       settings[key] = value;
     }
@@ -7859,6 +7881,12 @@ const featureDetailGuides = {
     trigger: "群聊出现配置词、Bot 名字、关系网相关称呼或兴趣话题时。",
     enabled: "Bot 更像会被自然叫到，也会偶尔被感兴趣话题吸引。",
     disabled: "主要依赖 @、指令或 AstrBot 原本触发方式。",
+  },
+  group_wakeup_short_text_wait_seconds: {
+    summary: "只针对 1-2 字的群聊短唤醒多等一小会儿，方便用户把后半句补上。",
+    trigger: "群聊已判定在叫 Bot，且当前文本极短、没有完整标点、也不像“好/嗯/早”这类完整短互动时。",
+    enabled: "Bot 会先等同一群友继续补充，再把多条内容合并成一轮理解，减少引用碎片消息和无关回复。",
+    disabled: "短唤醒会按普通智能收口规则处理，可能更快，但更容易漏掉后续补话。",
   },
   enable_group_high_intensity_mode: {
     summary: "自动识别连续唤醒的热闹群聊，把同群后续唤醒消息合并成一轮回复。",
@@ -8120,7 +8148,7 @@ function configLabel(name) {
 }
 
 function featureDetailPage(key) {
-  const enabled = Boolean(state.featureDraft[key]);
+  const enabled = toBool(state.featureDraft[key]);
   const related = featureRelatedSettings(key);
   const relatedMap = Object.fromEntries(related.map((item) => [item.key, item]));
   const dependencies = featureDependencyLines(key);
@@ -8992,7 +9020,7 @@ async function runAction(action, successMessage = "", control = null) {
     const result = await action();
     if (result && typeof result === "object" && result.plugin && result.features) {
       state.overview = result;
-      state.featureDraft = { ...(result.features || {}) };
+      state.featureDraft = normalizeFeatureDraft(result.features || {});
       renderAll();
       $("#subtitle").textContent = `${result.plugin.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
     } else {

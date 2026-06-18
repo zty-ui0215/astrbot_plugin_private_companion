@@ -31,6 +31,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
+        self._schema_bool_key_cache: set[str] | None = None
 
     def register_routes(self) -> None:
         register = self.plugin.context.register_web_api
@@ -420,7 +421,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 changed["group_blacklist_ids"] = self._normalize_id_list(payload.get("group_blacklist_ids"))
             for key, value in (payload.get("features") or {}).items():
                 if key in self._allowed_feature_keys():
-                    changed[key] = bool(value)
+                    changed[key] = self._normalize_bool_value(value)
             for key, value in (payload.get("providers") or {}).items():
                 if key in self._allowed_provider_keys():
                     changed[key] = self._single_line(value, 160)
@@ -1901,7 +1902,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 self._apply_config_value(key, self._normalize_setting_value(key, value))
             for key, value in preset.get("features", {}).items():
                 if key in self._allowed_feature_keys():
-                    self._apply_config_value(key, bool(value))
+                    self._apply_config_value(key, self._normalize_bool_value(value))
             self._save_config_if_possible()
             overview = await self.get_overview()
             if overview.get("success"):
@@ -2268,6 +2269,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     @classmethod
     def _display_message_text(cls, value: Any, limit: int = 500) -> str:
         source = str(value or "").strip()
+        source = source.strip("\"'“”‘’` ")
+        if re.fullmatch(r"[.。…~～\s\"'“”‘’`-]{0,12}", source):
+            return ""
         if re.search(r"<t{2,}s\b[^>]*>.*?</t{2,}s>", source, flags=re.IGNORECASE | re.DOTALL):
             outside = re.sub(r"<t{2,}s\b[^>]*>.*?</t{2,}s>", "", source, flags=re.IGNORECASE | re.DOTALL)
             outside = re.sub(r"</?t{2,}s\b[^>]*>", "", outside, flags=re.IGNORECASE).strip()
@@ -2365,6 +2369,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         identity_count = sum(1 for item in members.values() if isinstance(item, dict) and item.get("identity_known"))
         wakeup_logs = group.get("group_wakeup_logs") if isinstance(group.get("group_wakeup_logs"), list) else []
         last_wakeup = group.get("last_group_wakeup") if isinstance(group.get("last_group_wakeup"), dict) else {}
+        last_interjection = self._sanitize_last_bot_interjection(group.get("last_bot_interjection"))
         return {
             "group_id": str(group_id),
             "enabled": bool(group.get("enabled", True)),
@@ -2382,6 +2387,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "relationship_edge_count": len(group.get("relationship_edges") or {}),
             "interject_today": group.get("interject_today", 0),
             "last_interject": self.plugin._format_timestamp_elapsed(group.get("last_interject_at", 0)),
+            "last_bot_interjection": last_interjection,
             "wakeup_log_count": len(wakeup_logs),
             "wakeup_fatigue": self._group_wakeup_runtime(group),
             "last_group_wakeup": {
@@ -2398,6 +2404,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "last_summary": atmosphere.get("summary", ""),
             },
         }
+
+    def _sanitize_last_bot_interjection(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or not value:
+            return {}
+        item = dict(value)
+        item["text"] = self._display_message_text(item.get("text"), 120)
+        if not item["text"] and not item.get("has_image"):
+            return {}
+        return item
 
     def _group_topic_thread_items(self, group: dict[str, Any], limit: int = 16) -> list[dict[str, Any]]:
         threads = group.get("topic_threads") if isinstance(group.get("topic_threads"), list) else []
@@ -3592,10 +3607,20 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 setattr(self.plugin, key, value)
             return
         if key in self._allowed_feature_keys():
-            setattr(self.plugin, key, bool(value))
+            setattr(self.plugin, key, self._normalize_bool_value(value))
             return
         if key in self._allowed_setting_keys():
             setattr(self.plugin, key, value)
+
+    @staticmethod
+    def _normalize_bool_value(value: Any) -> bool:
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"true", "1", "yes", "y", "on", "enable", "enabled", "启用", "开启", "开", "是"}:
+                return True
+            if text in {"false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", ""}:
+                return False
+        return bool(value)
 
     def _set_config_value(self, key: str, value: Any) -> None:
         config = getattr(self.plugin, "config", None)
@@ -4020,6 +4045,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         }
 
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
+        if key in self._schema_bool_keys():
+            return self._normalize_bool_value(value)
         if key == "target_user_ids":
             return self._normalize_id_list(value)
         if key == "plugin_specific_persona_id":
@@ -4401,6 +4428,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_group_reality_promise_guard",
             "enable_group_wakeup_enhancement",
             "enable_group_high_intensity_mode",
+            "enable_group_persona_denoise",
             "enable_group_repeat_follow",
             "enable_forward_message_adaptation",
             "enable_skill_growth_simulation",
@@ -4439,7 +4467,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "atrelay_require_worldbook_first",
             "atrelay_sensitive_confirm",
         }:
-            return bool(value)
+            return self._normalize_bool_value(value)
         return self._single_line(value, 240)
 
     @staticmethod
@@ -4464,6 +4492,24 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             if line:
                 lines.append(line)
         return "\n".join(lines)[:limit].strip()
+
+    def _schema_bool_keys(self) -> set[str]:
+        cached = self._schema_bool_key_cache
+        if cached is not None:
+            return cached
+        keys: set[str] = set()
+        try:
+            raw = json.loads(Path(__file__).with_name("_conf_schema.json").read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                keys = {
+                    str(key)
+                    for key, item in raw.items()
+                    if isinstance(item, dict) and item.get("type") == "bool"
+                }
+        except Exception as exc:
+            logger.debug("[PrivateCompanionPage] 读取配置 schema 布尔字段失败: %s", exc)
+        self._schema_bool_key_cache = keys
+        return keys
 
     @classmethod
     def _normalize_worldbook_member_id(cls, value: Any) -> str:

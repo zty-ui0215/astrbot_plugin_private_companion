@@ -1080,6 +1080,9 @@ class ProactiveMessageMixin:
         continuity_hint = self._format_proactive_continuity_hint(user, reason=reason, action=action)
         if continuity_hint:
             prompt = f"{prompt}\n\n{continuity_hint}"
+        media_hint = self._format_proactive_media_truth_hint(action, action_context)
+        if media_hint:
+            prompt = f"{prompt}\n\n{media_hint}"
         return prompt.strip()
 
     def _format_proactive_continuity_hint(self, user: dict[str, Any], *, reason: str, action: str) -> str:
@@ -1124,6 +1127,19 @@ class ProactiveMessageMixin:
                 ]
             )
         return ""
+
+    def _format_proactive_media_truth_hint(self, action: str, action_context: str = "") -> str:
+        has_real_image = "真实图片文件：" in str(action_context or "") or "图片路径：" in str(action_context or "")
+        if has_real_image or "photo_text" in str(action or ""):
+            return ""
+        return "\n".join(
+            [
+                "【媒体真实性边界】",
+                "本轮不会发送图片、照片或附加媒体；即使日程/状态里出现“拍照”“照片”“给你看”,也只能当作生活背景。",
+                "最终正文禁止说“拍了张照片/给你拍了/发你看/你看看/看图/照片/图片/图里”。",
+                "可以改成“看到这个画面/这个颜色挺好看/想到你可能会喜欢这个颜色”。",
+            ]
+        )
 
     def _format_proactive_specificity_hint(
         self,
@@ -1937,7 +1953,7 @@ class ProactiveMessageMixin:
         if reason == "jm_cosmos_share":
             return f"像刚在{terms['bookshelf']}{terms['secret_drawer']}里翻了点漫画后自然冒出来的一句。害羞、坦然、嘴硬或转移话题都按人格来。"
         if reason == "jm_cosmos_recommendation_request":
-            return "像忽然想找点新的漫画/本子看,于是私下问对方有没有推荐。可以撒娇、嘴硬、坦然或装作随口一问,尺度和反应按人格来。"
+            return "像忽然想找点新的私密阅读素材,于是私下问对方有没有推荐。可以撒娇、嘴硬、坦然或装作随口一问,尺度和反应按人格来。"
         if reason == "creative_share":
             return "像刚写自己的作品写到一个小片段,有点想给对方看一眼。可以害羞、卡文或吐槽,别像正式投稿。"
         if reason in {"activity_share", "diary_share", "background_schedule"}:
@@ -1971,7 +1987,7 @@ class ProactiveMessageMixin:
             )
         if "夹层阅读推荐征求：" in context:
             return (
-                f"你忽然想给{terms['bookshelf']}{terms['secret_drawer']}找点新的漫画或本子看,现在想私下问对方有没有推荐。\n"
+                f"你忽然想给{terms['bookshelf']}{terms['secret_drawer']}找点新的私密阅读素材,现在想私下问对方有没有推荐。\n"
                 f"{context}\n"
                 "开口方式、尺度和反应都按当前人格来。不要说插件、后台联动、视觉模型或主动任务。"
             )
@@ -2018,6 +2034,8 @@ class ProactiveMessageMixin:
         cleaned = self._soften_social_proactive_text(text, action=action)
         if not cleaned:
             return ""
+        if not has_real_image and "photo_text" not in action:
+            cleaned = self._remove_unbacked_media_claims(cleaned)
         if "screen_peek" in action:
             photo_patterns = (
                 "拍了张照片",
@@ -2089,6 +2107,40 @@ class ProactiveMessageMixin:
                 cleaned = cleaned.replace(old, new)
         cleaned = self._deemphasize_state_report_preamble(cleaned, reason=reason)
         return self._soften_social_proactive_text(cleaned, action=action)
+
+    def _remove_unbacked_media_claims(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        replacements = {
+            "我拍了张照片": "我看到一个画面",
+            "我拍了照片": "我看到一个画面",
+            "拍了张照片": "看到一个画面",
+            "拍了照片": "看到一个画面",
+            "拍了张照": "看到一个画面",
+            "拍了照": "看到一个画面",
+            "给你拍了张照片": "看到一个画面就想到你",
+            "给你拍了照片": "看到一个画面就想到你",
+            "给你拍了张照": "看到一个画面就想到你",
+            "给你拍了照": "看到一个画面就想到你",
+            "发你看看": "跟你说一下",
+            "发给你看看": "跟你说一下",
+            "发你看": "跟你说一下",
+            "发给你看": "跟你说一下",
+            "给你看照片": "跟你说说这个画面",
+            "给你看图": "跟你说说这个画面",
+            "看图": "听我说",
+            "你看看喜不喜欢": "你应该会喜欢",
+            "你看看喜欢吗": "你应该会喜欢",
+            "你看看": "跟你说一下",
+        }
+        for old, new in replacements.items():
+            cleaned = cleaned.replace(old, new)
+        cleaned = re.sub(r"[，,、\s]*(?:照片|图片|图)(?:里|上)?[，,、\s]*(?=被|看着|颜色|特别|挺)", "画面", cleaned)
+        cleaned = re.sub(r"(?:这张|那张|这幅|那幅)(?:照片|图片|图)", "这个画面", cleaned)
+        cleaned = cleaned.replace("[图片]", "").replace("【图片】", "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,。")
+        return cleaned
 
     def _is_overabstract_proactive_text(self, text: str, *, action: str) -> bool:
         cleaned = _single_line(text, 220)
@@ -3204,16 +3256,15 @@ class ProactiveMessageMixin:
             return "photo_text：未启用"
         if self._private_user_role(user) == "friend":
             image_path = self._recent_owner_generated_photo_path()
-            if not image_path:
-                return "photo_text：朋友用户不单独生图,且暂无可复用的主人图片"
-            return (
-                "photo_text：复用主人最近生成的真实图片\n"
-                f"图片类型：reused_owner_photo\n"
-                f"后端：reuse\n"
-                f"图片路径：{image_path}\n"
-                "画面：复用主人最近生成过的一张生活碎片图,不为朋友单独触发生图。\n"
-                "生图提示：复用既有图片,未调用生图后端"
-            )
+            if image_path:
+                return (
+                    "photo_text：复用主人最近生成的真实图片\n"
+                    f"图片类型：reused_owner_photo\n"
+                    f"后端：reuse\n"
+                    f"图片路径：{image_path}\n"
+                    "画面：复用主人最近生成过的一张生活碎片图。\n"
+                    "生图提示：复用既有图片,未调用生图后端"
+                )
         load_defer_note = self._photo_text_load_defer_note("photo_text", force_refresh=True)
         if load_defer_note:
             return f"photo_text：{load_defer_note},不能假装已经拍照"
@@ -4227,6 +4278,12 @@ class ProactiveMessageMixin:
                         await asyncio.sleep(await self._calc_segmented_proactive_interval(segment))
         has_media = bool((extra_components or []) or (image_path and os.path.exists(image_path)))
         if has_media:
+            logger.info(
+                "[PrivateCompanion] 主动媒体发送: text_segments=%s image=%s extra_components=%s",
+                len(segments),
+                bool(image_path and os.path.exists(image_path)),
+                len(extra_components or []),
+            )
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
             if recalled_message_id:
                 logger.info("[PrivateCompanion] 触发消息已撤回，取消主动媒体发送: umo=%s message_id=%s", umo, recalled_message_id)
@@ -4260,8 +4317,8 @@ class ProactiveMessageMixin:
             await self._maybe_send_input_status(umo, text)
         segments = self._split_proactive_text(
             text,
-            image_path=image_path,
-            extra_components=extra_components,
+            image_path="",
+            extra_components=None,
             disable_segmenting=disable_segmenting or not self._segmented_scope_allows_umo(umo),
         )
         if len(segments) <= 1:
@@ -4629,7 +4686,7 @@ class ProactiveMessageMixin:
         if tail_continues_closing and inbound_is_sleep_context:
             return cleaned
         abrupt_markers = (
-            "今天", "刚刚", "刚才", "现在", "天气", "云", "太阳", "雨", "风", "作业", "本子",
+            "今天", "刚刚", "刚才", "现在", "天气", "云", "太阳", "雨", "风", "作业", "阅读",
             "视频", "新闻", "群里", "书柜", "日程", "吃", "喝", "路上", "窗外", "看到", "觉得",
         )
         looks_abrupt = any(marker in tail for marker in abrupt_markers) or len(tail) >= 6

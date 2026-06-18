@@ -2150,6 +2150,20 @@
       "enable_group_wakeup_enhancement": true
     }
   },
+  "group_wakeup_short_text_wait_seconds": {
+    "description": "短唤醒补话等待秒数",
+    "type": "float",
+    "hint": "群聊里已经判定在叫 Bot、但内容只有 1-2 个字且不像完整短互动时，额外等待同一群友补充。用于避免“瓦”这类碎片先触发回复，后续真正内容才发出来。设为 0 可关闭。",
+    "slider": {
+      "min": 0,
+      "max": 30,
+      "step": 1
+    },
+    "default": 15,
+    "condition": {
+      "enable_group_wakeup_enhancement": true
+    }
+  },
   "enable_group_high_intensity_mode": {
     "description": "群聊高强度收口模式",
     "type": "bool",
@@ -3461,13 +3475,13 @@
   "enable_segmented_proactive_reply": {
     "description": "主动文本分段发送",
     "type": "bool",
-    "hint": "开启后，较短且无图片/附加组件的主动文本会按配置切分为多条短消息发送。创作分享会自动保持整段，避免小说片段被拆碎。默认关闭，避免主动消息显得过于打扰。",
+    "hint": "开启后，较短的主动文本部分会按配置切分为多条短消息发送；图片、语音等媒体仍按附件或单独消息发送，不占用文本分段数。创作分享会自动保持整段，避免小说片段被拆碎。默认关闭，避免主动消息显得过于打扰。",
     "default": false
   },
   "segmented_proactive_scope": {
     "description": "分段作用范围",
     "type": "string",
-    "hint": "插件主动：只拆插件主动消息；全部 LLM 回复：普通模型纯文本回复也按同一规则拆分，图片、语音、AT 等复杂消息不会拆。",
+    "hint": "插件主动：只拆插件主动消息的文本部分；全部 LLM 回复：普通模型纯文本回复也按同一规则拆分。图片、语音、AT 等复杂消息本身不会被拆，插件主动媒体会在文本分段后继续单独发送。",
     "options": [
       "proactive_only",
       "all_llm"
@@ -3525,9 +3539,9 @@
     }
   },
   "segmented_proactive_max_segments": {
-    "description": "主动最多分段数",
+    "description": "主动文本最多分段数",
     "type": "int",
-    "hint": "单条主动文本最多拆成几条消息。默认 3，防止一条主动被拆成刷屏。",
+    "hint": "单条主动文本最多拆成几条消息。默认 3，防止一条主动被拆成刷屏；图片、语音和附加组件不计入这个文本段数。",
     "slider": {
       "min": 1,
       "max": 8,

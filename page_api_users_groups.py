@@ -173,7 +173,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "group_episodes": self._limited_list(group.get("group_episodes"), 12),
                     "relationship_edges": group.get("relationship_edges") if isinstance(group.get("relationship_edges"), dict) else {},
                     "interjection_feedback": group.get("interjection_feedback") if isinstance(group.get("interjection_feedback"), dict) else {},
-                    "last_bot_interjection": group.get("last_bot_interjection") if isinstance(group.get("last_bot_interjection"), dict) else {},
+                    "last_bot_interjection": self._sanitize_last_bot_interjection(group.get("last_bot_interjection")),
                     "group_wakeup_logs": self._group_wakeup_logs(group),
                     "formatted": {
                         "status": self.plugin._format_group_status(group),
