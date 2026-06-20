@@ -115,6 +115,7 @@ from .forward_message import ForwardMessageMixin
 from .private_image import PrivateImageMixin
 from .prompt_surface import PromptSurface
 from .qzone_integration import QzoneMixin
+from .segmented_message import flatten_component_chunks, split_plain_component_chain_detailed
 from .token_budget import TokenBudgetMixin
 from .worldbook import WorldbookMixin
 from .user_memory import UserMemoryMixin
@@ -300,9 +301,9 @@ _PLATFORM_DISPLAY_NAMES = {
 
 @register(
     PLUGIN_NAME,
-    "Codex",
+    "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.0.8",
+    "4.0.11",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -622,7 +623,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.segmented_proactive_chat_scope = self._cfg_str(c, "segmented_proactive_chat_scope", "all", "all").lower()
         if self.segmented_proactive_chat_scope not in {"all", "private", "group"}:
             self.segmented_proactive_chat_scope = "all"
-        self.segmented_proactive_threshold = self._cfg_int(c, "segmented_proactive_threshold", 500, 20, 500)
+        self.segmented_proactive_threshold = self._cfg_int(c, "segmented_proactive_threshold", 500, 20, 1024)
         self.segmented_proactive_min_segment_chars = self._cfg_int(c, "segmented_proactive_min_segment_chars", 8, 1, 40)
         self.segmented_proactive_max_segments = self._cfg_int(c, "segmented_proactive_max_segments", 3, 1, 8)
         self.segmented_proactive_split_mode = self._cfg_str(c, "segmented_proactive_split_mode", "regex", "regex")
@@ -740,6 +741,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.enable_skill_growth_simulation = self._cfg_bool(c, "enable_skill_growth_simulation", True)
         self.skill_growth_rate = self._cfg_float(c, "skill_growth_rate", 1.0, 0.1)
         self.skill_growth_custom_skills = self._cfg_str(c, "skill_growth_custom_skills", "")
+        self.enable_skill_growth_passive_injection = self._cfg_bool(c, "enable_skill_growth_passive_injection", False)
         self.enable_skill_growth_schedule_influence = self._cfg_bool(c, "enable_skill_growth_schedule_influence", True)
         self.skill_growth_schedule_influence_strength = max(0.0, min(1.0, self._cfg_float(c, "skill_growth_schedule_influence_strength", 0.35, 0.0)))
         self.memory_refresh_interval_minutes = self._cfg_int(c, "memory_refresh_interval_minutes", 360, 30, 4320)
@@ -1320,13 +1322,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             return
         if bool(getattr(event, "is_private_chat", lambda: False)()):
             self._stop_passive_input_status_loop(event)
-            self._release_framework_session_lock_for_event(event, label="decorating_result")
-            return
-        self._release_framework_session_lock_later(
-            event,
-            label="decorating_result_group_grace",
-            delay_seconds=75.0,
-        )
+        self._release_framework_session_lock_for_event(event, label="decorating_result")
 
     @filter.on_decorating_result()
     async def strip_outbound_control_blocks_before_send(self, event: AstrMessageEvent):
@@ -1517,27 +1513,25 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if str(event.get_platform_name() or "") in {"qq_official", "weixin_official_account", "dingtalk"}:
             return
         chain = list(result.chain or [])
-        if not chain or any(not isinstance(comp, Plain) for comp in chain):
+        if not chain:
             return
-        text = "".join(str(getattr(comp, "text", "") or "") for comp in chain).strip()
-        if not text:
+        chunks, changed, text = self._segment_llm_reply_chain(event, chain)
+        if not chunks or not text:
             return
-        segments = self._split_proactive_text(text)
-        if len(segments) <= 1:
-            cleaned_text = segments[0] if segments else ""
-            if cleaned_text and cleaned_text != text:
-                quote_message_id = self._group_current_reply_quote_message_id(event)
-                event.set_result(self._build_result_from_chain(self._with_optional_reply([Plain(cleaned_text)], quote_message_id)))
+        if len(chunks) <= 1:
+            if changed:
+                event.set_result(self._build_result_from_chain(chunks[0]))
             return
-        logger.debug("[PrivateCompanion] 按插件规则分段 LLM 回复: %s -> %s 段", len(text), len(segments))
+        logger.debug("[PrivateCompanion] 按插件规则分段 LLM 回复: %s -> %s 段", len(text), len(chunks))
         logger.info(
             "[PrivateCompanion] 按插件规则分段 LLM 回复: segments=%s first=%s full=%s",
-            len(segments),
-            _single_line(segments[0], 120),
+            len(chunks),
+            _single_line(self._segmented_chunk_log_text(chunks[0]), 120),
             _single_line(text, 420),
         )
         activity_baseline = self._event_inbound_activity_ts(event)
-        if await self._send_segmented_event_forward_message(event, segments, source="decorating_result"):
+        plain_segments = self._plain_text_segments_from_chunks(chunks)
+        if plain_segments and len(plain_segments) == len(chunks) and await self._send_segmented_event_forward_message(event, plain_segments, source="decorating_result"):
             empty_result = self._build_result_from_chain([])
             try:
                 empty_result.stop_event()
@@ -1546,19 +1540,181 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             event.set_result(empty_result)
             event.stop_event()
             return
-        quote_message_id = self._group_current_reply_quote_message_id(event)
-        first_chain = self._with_optional_reply([Plain(segments[0])], quote_message_id)
-        event.set_result(self._build_result_from_chain(first_chain))
-        if len(segments) > 1:
+        event.set_result(self._build_result_from_chain(chunks[0]))
+        if len(chunks) > 1:
             asyncio.create_task(
-                self._send_segmented_llm_reply_remainder(
+                self._send_segmented_llm_chain_remainder(
                     event,
-                    segments[1:],
-                    previous_segment=segments[0],
+                    chunks[1:],
+                    previous_segment=self._segmented_chunk_log_text(chunks[0]),
                     source="decorating_result",
                     started_at=activity_baseline,
                 )
             )
+
+    def _is_reply_component(self, component: Any) -> bool:
+        try:
+            if Reply is not None and isinstance(component, Reply):
+                return True
+        except Exception:
+            pass
+        return component.__class__.__name__.lower() == "reply"
+
+    def _segmented_chunk_log_text(self, chunk: list[Any]) -> str:
+        parts: list[str] = []
+        for comp in chunk or []:
+            if isinstance(comp, Plain):
+                text = str(getattr(comp, "text", "") or "").strip()
+                if text:
+                    parts.append(text)
+                continue
+            if self._is_reply_component(comp):
+                parts.append("[引用]")
+            else:
+                parts.append(f"[{comp.__class__.__name__}]")
+        return " ".join(parts).strip()
+
+    def _plain_text_segments_from_chunks(self, chunks: list[list[Any]]) -> list[str]:
+        segments: list[str] = []
+        for chunk in chunks or []:
+            if not chunk or any(not isinstance(comp, Plain) for comp in chunk):
+                return []
+            text = "".join(str(getattr(comp, "text", "") or "") for comp in chunk).strip()
+            if not text:
+                return []
+            segments.append(text)
+        return segments
+
+    def _segment_llm_reply_chain(self, event: AstrMessageEvent, chain: list[Any]) -> tuple[list[list[Any]], bool, str]:
+        reply_prefix = [comp for comp in chain if self._is_reply_component(comp)]
+        content_chain = [comp for comp in chain if not self._is_reply_component(comp)]
+        units, changed, split_changed, full_text = split_plain_component_chain_detailed(
+            content_chain,
+            plain_type=Plain,
+            split_text=self._split_proactive_text,
+        )
+        if not full_text:
+            return [], False, ""
+
+        quote_message_id = ""
+        if not reply_prefix and not self._chain_has_reply_component(chain):
+            quote_message_id = self._group_current_reply_quote_message_id(event)
+            reply = self._make_reply_component(quote_message_id)
+            if reply is not None:
+                reply_prefix = [reply]
+                changed = True
+        if reply_prefix and units:
+            units[0] = [*reply_prefix, *units[0]]
+
+        if not changed:
+            return [chain], False, full_text
+        if not split_changed:
+            return [flatten_component_chunks(units)], True, full_text
+        return units, True, full_text
+
+    async def _send_segmented_llm_chain_remainder(
+        self,
+        event: AstrMessageEvent,
+        chunks: list[list[Any]],
+        *,
+        previous_segment: str = "",
+        source: str = "",
+        started_at: float | None = None,
+    ) -> None:
+        """后台补发被动分段的剩余组件片段；只拆文本，媒体组件保持原子发送。"""
+        prev = previous_segment
+        total = len([item for item in chunks if item])
+        sent_index = 0
+        scope = self._event_scope_key(event)
+        started_at = _safe_float(started_at, 0.0, 0.0) or self._event_inbound_activity_ts(event)
+        async with self._segmented_remainder_lock(scope):
+            for chunk in chunks:
+                if not chunk:
+                    continue
+                sent_index += 1
+                try:
+                    preview = self._segmented_chunk_log_text(chunk)
+                    outbound_chunk = chunk
+                    wait_for = prev or preview
+                    delay = await self._calc_segmented_proactive_interval(wait_for)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    if self._scope_has_new_inbound_activity(scope, started_at, ignore_self=True):
+                        logger.info(
+                            "[PrivateCompanion] 会话已有新消息，停止发送分段剩余组件: source=%s scope=%s sent=%s/%s",
+                            source or "unknown",
+                            scope or "unknown",
+                            max(0, sent_index - 1),
+                            total,
+                        )
+                        return
+                    recalled_message_id = await self._should_cancel_reply_for_missing_or_recalled_trigger(event)
+                    if recalled_message_id:
+                        logger.info(
+                            "[PrivateCompanion] 触发消息已撤回或发送前不可见，停止发送分段剩余组件: source=%s message_id=%s sent=%s/%s",
+                            source or "unknown",
+                            recalled_message_id,
+                            max(0, sent_index - 1),
+                            total,
+                        )
+                        return
+                    if chunk and all(isinstance(comp, Plain) for comp in chunk):
+                        normalized_segment = "".join(str(getattr(comp, "text", "") or "") for comp in chunk).strip()
+                        normalizer = getattr(self, "_normalize_tts_tags", None)
+                        if callable(normalizer) and re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", normalized_segment, flags=re.IGNORECASE):
+                            try:
+                                normalized_segment = str(normalizer(normalized_segment) or normalized_segment).strip()
+                            except Exception:
+                                pass
+                        if (
+                            bool(getattr(self, "enable_tts_enhancement", False))
+                            and re.search(r"<tts\b[^>]*>.*?</tts>", normalized_segment, flags=re.IGNORECASE | re.DOTALL)
+                        ):
+                            processor = getattr(self, "_process_tts_tags", None)
+                            if callable(processor):
+                                fallback_plain = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", normalized_segment, flags=re.IGNORECASE).strip()
+                                processed_chunk = await processor(normalized_segment, event, fallback_plain=fallback_plain)
+                                if processed_chunk:
+                                    outbound_chunk = processed_chunk
+                        elif re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", normalized_segment, flags=re.IGNORECASE):
+                            cleaned = re.sub(r"</?(?:pc[_-]?tts|t{2,}s)\b[^>]*>", "", normalized_segment, flags=re.IGNORECASE).strip()
+                            outbound_chunk = [Plain(cleaned)] if cleaned else []
+                    if not outbound_chunk:
+                        continue
+                    hit = self._forbidden_recall_hit(self._chain_text_for_forbidden_recall(outbound_chunk))
+                    if hit:
+                        logger.warning("[PrivateCompanion] 分段剩余组件命中违禁词，停止发送: word=%s", _single_line(hit, 40))
+                        return
+                    await event.send(event.chain_result(outbound_chunk))
+                    logger.info(
+                        "[PrivateCompanion] 分段 LLM 剩余组件已发送: source=%s index=%s/%s preview=%s",
+                        source or "unknown",
+                        sent_index,
+                        total,
+                        _single_line(preview, 120),
+                    )
+                    prev = preview
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    try:
+                        await event.send(self._build_result_from_chain(outbound_chunk))
+                        logger.info(
+                            "[PrivateCompanion] 分段 LLM 剩余组件已发送: source=%s index=%s/%s preview=%s",
+                            source or "unknown",
+                            sent_index,
+                            total,
+                            _single_line(self._segmented_chunk_log_text(chunk), 120),
+                        )
+                        prev = self._segmented_chunk_log_text(chunk)
+                    except Exception:
+                        logger.warning(
+                            "[PrivateCompanion] 分段 LLM 剩余组件发送失败: source=%s error=%s",
+                            source or "unknown",
+                            _single_line(exc, 160),
+                            exc_info=True,
+                        )
+                        return
 
     async def _send_segmented_llm_reply_remainder(
         self,
@@ -2271,11 +2427,13 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not self.enabled:
             return
         if not hasattr(req, "system_prompt"):
+            self._release_framework_session_lock_for_event(event, label="llm_request_no_system_prompt")
             return
         self._remember_external_llm_request_for_token_stats(event, req)
         is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
         rest_allowed, rest_reason = await self._should_reply_during_rest(event, is_private_chat=is_private_chat)
         if not rest_allowed:
+            self._release_framework_session_lock_for_event(event, label="rest_reply_gate")
             self._stop_reply_for_rest_gate(event, rest_reason)
             return
         if rest_reason not in {"disabled", "not_sleeping"}:
@@ -2407,12 +2565,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         try:
             user_id = str(event.get_sender_id())
         except Exception:
+            self._release_framework_session_lock_for_event(event, label="private_sender_missing")
             return
         raw_users = self.data.get("users", {})
         current_user = raw_users.get(user_id) if isinstance(raw_users, dict) else None
         if not isinstance(current_user, dict):
+            self._release_framework_session_lock_for_event(event, label="private_user_missing")
             return
         if not self._is_target_private_user(user_id, current_user) or not current_user.get("enabled", True):
+            self._release_framework_session_lock_for_event(event, label="private_user_disabled")
             return
         await self._acquire_framework_session_lock_for_event(event, label="private_llm_request")
         if not bool(getattr(event, "private_companion_skip_passive_input_status", False)):
@@ -2430,6 +2591,13 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             state_injection = self._format_state_injection(state)
             state_injection = self._sanitize_schedule_context_for_private_user(state_injection, current_user)
             prompt_surface.add("state.full", state_injection, priority=10, source="daily_state")
+            life_context = self._format_life_context_injection()
+            life_context = self._sanitize_schedule_context_for_private_user(life_context, current_user)
+            if life_context:
+                prompt_surface.add("life.context", life_context, priority=12, source="daily_state")
+            important_dates = self._format_important_dates_injection()
+            if important_dates:
+                prompt_surface.add("important.dates", important_dates, priority=14, source="daily_state")
             worldview_context = (
                 self._format_worldview_adaptation_prompt()
                 if self.enable_environment_perception and self.enable_worldview_perception
@@ -2757,9 +2925,14 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             news_context = self._format_recent_news_context_for_reply(inbound_text)
             if news_context:
                 prompt_surface.add("news.recent", news_context, priority=76, source="news")
-            skill_context = self._format_skill_growth_for_prompt()
-            if skill_context:
-                prompt_surface.add("skill.growth", skill_context, priority=78, source="skill")
+            if self.enable_skill_growth_passive_injection:
+                skill_context = self._format_skill_growth_for_prompt()
+                if skill_context:
+                    prompt_surface.add("skill.growth", skill_context, priority=78, source="skill")
+            else:
+                skill_context = self._format_skill_growth_for_user_text(inbound_text)
+                if skill_context:
+                    prompt_surface.add("skill.growth.match", skill_context, priority=78, source="skill")
             companion_injection = self._format_companion_planner_injection(current_user)
             if companion_injection:
                 prompt_surface.add("companion.planner", companion_injection, priority=80, source="companion")
@@ -3014,6 +3187,12 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             await self._refresh_default_persona_prompt(getattr(event, "unified_msg_origin", "") if event is not None else "")
             state = await self._ensure_daily_state()
             parts = [self._format_state_injection(state)]
+            life_context = self._format_life_context_injection()
+            if life_context:
+                parts.append(life_context)
+            important_dates = self._format_important_dates_injection()
+            if important_dates:
+                parts.append(important_dates)
             detail_injection = self._format_detail_injection()
             if detail_injection:
                 parts.append(detail_injection)
@@ -3424,6 +3603,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             if self._apply_interaction_warmth_to_state(text, fast_user):
                 fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
             self._schedule_data_save()
+            await self._acquire_framework_session_lock_for_event(event, label="private_event_pipeline")
             return
 
         async with self._data_lock:
@@ -3715,6 +3895,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if response:
             await self._reply(event, response)
             event.stop_event()
+        elif is_target_user:
+            await self._acquire_framework_session_lock_for_event(event, label="private_event_pipeline")
         if is_target_user:
             asyncio.create_task(self._refresh_persona_relationship(user_id, user_snapshot))
             asyncio.create_task(self._maybe_refresh_companion_memory(user_id, user_snapshot))
@@ -4120,6 +4302,12 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 current["last_bot_interjection"] = group_snapshot.get("last_bot_interjection", current.get("last_bot_interjection", {}))
                 current["repeat_follow_state"] = group_snapshot.get("repeat_follow_state", current.get("repeat_follow_state", {}))
                 self._save_data_sync()
+        if talking_to_bot:
+            await self._acquire_framework_session_lock_for_event(
+                event,
+                label="group_event_pipeline",
+                private_only=False,
+            )
 
     def _format_timestamp_elapsed(self, timestamp: Any) -> str:
         ts = _safe_float(timestamp, 0)

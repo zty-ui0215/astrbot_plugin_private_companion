@@ -7172,6 +7172,65 @@ button:disabled {
   font-size: 12px;
 }
 
+.skill-category-list {
+  display: grid;
+  gap: 10px;
+}
+
+.skill-category-group {
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(251, 250, 246, 0.92));
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.skill-category-group > summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.skill-category-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.skill-category-group > summary span {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.skill-category-group > summary small {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.skill-category-group > summary::after {
+  content: "展开";
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 9px;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.skill-category-group[open] > summary::after {
+  content: "收起";
+}
+
+.skill-category-group > .skill-growth-grid {
+  padding: 0 12px 12px;
+}
+
 .skill-growth-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -7186,6 +7245,15 @@ button:disabled {
   padding: 12px;
   background: linear-gradient(180deg, #fff 0%, #fbfaf6 100%);
   box-shadow: var(--shadow-soft);
+}
+
+.skill-card.is-hidden-skill {
+  opacity: 0.72;
+  background: linear-gradient(180deg, #f8f8f4 0%, #f1f0ec 100%);
+}
+
+.skill-card.is-frozen-skill {
+  border-style: dashed;
 }
 
 .skill-card-toggle {
@@ -7240,12 +7308,26 @@ button:disabled {
 
 .skill-card header b {
   color: var(--accent-strong);
-  font-size: 22px;
+  font-size: 14px;
+  text-align: right;
+  max-width: 96px;
 }
 
 .skill-level-line span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
   color: var(--accent-strong);
   font-weight: 700;
+}
+
+.skill-level-line em {
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-style: normal;
 }
 
 .skill-level-line small,
@@ -7314,6 +7396,17 @@ button:disabled {
 
 .skill-editor-grid .wide-field {
   grid-column: 1 / -1;
+}
+
+.skill-editor-grid .check-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+}
+
+.skill-editor-grid .check-field input {
+  width: auto;
 }
 
 .skill-editor-actions {

@@ -640,13 +640,12 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
 【生活/世界观补充】
 {schedule_worldview or "（无）"}
 
-当前状态：
 {plugin._format_state_for_prompt(state if isinstance(state, dict) else {})}
 
 {worldview_adaptation}
 
-当前状态走向摘要：
-{plugin._format_state_transition_overview(state if isinstance(state, dict) else {})}
+状态延续感：
+{plugin._format_state_continuity_for_prompt(state if isinstance(state, dict) else {})}
 
 日期语境：
 {calendar_context}

@@ -1093,6 +1093,43 @@ class ProactiveEngineMixin:
                 pass
         return _single_line(_strip_internal_message_blocks(text), limit)
 
+    def _proactive_audit_signature(self, item: dict[str, Any], *, bucket_seconds: int = 300) -> str:
+        updated = _safe_float(item.get("updated_ts") or item.get("created_ts"), 0)
+        bucket = int(updated // max(1, bucket_seconds)) if updated > 0 else 0
+        parts = [
+            item.get("user_id"),
+            item.get("status"),
+            item.get("source"),
+            item.get("reason"),
+            item.get("action"),
+            item.get("topic"),
+            item.get("motive"),
+            item.get("note"),
+            bucket,
+        ]
+        return "|".join(_single_line(part, 120) for part in parts)
+
+    def _compact_proactive_audit_log(self) -> None:
+        log = self._proactive_audit_log()
+        compacted: list[dict[str, Any]] = []
+        seen: dict[str, dict[str, Any]] = {}
+        for item in log:
+            if not isinstance(item, dict):
+                continue
+            signature = self._proactive_audit_signature(item)
+            previous = seen.get(signature)
+            if previous is None:
+                seen[signature] = item
+                compacted.append(item)
+                continue
+            previous["updated_ts"] = max(
+                _safe_float(previous.get("updated_ts"), 0),
+                _safe_float(item.get("updated_ts"), 0),
+            )
+            previous["duplicate_count"] = _safe_int(previous.get("duplicate_count"), 1, 1) + 1
+        if len(compacted) != len(log):
+            log[:] = compacted[-160:]
+
     def _append_proactive_audit(
         self,
         user_id: str,
@@ -1124,7 +1161,17 @@ class ProactiveEngineMixin:
             "text_preview": self._proactive_visible_text_preview(text) if text else "",
         }
         log = self._proactive_audit_log()
+        signature = self._proactive_audit_signature(item)
+        for existing in reversed(log[-30:]):
+            if not isinstance(existing, dict):
+                continue
+            if self._proactive_audit_signature(existing) != signature:
+                continue
+            existing["updated_ts"] = now
+            existing["duplicate_count"] = _safe_int(existing.get("duplicate_count"), 1, 1) + 1
+            return _single_line(existing.get("id"), 40) or audit_id
         log.append(item)
+        self._compact_proactive_audit_log()
         del log[:-160]
         return audit_id
 
@@ -1159,6 +1206,7 @@ class ProactiveEngineMixin:
                 item["action"] = _single_line(action, 60)
             if reason:
                 item["reason"] = _single_line(reason, 40)
+            self._compact_proactive_audit_log()
             break
 
     def _recover_stale_proactive_sending(self, user: dict[str, Any], *, now: float | None = None) -> bool:

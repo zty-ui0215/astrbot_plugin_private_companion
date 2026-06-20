@@ -27,6 +27,7 @@ from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .helpers import _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks
+from .segmented_message import split_plain_component_chain
 
 class PrivateImageMixin:
     """Methods split from main.PrivateCompanionPlugin."""
@@ -2040,18 +2041,12 @@ class PrivateImageMixin:
         return cleaned
 
     def _private_image_split_reply_chain(self, chain: list[Any], *, should_segment: bool) -> list[list[Any]]:
-        outbound: list[list[Any]] = []
-        for comp in chain:
-            if isinstance(comp, Plain):
-                text = str(getattr(comp, "text", "") or "").strip()
-                if not text:
-                    continue
-                segments = self._split_proactive_text(text) if should_segment else [part.strip() for part in text.splitlines() if part.strip()]
-                segments = [segment for segment in segments if segment] or [text]
-                outbound.extend([[Plain(segment)] for segment in segments])
-                continue
-            outbound.append([comp])
-        return outbound
+        return split_plain_component_chain(
+            chain,
+            plain_type=Plain,
+            split_text=self._split_proactive_text,
+            fallback_line_split=not should_segment,
+        )
 
     async def _send_private_image_reply_chain(self, event: AstrMessageEvent, chain: list[Any]) -> None:
         if not chain:

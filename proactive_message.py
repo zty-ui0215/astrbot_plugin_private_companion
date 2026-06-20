@@ -4603,6 +4603,17 @@ class ProactiveMessageMixin:
         disable_segmenting: bool = False,
     ) -> None:
         trigger_message_id = _single_line(quote_message_id, 120)
+        placeholder_cleaner = getattr(self, "_sanitize_orphan_tts_placeholders", None)
+        if callable(placeholder_cleaner):
+            cleaned_text = placeholder_cleaner(text)
+            if cleaned_text != text:
+                logger.warning(
+                    "[PrivateCompanion] 主动发送前清理孤儿 TTS 占位符: umo=%s before=%s after=%s",
+                    _single_line(umo, 120),
+                    _single_line(text, 120),
+                    _single_line(cleaned_text, 120),
+                )
+                text = cleaned_text
         if image_path or extra_components:
             await self._send_media_proactive_chain(
                 umo,
@@ -5147,7 +5158,14 @@ class ProactiveMessageMixin:
         if energy < 45 and random.random() < 0.55:
             reasons.append("quiet_care")
         share_probability = self.proactive_share_probability
-        if can_do and random.random() < max(0.05, min(0.85, share_probability)):
+        activity_share_blocked = False
+        block_checker = getattr(self, "_activity_share_duplicate_block_remaining", None)
+        if callable(block_checker):
+            try:
+                activity_share_blocked = block_checker(user) > 0
+            except Exception:
+                activity_share_blocked = False
+        if can_do and not activity_share_blocked and random.random() < max(0.05, min(0.85, share_probability)):
             reasons.append("activity_share")
         if self.data.get("bot_diaries") and random.random() < max(0.08, share_probability * 0.55):
             reasons.append("diary_share")

@@ -870,7 +870,7 @@
   "enable_skill_growth_simulation": {
     "description": "启用技能成长模拟",
     "type": "bool",
-    "hint": "让 Bot 根据人格、世界观、可做事项和日程片段形成自己的技能等级，并在对应日程中缓慢提升。等级只作为自我认知和表现参考，不会让 Bot 变成万能。",
+    "hint": "让 Bot 根据人格、世界观、可做事项和日程片段形成自己的能力熟悉度，并在对应日程中缓慢变化。能力状态只作为自我认知和表现参考，不会让 Bot 变成万能。",
     "default": true
   },
   "skill_growth_rate": {
@@ -888,10 +888,19 @@
     }
   },
   "skill_growth_custom_skills": {
-    "description": "自定义技能列表",
+    "description": "自定义技能列表（兼容旧配置）",
     "type": "string",
-    "hint": "逗号分隔。用于补充人设中需要追踪的技能，例如剑术,草药学,古典文学。",
+    "hint": "兼容旧配置。新的自定义技能请在扩展页观察页的“技能成长”卡片中新增、隐藏、冻结或合并别名。",
     "default": "",
+    "condition": {
+      "enable_skill_growth_simulation": true
+    }
+  },
+  "enable_skill_growth_passive_injection": {
+    "description": "被动回复技能认知",
+    "type": "bool",
+    "hint": "开启后，普通聊天会注入 Bot 当前能力状态和自我认知。默认关闭；关闭时技能成长仍会结算，并可继续影响日程和能力边界。",
+    "default": false,
     "condition": {
       "enable_skill_growth_simulation": true
     }
@@ -908,7 +917,7 @@
   "skill_growth_schedule_influence_strength": {
     "description": "技能约束强度",
     "type": "float",
-    "hint": "控制技能等级对日程表现的约束强度。建议 0.3-0.6；数值越大，越严格避免高等级技能被普通任务难住。",
+    "hint": "控制能力状态对日程表现的约束强度。建议 0.3-0.6；数值越大，越严格避免已经顺手的能力被普通任务难住。",
     "slider": {
       "min": 0,
       "max": 1,
@@ -2845,22 +2854,22 @@
   "enable_humanized_states": {
     "description": "启用拟人化身体/梦境状态",
     "type": "bool",
-    "hint": "生成睡眠、梦境、健康、饥饿、周期等连续状态，并影响日程、主动消息和被动回复。",
+    "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
     "default": true
   },
   "inject_passive_states": {
     "description": "被动回复前注入拟人状态",
     "type": "bool",
-    "hint": "开启后，每次普通 LLM 回复前都会把当前叠加状态注入 system_prompt，让被动回复也受状态影响。",
+    "hint": "开启后，每次普通 LLM 回复前都会注入“当前扮演状态”，只影响语气、长短和节奏，不要求模型逐项汇报状态。",
     "default": true,
     "condition": {
       "enable_humanized_states": true
     }
   },
   "enable_cycle_state": {
-    "description": "启用生理周期模拟",
+    "description": "启用生理期模拟",
     "type": "bool",
-    "hint": "开启后可能出现生理期前、生理期、恢复期等拟人化周期影响；周期事件带冷却，不会每天连续重抽。",
+    "hint": "开启后，只有当人格适合人类身体设定时，拟人身体状态才可能加入“生理期前/处于生理期/生理期后”等状态。它只影响当前扮演状态的语气、精力和节奏，不是医学记录或真实日期追踪；事件带冷却，不会每天连续重抽。",
     "default": true,
     "condition": {
       "enable_humanized_states": true
@@ -2869,7 +2878,7 @@
   "humanized_state_intensity": {
     "description": "拟人状态强度",
     "type": "int",
-    "hint": "数值越高，失眠、生病、饥饿、周期等状态越容易出现且对能量影响越明显。不同状态有不同持续时间，并可叠加。",
+    "hint": "数值越高，睡眠不佳、健康、饥饿、周期等状态越容易出现且对能量影响越明显。不同状态有不同持续时间，并可叠加。",
     "slider": {
       "min": 0,
       "max": 100,
@@ -3795,6 +3804,7 @@
     "type": "string",
     "hint": "仅在分段模式为 regex 时生效。",
     "condition": {
+      "enable_segmented_proactive_reply": true,
       "segmented_proactive_split_mode": "regex"
     },
     "default": ".*?[。？！~…\\n]+|.+$"
@@ -3804,6 +3814,7 @@
     "type": "list",
     "hint": "仅在分段模式为 words 时生效；检测到列表中的任意词或换行时切分，并保留分隔符。建议一行一个分段词；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部会自动保护，完整网址结束处可作为自然断点；括号和引号内容会自动保护。",
     "condition": {
+      "enable_segmented_proactive_reply": true,
       "segmented_proactive_split_mode": "words"
     },
     "default": [
@@ -3829,6 +3840,7 @@
     "type": "string",
     "hint": "仅在分段模式为 regex 时生效，例如 [\\n]。清理会跳过括号和双引号内的内容。",
     "condition": {
+      "enable_segmented_proactive_reply": true,
       "enable_segmented_proactive_content_cleanup": true,
       "segmented_proactive_split_mode": "regex"
     },
@@ -3847,6 +3859,7 @@
       "仅句尾清理"
     ],
     "condition": {
+      "enable_segmented_proactive_reply": true,
       "enable_segmented_proactive_content_cleanup": true
     },
     "default": "all"
@@ -3856,6 +3869,7 @@
     "type": "list",
     "hint": "仅在分段模式为 words 时生效；scope=all 时每一项会按原文移除，scope=trailing 时只移除每段末尾连续出现的词。清理会跳过括号和双引号内的内容。",
     "condition": {
+      "enable_segmented_proactive_reply": true,
       "enable_segmented_proactive_content_cleanup": true,
       "segmented_proactive_split_mode": "words"
     },
@@ -3885,6 +3899,7 @@
     "type": "float",
     "hint": "仅在随机间隔算法下使用。",
     "condition": {
+      "enable_segmented_proactive_reply": true,
       "segmented_proactive_interval_method": "random"
     },
     "default": 1.5
@@ -3894,6 +3909,7 @@
     "type": "float",
     "hint": "仅在随机间隔算法下使用。",
     "condition": {
+      "enable_segmented_proactive_reply": true,
       "segmented_proactive_interval_method": "random"
     },
     "default": 3.5
@@ -3903,6 +3919,7 @@
     "type": "float",
     "hint": "仅在按字数对数间隔算法下使用。",
     "condition": {
+      "enable_segmented_proactive_reply": true,
       "segmented_proactive_interval_method": "log"
     },
     "default": 1.8

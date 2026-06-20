@@ -332,6 +332,19 @@ class TtsEnhancementMixin:
 
         return PRIVATE_TTS_BLOCK_TOKEN_PATTERN.sub(repl, source)
 
+    def _sanitize_orphan_tts_placeholders(self, text: str) -> str:
+        """Remove private TTS placeholders that escaped their original event scope."""
+        source = str(text or "")
+        if not source:
+            return ""
+        source = PRIVATE_TTS_BLOCK_TOKEN_PATTERN.sub("", source)
+        source = TTS_BLOCK_TOKEN_PATTERN.sub("", source)
+        source = re.sub(r"(?:^|[\s\r\n])([。！？!?，,、；;：:~～…]+)(?=\s|$)", " ", source)
+        source = re.sub(r"\s{2,}", " ", source)
+        source = re.sub(r"^\s*[。！？!?，,、；;：:~～…]+\s*", "", source)
+        source = source.lstrip(" \t\r\n。！？!?，,、；;：:~～…")
+        return source.strip()
+
     def _tts_record_refs(self, component: Any) -> list[str]:
         refs: list[str] = []
         for attr in ("file", "url", "path"):
@@ -669,6 +682,26 @@ class TtsEnhancementMixin:
             "晚上", "早上", "下次", "这次", "喜欢", "辛苦", "轻点", "等会",
         )
         return any(marker in cleaned for marker in chinese_markers) or cjk_count >= 4
+
+    def _tts_chinese_visible_fallback_from_mixed(self, text: str) -> str:
+        """Extract visible Chinese explanation from a mixed spoken-language fallback."""
+        cleaned = self._strip_any_tts_markup(str(text or ""))
+        cleaned = re.sub(TTS_TAG_PATTERN, "", cleaned).strip()
+        if not cleaned:
+            return ""
+        if self._tts_visible_text_has_chinese(cleaned):
+            return _single_line(cleaned, 800)
+        parts: list[str] = []
+        candidates = re.findall(r"[\u4e00-\u9fff][^\u3040-\u30ff\u31f0-\u31ff\r\n]*", cleaned)
+        if not candidates:
+            candidates = re.split(r"(?<=[。！？!?…])\s+|[\r\n]+", cleaned)
+        for part in candidates:
+            part = part.strip()
+            if not part or re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", part):
+                continue
+            if self._tts_visible_text_has_chinese(part):
+                parts.append(part)
+        return _single_line("\n".join(parts), 800)
 
     async def _translate_tts_spoken_to_chinese(self, text: str, event: Any, *, provider_kind: str) -> str:
         spoken = self._normalize_tts_spoken_text(text, provider_kind=provider_kind)
@@ -1137,16 +1170,26 @@ TTS 朗读文本：
         text = "".join(str(getattr(comp, "text", "") or "") for comp in chunk).strip()
         if not text:
             return []
+        original_text = text
         if getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_has_chinese(text):
-            logger.warning(
-                "[PrivateCompanion] TTS 后置文本不是中文释义,已跳过发送: session=%s text=%s",
-                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
-                _single_line(text, 120),
-            )
-            return []
+            chinese_text = self._tts_chinese_visible_fallback_from_mixed(text)
+            if chinese_text:
+                logger.warning(
+                    "[PrivateCompanion] TTS 后置文本混有朗读语种,已仅保留中文释义: session=%s text=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    _single_line(chinese_text, 120),
+                )
+                text = chinese_text
+            else:
+                logger.warning(
+                    "[PrivateCompanion] TTS 后置文本不是中文释义,已跳过发送: session=%s text=%s",
+                    _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                    _single_line(text, 120),
+                )
+                return []
         splitter = getattr(self, "_split_proactive_text", None)
         if not callable(splitter):
-            return [chunk]
+            return [[Plain(text)]]
         try:
             segments = [item for item in splitter(text) if str(item or "").strip()]
         except Exception as exc:
@@ -1154,7 +1197,7 @@ TTS 朗读文本：
             return [chunk]
         if len(segments) <= 1:
             cleaned = segments[0] if segments else text
-            return [[Plain(cleaned)]] if cleaned and cleaned != text else [chunk]
+            return [[Plain(cleaned)]] if cleaned and (cleaned != text or text != original_text) else [chunk]
         logger.info(
             "[PrivateCompanion] TTS 后置文本按分段规则拆分: session=%s segments=%s first=%s",
             _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
@@ -1192,6 +1235,7 @@ TTS 朗读文本：
             for chunk in expanded_chunks:
                 if not chunk:
                     continue
+                stop_after_send = False
                 delay = 0.45
                 if previous_text and len(expanded_chunks) > 1:
                     calc_interval = getattr(self, "_calc_segmented_proactive_interval", None)
@@ -1205,12 +1249,19 @@ TTS 朗读文本：
                 if callable(activity_checker):
                     try:
                         if activity_checker(scope, started_at, ignore_self=True):
-                            logger.info(
-                                "[PrivateCompanion] 会话已有新消息，停止发送 TTS 后续分块: session=%s sent_preview=%s",
-                                scope,
-                                _single_line(previous_text, 120) or "0",
-                            )
-                            return
+                            if not previous_text:
+                                stop_after_send = True
+                                logger.info(
+                                    "[PrivateCompanion] 会话已有新消息，但仍补发 TTS 语音对应首段文本: session=%s",
+                                    scope,
+                                )
+                            else:
+                                logger.info(
+                                    "[PrivateCompanion] 会话已有新消息，停止发送 TTS 后续分块: session=%s sent_preview=%s",
+                                    scope,
+                                    _single_line(previous_text, 120) or "0",
+                                )
+                                return
                     except Exception:
                         pass
                 try:
@@ -1236,6 +1287,13 @@ TTS 朗读文本：
                     for comp in chunk
                     if isinstance(comp, Plain)
                 ).strip() or previous_text
+                if stop_after_send:
+                    logger.info(
+                        "[PrivateCompanion] TTS 语音对应首段文本已补发，停止发送剩余分块: session=%s sent_preview=%s",
+                        scope,
+                        _single_line(previous_text, 120) or "0",
+                    )
+                    return
 
     async def _maybe_convert_plain_reply_to_tts(self, text: str, event: Any) -> list[Any]:
         mode = getattr(self, "tts_generation_mode", "fast_tag")
@@ -1553,26 +1611,44 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
                 resp = await provider.text_chat(prompt=prompt, max_tokens=max_tokens)
             except TypeError:
                 resp = await provider.text_chat(prompt=prompt)
+            elapsed_ms = int((time.time() - start) * 1000)
+            completion = str(getattr(resp, "completion_text", resp) or "")
+            logger.info(
+                "[PrivateCompanion] TTS文本模型完成: task=%s provider=%s elapsed=%sms prompt_chars=%s completion_chars=%s",
+                task,
+                _single_line(provider_id, 80) or "default",
+                elapsed_ms,
+                len(str(prompt or "")),
+                len(completion),
+            )
             if callable(record_usage):
-                completion = str(getattr(resp, "completion_text", resp) or "")
                 record_usage(
                     provider_id=provider_id,
                     task=task,
                     prompt=prompt,
                     completion=completion,
-                    elapsed_ms=int((time.time() - start) * 1000),
+                    elapsed_ms=elapsed_ms,
                     success=True,
                     resp=resp,
                 )
             return resp
         except Exception as exc:
+            elapsed_ms = int((time.time() - start) * 1000)
+            logger.warning(
+                "[PrivateCompanion] TTS文本模型失败: task=%s provider=%s elapsed=%sms prompt_chars=%s error=%s",
+                task,
+                _single_line(provider_id, 80) or "default",
+                elapsed_ms,
+                len(str(prompt or "")),
+                _single_line(exc, 120),
+            )
             if callable(record_usage):
                 record_usage(
                     provider_id=provider_id,
                     task=task,
                     prompt=prompt,
                     completion="",
-                    elapsed_ms=int((time.time() - start) * 1000),
+                    elapsed_ms=elapsed_ms,
                     success=False,
                     error=str(exc),
                 )
@@ -1881,16 +1957,49 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
                         "[PrivateCompanion] TTS语音组件生成失败,已隐藏朗读文本并保留可见中文: %s",
                         _single_line(spoken, 120),
                     )
+                elif getattr(self, "tts_voice_language", "ja") != "zh":
+                    next_start = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
+                    visible_after_this_block = normalized[match.end():next_start]
+                    if self._tts_visible_text_has_chinese(visible_after_this_block):
+                        logger.warning(
+                            "[PrivateCompanion] TTS语音组件生成失败,已隐藏朗读文本并保留后置中文: %s",
+                            _single_line(spoken, 120),
+                        )
+                    else:
+                        visible_translation = await self._translate_tts_spoken_to_chinese(
+                            source_spoken,
+                            event,
+                            provider_kind=provider_kind,
+                        )
+                        if visible_translation:
+                            output.append(Plain(visible_translation))
+                            logger.warning(
+                                "[PrivateCompanion] TTS语音组件生成失败,已改用中文释义文本: %s",
+                                _single_line(visible_translation, 120),
+                            )
+                        else:
+                            logger.warning(
+                                "[PrivateCompanion] TTS语音组件生成失败且无法得到中文释义,已隐藏朗读文本: %s",
+                                _single_line(spoken, 120),
+                            )
                 else:
                     output.append(Plain(spoken))
             pos = match.end()
         after = re.sub(r"</?t{2,}s\b[^>]*>", "", normalized[pos:], flags=re.IGNORECASE).strip()
         if after and getattr(self, "tts_voice_language", "ja") != "zh" and not self._tts_visible_text_has_chinese(after):
-            logger.warning(
-                "[PrivateCompanion] TTS语音块后置可见文本不是中文释义,已丢弃: text=%s",
-                _single_line(after, 120),
-            )
-            after = ""
+            chinese_after = self._tts_chinese_visible_fallback_from_mixed(after)
+            if chinese_after:
+                logger.warning(
+                    "[PrivateCompanion] TTS语音块后置可见文本混有朗读语种,已仅保留中文释义: text=%s",
+                    _single_line(chinese_after, 120),
+                )
+                after = chinese_after
+            else:
+                logger.warning(
+                    "[PrivateCompanion] TTS语音块后置可见文本不是中文释义,已丢弃: text=%s",
+                    _single_line(after, 120),
+                )
+                after = ""
         if after:
             output.append(Plain(after))
         has_record = any(isinstance(comp, Record) for comp in output)
@@ -1970,7 +2079,14 @@ Provider 规则：{"可保留少量方括号情绪标签" if self._tts_provider_
         try:
             audio_path = await tts_provider.get_audio(sanitized)
         except Exception as exc:
-            logger.warning("[PrivateCompanion] TTS强化生成语音失败: %s", _single_line(exc, 120))
+            logger.warning(
+                "[PrivateCompanion] TTS强化生成语音失败: provider=%s error_type=%s error=%s text=%s",
+                provider_kind or "unknown",
+                exc.__class__.__name__,
+                _single_line(repr(exc), 160),
+                _single_line(sanitized, 120),
+                exc_info=True,
+            )
             return None
         if not audio_path:
             return None

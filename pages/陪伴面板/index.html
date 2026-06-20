@@ -400,7 +400,7 @@ QQ空间 = 公开札记
             <div class="meter"><i id="lifeEnergyBar"></i></div>
           </article>
           <article class="life-card">
-            <span>情绪底色</span>
+            <span>情绪</span>
             <b id="lifeMood">--</b>
             <small id="lifeNote">--</small>
           </article>
@@ -428,7 +428,7 @@ QQ空间 = 公开札记
             <div id="dreamFactors" class="fragment-cloud"></div>
           </article>
           <article>
-            <h2>身体与生活感</h2>
+            <h2>当前扮演状态</h2>
             <div id="statePillBoard" class="state-pill-board"></div>
           </article>
           <article>
@@ -460,15 +460,16 @@ QQ空间 = 公开札记
                   <label>分类 <input name="category" maxlength="20" placeholder="能力" /></label>
                   <label>等级
                     <select name="level">
-                      <option value="1">Lv.1</option>
-                      <option value="2">Lv.2</option>
-                      <option value="3">Lv.3</option>
-                      <option value="4">Lv.4</option>
-                      <option value="5">Lv.5</option>
-                      <option value="6">Lv.6</option>
+                      <option value="1">还不太熟</option>
+                      <option value="2">能慢慢试</option>
+                      <option value="3">能自己做</option>
+                      <option value="4">已经顺手</option>
+                      <option value="5">很拿手</option>
+                      <option value="6">有自己的办法</option>
                     </select>
                   </label>
                   <label>关键词 <input name="keywords" maxlength="160" placeholder="逗号分隔" /></label>
+                  <label>别名 <input name="aliases" maxlength="160" placeholder="同义叫法，逗号分隔" /></label>
                   <button type="submit">新增技能</button>
                 </form>
               </details>
@@ -908,8 +909,8 @@ QQ空间 = 公开札记
               <label>私聊片段上限 <input name="max_dialogue_episodes" type="number" min="1" /></label>
               <label class="toggle-row"><input name="enable_skill_growth_simulation" type="checkbox" /> <span>启用技能成长模拟</span></label>
               <label>技能成长倍率 <input name="skill_growth_rate" type="number" min="0.1" max="3" step="0.1" /></label>
-              <label>自定义技能 <input name="skill_growth_custom_skills" type="text" maxlength="160" /></label>
-              <label class="toggle-row"><input name="enable_skill_growth_schedule_influence" type="checkbox" /> <span>技能影响日程</span></label>
+              <label class="toggle-row"><input name="enable_skill_growth_passive_injection" type="checkbox" /> <span>被动回复技能认知</span></label>
+              <label class="toggle-row"><input name="enable_skill_growth_schedule_influence" type="checkbox" /> <span>能力状态影响日程</span></label>
               <label>日程影响强度 <input name="skill_growth_schedule_influence_strength" type="number" min="0" max="1" step="0.05" /></label>
               <button type="submit">保存记忆学习</button>
             </form>
@@ -1103,6 +1104,6 @@ QQ空间 = 公开札记
     </section>
   </main>
 
-  <script src="./app.js?v=20260618-feature-switch-balanced"></script>
+  <script src="./app.js?v=20260621-feature-switch-compact"></script>
 </body>
 </html>

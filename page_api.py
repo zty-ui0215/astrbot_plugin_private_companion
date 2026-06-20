@@ -561,6 +561,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 result = await self._run_tts_generation_chain_test(payload)
             elif test_type == "proactive_message":
                 result = await self._run_proactive_message_chain_test(payload)
+            elif test_type == "skill_similarity":
+                result = await self._run_skill_similarity_check(payload)
             else:
                 return self._error("未知排障测试类型")
         except Exception as exc:
@@ -907,6 +909,163 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return str(user_id), candidate
         return fallback
 
+    async def _run_skill_similarity_check(self, payload: dict[str, Any]) -> dict[str, Any]:
+        started = time.time()
+        use_model = self._normalize_bool_value(payload.get("use_model", True))
+        async with self.plugin._data_lock:
+            data = deepcopy(self.plugin.data)
+        local_items = self._skill_similarity_local_candidates(data)
+        steps: list[dict[str, str]] = [
+            {
+                "name": "本地规则",
+                "status": "ok" if local_items else "info",
+                "detail": f"发现 {len(local_items)} 组疑似相似/冲突项" if local_items else "未发现明显重复、别名冲突或高重叠项",
+            }
+        ]
+        model_items: list[str] = []
+        provider_id = ""
+        if use_model and local_items:
+            caller = getattr(self.plugin, "_llm_call", None)
+            if callable(caller):
+                provider_selector = getattr(self.plugin, "_task_provider", None)
+                if callable(provider_selector):
+                    provider_id = provider_selector(
+                        getattr(self.plugin, "response_review_provider_id", ""),
+                        getattr(self.plugin, "llm_provider_id", ""),
+                    )
+                else:
+                    provider_id = str(getattr(self.plugin, "response_review_provider_id", "") or getattr(self.plugin, "llm_provider_id", "") or "")
+                prompt = self._skill_similarity_review_prompt(data, local_items)
+                try:
+                    raw = await caller(
+                        prompt,
+                        max_tokens=500,
+                        provider_id=provider_id,
+                        task="troubleshooting_skill_similarity",
+                    )
+                    model_items = self._parse_skill_similarity_model_result(raw)
+                    steps.append(
+                        {
+                            "name": "模型复核",
+                            "status": "ok" if model_items else "info",
+                            "detail": f"模型给出 {len(model_items)} 条建议" if model_items else "模型未给出额外合并建议",
+                        }
+                    )
+                except Exception as exc:
+                    steps.append({"name": "模型复核", "status": "warn", "detail": f"调用失败: {self._single_line(exc, 120)}"})
+            else:
+                steps.append({"name": "模型复核", "status": "warn", "detail": "插件缺少 _llm_call，无法调用模型"})
+        elif not use_model:
+            steps.append({"name": "模型复核", "status": "info", "detail": "本次按请求仅执行本地规则检查"})
+        elif not local_items:
+            steps.append({"name": "模型复核", "status": "info", "detail": "没有本地候选，未调用模型"})
+
+        local_preview = [
+            f"{item.get('a')} ↔ {item.get('b')}：{item.get('reason')}"
+            for item in local_items[:8]
+        ]
+        all_suggestions = [*local_preview, *model_items]
+        detail = "；".join(all_suggestions[:3]) if all_suggestions else "技能项目前看起来没有明显相似/冲突问题"
+        return {
+            "ok": True,
+            "title": "技能相似项检查",
+            "provider": self._single_line(provider_id, 100),
+            "detail": self._single_line(detail, 220),
+            "text_preview": self._single_line(" | ".join(all_suggestions[:8]), 220),
+            "extra_count": max(0, len(all_suggestions) - 3),
+            "steps": steps,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "error": "",
+        }
+
+    def _skill_similarity_local_candidates(self, data: dict[str, Any]) -> list[dict[str, str]]:
+        state = data.get("skill_growth") if isinstance(data.get("skill_growth"), dict) else {}
+        skills = state.get("skills") if isinstance(state.get("skills"), dict) else {}
+        items: list[dict[str, Any]] = []
+        for raw in skills.values():
+            if not isinstance(raw, dict):
+                continue
+            name = self._single_line(raw.get("name"), 32)
+            if not name:
+                continue
+            keywords = raw.get("keywords") if isinstance(raw.get("keywords"), list) else []
+            aliases = raw.get("aliases") if isinstance(raw.get("aliases"), list) else []
+            terms: set[str] = set()
+            for raw_term in [name, *keywords, *aliases]:
+                term = self._single_line(raw_term, 24)
+                if term:
+                    terms.add(term)
+            identity_terms: set[str] = set()
+            for raw_term in [name, *aliases]:
+                term = self._single_line(raw_term, 24)
+                if term:
+                    identity_terms.add(term)
+            items.append(
+                {
+                    "name": name,
+                    "category": self._single_line(raw.get("category"), 24),
+                    "hidden": bool(raw.get("hidden")),
+                    "frozen": bool(raw.get("frozen")),
+                    "terms": terms,
+                    "identity_terms": identity_terms,
+                }
+            )
+        candidates: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for idx, left in enumerate(items):
+            for right in items[idx + 1:]:
+                reason = ""
+                if left["name"] == right["name"]:
+                    reason = "名称完全重复"
+                elif left["name"] in right["identity_terms"] or right["name"] in left["identity_terms"]:
+                    reason = "名称与对方合并别名冲突"
+                elif len(left["name"]) >= 2 and len(right["name"]) >= 2 and (left["name"] in right["name"] or right["name"] in left["name"]):
+                    reason = "名称相互包含"
+                else:
+                    overlap = left["terms"] & right["terms"]
+                    if left["category"] and left["category"] == right["category"] and len(overlap) >= 3:
+                        reason = f"同分类关键词高度重叠: {'、'.join(sorted(overlap)[:4])}"
+                if not reason:
+                    continue
+                key = tuple(sorted([left["name"], right["name"]]) + [reason])
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append({"a": left["name"], "b": right["name"], "reason": reason})
+        return candidates[:12]
+
+    def _skill_similarity_review_prompt(self, data: dict[str, Any], candidates: list[dict[str, str]]) -> str:
+        summary = self._skill_growth_summary(data)
+        skills = summary.get("items") if isinstance(summary.get("items"), list) else []
+        skill_lines = []
+        for item in skills[:80]:
+            aliases = "、".join(item.get("aliases") or [])
+            keywords = "、".join((item.get("keywords") or [])[:8])
+            flags = " ".join(flag for flag in ("隐藏" if item.get("hidden") else "", "冻结" if item.get("frozen") else "") if flag)
+            skill_lines.append(
+                f"- {item.get('name')}｜{item.get('category')}｜{item.get('level_title')}｜别名:{aliases or '-'}｜关键词:{keywords or '-'}｜{flags or '正常'}"
+            )
+        candidate_lines = [f"- {item.get('a')} / {item.get('b')}：{item.get('reason')}" for item in candidates[:12]]
+        return (
+            "你是插件排障助手。请检查技能成长列表中是否存在疑似重复技能、别名冲突、过泛关键词或应该隐藏/冻结的项。\n"
+            "只根据给出的列表判断，不要发散。不要修改数据，只给建议。\n"
+            "请输出 1-6 条短建议，每条不超过 45 字；如果没有问题，只输出“未发现需要合并的技能”。\n\n"
+            "本地候选：\n" + "\n".join(candidate_lines) + "\n\n"
+            "技能列表：\n" + "\n".join(skill_lines)
+        )
+
+    def _parse_skill_similarity_model_result(self, raw: Any) -> list[str]:
+        text = str(raw or "").strip()
+        if not text:
+            return []
+        lines = []
+        for line in re.split(r"[\r\n]+", text):
+            item = re.sub(r"^\s*[-*•\d.、)）]+\s*", "", line).strip()
+            item = self._single_line(item, 90)
+            if item and item not in lines:
+                lines.append(item)
+        return lines[:6]
+
     async def _remember_troubleshooting_test_result(self, test_type: str, result: dict[str, Any]) -> None:
         if not test_type:
             return
@@ -1039,6 +1198,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "image_generation": "图片生成链路测试",
             "tts_generation": "TTS 生成链路测试",
             "proactive_message": "主动消息链路测试",
+            "skill_similarity": "技能相似项检查",
         }.get(test_type, "排障链路测试")
 
     def _troubleshooting_recent_events(
@@ -2332,6 +2492,27 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         name = self._single_line(payload.get("name"), 32)
         if not skill_id and not name:
             return self._error("缺少技能名称")
+        def _parse_bool(value: Any, default: bool = False) -> bool:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            return str(value).strip().lower() in {"1", "true", "yes", "on", "启用", "开启"}
+
+        def _parse_terms(value: Any, *, limit: int = 16) -> list[str]:
+            if isinstance(value, list):
+                raw_items = value
+            else:
+                raw_items = re.split(r"[,，、\n]+", str(value or ""))
+            items: list[str] = []
+            for raw in raw_items:
+                item = self._single_line(raw, 24)
+                if item and item not in items:
+                    items.append(item)
+            return items[:limit]
+
         try:
             async with self.plugin._data_lock:
                 state = self.plugin.data.setdefault("skill_growth", {})
@@ -2352,6 +2533,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 if not name:
                     return self._error("缺少技能名称")
                 if not skill_id:
+                    for existing_id, existing_skill in skills.items():
+                        if not isinstance(existing_skill, dict):
+                            continue
+                        existing_name = self._single_line(existing_skill.get("name"), 32)
+                        existing_aliases = existing_skill.get("aliases") if isinstance(existing_skill.get("aliases"), list) else []
+                        alias_set = {self._single_line(item, 24) for item in existing_aliases}
+                        if name == existing_name:
+                            skill_id = self._single_line(existing_id, 40)
+                            break
+                        if name in alias_set:
+                            return self._error(f"“{name}”已经是“{existing_name or '未命名技能'}”的合并别名，请直接编辑该技能")
+                if not skill_id:
                     skill_id = hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
                 existing = skills.get(skill_id) if isinstance(skills.get(skill_id), dict) else {}
                 level = max(1, min(6, self._int(payload.get("level")) or self._int(existing.get("level")) or 1))
@@ -2362,12 +2555,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     exp = {1: 0, 2: 100, 3: 260, 4: 520, 5: 900, 6: 1400}.get(level, 0)
                 if hasattr(self.plugin, "_skill_level_from_exp"):
                     level = self.plugin._skill_level_from_exp(exp)
-                raw_keywords = payload.get("keywords")
-                if isinstance(raw_keywords, list):
-                    keywords = [self._single_line(item, 24) for item in raw_keywords]
-                else:
-                    keywords = [self._single_line(item, 24) for item in re.split(r"[,，、\n]+", str(raw_keywords or ""))]
-                keywords = [item for item in keywords if item][:16] or [name]
+                keywords = _parse_terms(payload.get("keywords")) or [name]
+                aliases = _parse_terms(payload.get("aliases"), limit=12)
+                hidden = _parse_bool(payload.get("hidden"), bool(existing.get("hidden")) if isinstance(existing, dict) else False)
+                frozen = _parse_bool(payload.get("frozen"), bool(existing.get("frozen")) if isinstance(existing, dict) else False)
                 skill = dict(existing) if isinstance(existing, dict) else {}
                 skill.update(
                     {
@@ -2375,6 +2566,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                         "name": name,
                         "category": self._single_line(payload.get("category"), 20) or self._single_line(skill.get("category"), 20) or "能力",
                         "keywords": keywords,
+                        "aliases": [item for item in aliases if item != name],
+                        "hidden": hidden,
+                        "frozen": frozen,
                         "exp": round(max(0.0, exp), 2),
                         "level": level,
                         "level_title": self.plugin._skill_level_title(level) if hasattr(self.plugin, "_skill_level_title") else self._single_line(skill.get("level_title"), 24),
@@ -2917,12 +3111,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 progress = 100
             logs = raw.get("recent_logs") if isinstance(raw.get("recent_logs"), list) else []
             keywords = raw.get("keywords") if isinstance(raw.get("keywords"), list) else []
+            aliases = raw.get("aliases") if isinstance(raw.get("aliases"), list) else []
             items.append(
                 {
                     "id": self._single_line(raw.get("id"), 32),
                     "name": self._single_line(raw.get("name"), 32),
                     "category": self._single_line(raw.get("category"), 24),
                     "keywords": [self._single_line(item, 24) for item in keywords if self._single_line(item, 24)][:16],
+                    "aliases": [self._single_line(item, 24) for item in aliases if self._single_line(item, 24)][:12],
+                    "hidden": bool(raw.get("hidden")),
+                    "frozen": bool(raw.get("frozen")),
                     "level": level,
                     "level_title": self.plugin._skill_level_title(level) if hasattr(self.plugin, "_skill_level_title") else self._single_line(raw.get("level_title"), 24),
                     "description": self.plugin._skill_level_description(level) if hasattr(self.plugin, "_skill_level_description") else "",
@@ -2943,15 +3141,18 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     ],
                 }
             )
-        items.sort(key=lambda item: (item["level"], item["exp"], item["training_count"]), reverse=True)
+        items.sort(key=lambda item: (bool(item.get("hidden")), -item["level"], -item["exp"], -item["training_count"], item.get("category") or "", item.get("name") or ""))
         return {
             "enabled": bool(getattr(self.plugin, "enable_skill_growth_simulation", False)),
             "rate": float(getattr(self.plugin, "skill_growth_rate", 1.0) or 1.0),
+            "passive_injection": bool(getattr(self.plugin, "enable_skill_growth_passive_injection", False)),
             "schedule_influence": bool(getattr(self.plugin, "enable_skill_growth_schedule_influence", False)),
             "schedule_influence_strength": float(getattr(self.plugin, "skill_growth_schedule_influence_strength", 0.35) or 0.0),
             "updated": self.plugin._format_timestamp_elapsed(state.get("updated_ts", 0)),
             "skill_count": len(items),
-            "items": items[:24],
+            "hidden_count": sum(1 for item in items if item.get("hidden")),
+            "frozen_count": sum(1 for item in items if item.get("frozen")),
+            "items": items[:120],
         }
 
     def _external_ability_summary(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -3021,6 +3222,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "inject_passive_states",
             "enable_cycle_state",
             "enable_skill_growth_simulation",
+            "enable_skill_growth_passive_injection",
             "enable_message_debounce",
             "enable_smart_message_debounce",
             "enable_recall_enhancement",
@@ -3445,6 +3647,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_skill_growth_simulation",
             "skill_growth_rate",
             "skill_growth_custom_skills",
+            "enable_skill_growth_passive_injection",
             "enable_skill_growth_schedule_influence",
             "skill_growth_schedule_influence_strength",
             "enable_bilibili_integration",
@@ -4193,6 +4396,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "inject_passive_states",
             "enable_cycle_state",
             "enable_skill_growth_simulation",
+            "enable_skill_growth_passive_injection",
             "enable_message_debounce",
             "enable_smart_message_debounce",
             "enable_recall_enhancement",
@@ -4474,6 +4678,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_skill_growth_simulation",
             "skill_growth_rate",
             "skill_growth_custom_skills",
+            "enable_skill_growth_passive_injection",
             "enable_skill_growth_schedule_influence",
             "skill_growth_schedule_influence_strength",
             "enable_bilibili_integration",
@@ -5011,6 +5216,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "group_repeat_count_distinct_users_only",
             "enable_forward_message_adaptation",
             "enable_skill_growth_simulation",
+            "enable_skill_growth_passive_injection",
             "enable_skill_growth_schedule_influence",
             "forward_message_parse_nested",
             "forward_message_image_vision",
@@ -6480,6 +6686,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
         items.sort(key=lambda item: self._float(item.get("scheduled_ts")))
         raw_audit = data.get("proactive_audit_log") if isinstance(data.get("proactive_audit_log"), list) else []
+        seen_audit_signatures: dict[str, dict[str, Any]] = {}
         for raw in raw_audit:
             if not isinstance(raw, dict):
                 continue
@@ -6504,33 +6711,57 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 audit_action = self._single_line(sanitized.get("action"), 60) or audit_action
                 audit_topic = self._single_line(sanitized.get("topic"), 100)
                 audit_motive = self._single_line(sanitized.get("motive"), 180)
-            audit_status_counts[status] = audit_status_counts.get(status, 0) + 1
-            audit_items.append(
-                {
-                    "id": self._single_line(raw.get("id"), 40),
-                    "user_id": user_id,
-                    "user_label": user_summary.get("display_name") or user_id,
-                    "user_role": user_summary.get("relationship_role") or "",
-                    "user_role_label": user_summary.get("relationship_role_label") or "",
-                    "status": status,
-                    "source": self._single_line(raw.get("source"), 40),
-                    "reason": audit_reason,
-                    "action": audit_action,
-                    "topic": audit_topic,
-                    "motive": audit_motive,
-                    "note": self._single_line(raw.get("note"), 180),
-                    "text_preview": self._display_message_text(raw.get("text_preview"), 180),
-                    "scheduled_ts": self._float(raw.get("scheduled_ts")),
-                    "scheduled": self.plugin._format_timestamp_elapsed(raw.get("scheduled_ts", 0)),
-                    "created_ts": self._float(raw.get("created_ts")),
-                    "created": self.plugin._format_timestamp_elapsed(raw.get("created_ts", 0)),
-                    "updated_ts": self._float(raw.get("updated_ts")),
-                    "updated": self.plugin._format_timestamp_elapsed(raw.get("updated_ts", 0)),
-                    "candidate_id": self._single_line(raw.get("candidate_id"), 40),
-                    "has_image": bool(self._single_line(raw.get("image_path"), 260)),
-                    "extra_count": self._int(raw.get("extra_count")),
-                }
+            note = self._single_line(raw.get("note"), 180)
+            updated_ts = self._float(raw.get("updated_ts"))
+            bucket = int(updated_ts // 300) if updated_ts > 0 else 0
+            signature = "|".join(
+                self._single_line(value, 120)
+                for value in (
+                    user_id,
+                    status,
+                    self._single_line(raw.get("source"), 40),
+                    audit_reason,
+                    audit_action,
+                    audit_topic,
+                    audit_motive,
+                    note,
+                    bucket,
+                )
             )
+            existing = seen_audit_signatures.get(signature)
+            if existing is not None:
+                existing["updated_ts"] = max(self._float(existing.get("updated_ts")), updated_ts)
+                existing["updated"] = self.plugin._format_timestamp_elapsed(existing["updated_ts"])
+                existing["duplicate_count"] = max(1, self._int(existing.get("duplicate_count"))) + max(1, self._int(raw.get("duplicate_count")))
+                continue
+            audit_status_counts[status] = audit_status_counts.get(status, 0) + 1
+            item = {
+                "id": self._single_line(raw.get("id"), 40),
+                "user_id": user_id,
+                "user_label": user_summary.get("display_name") or user_id,
+                "user_role": user_summary.get("relationship_role") or "",
+                "user_role_label": user_summary.get("relationship_role_label") or "",
+                "status": status,
+                "source": self._single_line(raw.get("source"), 40),
+                "reason": audit_reason,
+                "action": audit_action,
+                "topic": audit_topic,
+                "motive": audit_motive,
+                "note": note,
+                "text_preview": self._display_message_text(raw.get("text_preview"), 180),
+                "scheduled_ts": self._float(raw.get("scheduled_ts")),
+                "scheduled": self.plugin._format_timestamp_elapsed(raw.get("scheduled_ts", 0)),
+                "created_ts": self._float(raw.get("created_ts")),
+                "created": self.plugin._format_timestamp_elapsed(raw.get("created_ts", 0)),
+                "updated_ts": updated_ts,
+                "updated": self.plugin._format_timestamp_elapsed(raw.get("updated_ts", 0)),
+                "candidate_id": self._single_line(raw.get("candidate_id"), 40),
+                "has_image": bool(self._single_line(raw.get("image_path"), 260)),
+                "extra_count": self._int(raw.get("extra_count")),
+                "duplicate_count": max(1, self._int(raw.get("duplicate_count"))),
+            }
+            seen_audit_signatures[signature] = item
+            audit_items.append(item)
         audit_items.sort(key=lambda item: self._float(item.get("updated_ts") or item.get("created_ts")), reverse=True)
         runtime = data.get("proactive_runtime") if isinstance(data.get("proactive_runtime"), dict) else {}
         last_tick_started = self._float(runtime.get("last_tick_started_at")) if runtime else 0
@@ -6630,6 +6861,15 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         diaries = data.get("bot_diaries") if isinstance(data.get("bot_diaries"), list) else []
         fragments = data.get("dream_fragments") if isinstance(data.get("dream_fragments"), list) else []
         plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), dict) else {}
+        try:
+            live_plan = self.plugin.data.get("daily_plan") if isinstance(self.plugin.data.get("daily_plan"), dict) else {}
+            if live_plan and self.plugin._sanitize_daily_plan_inplace(live_plan):
+                self.plugin._refresh_daily_state_location_from_plan(plan=live_plan)
+                self.plugin._save_data_sync()
+                plan = deepcopy(live_plan)
+                data["daily_plan"] = plan
+        except Exception:
+            pass
         story = data.get("daily_story_plan") if isinstance(data.get("daily_story_plan"), dict) else {}
         current_item = {}
         try:

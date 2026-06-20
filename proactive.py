@@ -671,14 +671,25 @@ class ProactiveMixin:
         daily_limit = self._effective_user_daily_limit(user)
         if daily_limit <= 1 or sent_today <= 0:
             return None
+        ignored_streak = _safe_int(user.get("ignored_streak"), 0)
+        if ignored_streak >= 4:
+            return (36.0, 60.0)
+        if ignored_streak >= 3:
+            return (20.0, 36.0)
+        if ignored_streak >= 2:
+            return (12.0, 24.0)
         minute = now_dt.hour * 60 + now_dt.minute
         if sent_today <= 1:
+            if ignored_streak >= 1:
+                return (8.0, 14.0)
             if minute < 14 * 60:
                 return self._delay_hours_until_local_window(now_dt, 14 * 60, 17 * 60)
             if minute < 18 * 60:
                 return self._delay_hours_until_local_window(now_dt, 19 * 60, 21 * 60 + 20)
             return (6.0, 11.0)
         if sent_today <= 2 and daily_limit >= 3:
+            if ignored_streak >= 1:
+                return (10.0, 18.0)
             if minute < 18 * 60 + 30:
                 return self._delay_hours_until_local_window(now_dt, 18 * 60 + 40, 21 * 60 + 20)
             return (8.0, 14.0)
@@ -948,6 +959,15 @@ class ProactiveMixin:
         sent_today = _safe_int(user.get("sent_today"), 0)
         if daily_limit <= 1 or sent_today <= 0:
             return False
+        ignored_streak = _safe_int(user.get("ignored_streak"), 0)
+        if ignored_streak >= 2:
+            last_sent = _safe_float(user.get("last_sent"), 0)
+            if last_sent > 0 and scheduled_at - last_sent < 12 * 3600:
+                return True
+        if ignored_streak >= 3:
+            last_sent = _safe_float(user.get("last_sent"), 0)
+            if last_sent > 0 and scheduled_at - last_sent < 20 * 3600:
+                return True
         now_dt = self._environment_now()
         scheduled_dt = self._environment_fromtimestamp(scheduled_at)
         if scheduled_dt.date() != now_dt.date():

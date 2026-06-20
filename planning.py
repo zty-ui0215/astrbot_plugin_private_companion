@@ -194,6 +194,16 @@ def normalize_presence_status(raw: Any) -> dict[str, str]:
 def normalize_story_plan(plugin, payload: dict[str, Any]) -> dict[str, Any]:
     today_events = plugin._normalize_story_items(payload.get("today_events"), "event")
     proactive_events = plugin._normalize_story_items(payload.get("proactive_events"), "topic")
+    social_fact_sanitizer = getattr(plugin, "_sanitize_daily_plan_social_fact_text", None)
+    if callable(social_fact_sanitizer):
+        for item in today_events:
+            if isinstance(item, dict):
+                item["event"] = social_fact_sanitizer(item.get("event"), field="detail.today_events.event")
+        for item in proactive_events:
+            if not isinstance(item, dict):
+                continue
+            for key in ("topic", "why", "motive", "scene", "impulse"):
+                item[key] = social_fact_sanitizer(item.get(key), field=f"detail.proactive_events.{key}")
     long_term_events = plugin._normalize_long_term_events(payload.get("long_term_events"))
     long_term_events.extend(plugin._generate_state_linked_long_term_events())
     long_term_events = plugin._dedupe_long_term_events(long_term_events)
@@ -242,8 +252,14 @@ def normalize_story_plan(plugin, payload: dict[str, Any]) -> dict[str, Any]:
             item["chain"] = []
         normalized_proactive.append(item)
     normalized_proactive = plugin._balance_proactive_events_for_day(normalized_proactive, limit=10)
+    summary = _single_line(payload.get("summary"), 160) or "这一段按原日程慢慢推进。"
+    if callable(social_fact_sanitizer):
+        summary = social_fact_sanitizer(summary, field="detail.summary")
     return {
         "date": _today_key(),
+        "summary": summary,
+        "state_variables": normalize_state_variables(payload.get("state_variables")),
+        "presence_status": normalize_presence_status(payload.get("presence_status")),
         "today_events": today_events[:8],
         "proactive_events": normalized_proactive,
         "long_term_events": long_term_events[:3],
@@ -554,7 +570,8 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 9.1 同一天内不要多次使用同一种微动作或同一种小物件制造生活感。尤其避免反复写草稿纸、圆圈、小画、笔帽、杯沿、水光、窗外光线；这些只能偶尔出现一次,不能成为日程骨架。
 10. 一天要有轻微走向：早上怎么启动,白天被什么拖住或松开,晚上为什么收声。不要只是从困倦一路写到疲惫；让情绪有一点转折、回弹、压下去或被某个小瞬间照亮的过程。
 11. 风格要接近真实手写日程,允许平淡、磨蹭、无聊和“没发生什么”。不要把每一段都写成剧情高光；像“自然醒,赖床很久”“窝沙发上刷短视频”“收拾房间,整理书桌”“晚饭时帮忙摆碗筷”这种朴素安排,反而更可信。
-12. 至少安排 1-2 个不起眼但有意思的小意外/小惊喜,自然埋进 activity 或 message_seed：例如临时改计划、收到一条消息、路上遇见熟人、饮料多掉一瓶、宠物捣乱、天气突然转好、弄丢又找回小物件。不要让小意外喧宾夺主。
+12. 至少安排 1-2 个不起眼但有意思的小意外/小惊喜,自然埋进 activity 或 message_seed：例如临时改计划、收到一条普通消息、店员多给了吸管、路边小动物绕过去、饮料多掉一瓶、天气突然转好、弄丢又找回小物件。不要让小意外喧宾夺主。
+12.1 不要把小意外写成高确定性社交事实：除非输入材料明确给出,不要凭空写“遇见某个具体熟人/同学/朋友/老师”“约好下周一起做某事”“答应替用户带某样东西”“顺带给用户买饮品/食物”。可以写成“路过便利店看到某样东西,想起用户可能会吐槽/喜欢”,但不能写成已经替用户安排或承诺。
 13. 如果身份是学生,校园段要具体到“哪类课/哪件小事/哪种迟到或作业压力”；休息日也可以写作业、刷手机、追番、帮家里做点小事、出门买饮料这类生活段落。职场、旅行、研学、营地同理,写真实占用时间的事情,少写任何身份都能套用的通用动作。
 14. 至少让 3 个时间点自然带出和用户的关系伏笔：可以是想起对方、忍住没发、看到某物想吐槽给对方、睡前打开对话框又删掉、等对方回复。关系伏笔要轻,藏在 message_seed 或 activity 末尾,不要每次直说“想你”。
 15. 不是每一段都要涉及用户。没有关系伏笔的段落,message_seed 可以写成很短的普通吐槽或留空感的句子,例如“这段没什么想说的”“先不吵你”“脑子空空的”。不要为了凑互动把所有事件都拐到用户身上。
@@ -566,6 +583,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 21. 每个日程段都应该是一小段连续生活,而不是一个瞬时动作。不要把“看一眼、拍一下、翻个身、关掉闹钟”这种几秒钟就结束的动作单独立成一项；如果写到它们,要把它们嵌进更完整的时段里。
 22. 如果多条参考信息冲突,优先服从日期语境和身份主线,再服从状态与天气,再服从今日互动偏移,最后才参考日记和可做事项。
 23. 日程指令只负责输出当日宏观日程：只生成今天从起床到睡前的 schedule 数组,不要输出任一时间段的细化叙述、更新后的角色状态、proactive_events、long_term_events、分析说明或明后天安排。
+23.1 每个日程段只描述今天这一段正在发生或刚发生的事,不要在 activity 里安排下周、明天、之后某日的具体约定；如需表达期待,只能写成轻量念头,不能写成已确认计划。
 24. 只输出 JSON,不要 Markdown,不要解释。
 
 格式：
@@ -682,6 +700,7 @@ def build_detail_enhancement_prompt(
 · 如果上一段或最近互动留下了影响,当前段要自然体现残留：收到消息后的回暖、没等到回复后的轻微失落、被用户打断后计划变慢、某句话在脑子里转了一会儿。没有互动就不要硬编。
 · 依据日期语境调整节奏：周末/节假日/假期不要写成普通工作日,除非设定里明确有补课、补班、值班、考试等例外。
 · 人际关系边界：不要凭空添加世界观、人格、日程设定、关系网、近期对话或用户输入里没提到的人际关系。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现时使用；没有依据时用“路人”“店员”“旁边的人”“群友”“别人”等弱关系,或只保留角色自己的行动。
+· 社交事实边界：不要在 today_events、summary、proactive_events 里凭空写“遇见某个具体人/熟人”“和别人约好下周/改天一起做某事”“替用户买好或带回某样东西”。可以写成看到某物想起用户、想问用户要不要、或把这件小事当作普通分享,但不能把未发生的承诺写成既定事实。
 · 温柔或内敛的人设可以烦躁,但要写成收着的动作和微小摩擦；不要写想砸、想摔、想打人、报复、毁掉这类破坏性或攻击性冲动。
 · 消极状态不能滚雪球式升级。最近日记和拟人状态只提供余波,当前段需要给出一点自然回稳、压下去、被接住或转移注意的可能。
 · 用第三人称旁观：today_events 和 why/scene 都像在看这个人过日子,不是角色自己写日记。
@@ -751,11 +770,10 @@ def build_detail_enhancement_prompt(
 下一段：{plugin._format_plan_item_for_prompt(next_item) if isinstance(next_item, dict) else '（无）'}
 衔接要求：当前段要承接上一段的身体余味、情绪惯性或未收住的小动作,同时自然滑向下一段；不要像三个互不相干的短剧。可以让上一段只留下很淡的影响,但不要忽略时间推进。
 
-【拟人状态】
 {plugin._format_state_for_prompt(state)}
 
-【状态走向摘要】
-{plugin._format_state_transition_overview(state)}
+【状态延续感】
+{plugin._format_state_continuity_for_prompt(state)}
 
 【今日互动造成的日程偏移】
 {schedule_adjustments}

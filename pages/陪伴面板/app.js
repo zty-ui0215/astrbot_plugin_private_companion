@@ -42,7 +42,13 @@ const state = {
 const hiddenCompatibilityConfigKeys = new Set([
   "enable_semantic_message_debounce",
   "semantic_message_debounce_seconds",
+  "skill_growth_passive_injection",
+  "skill_growth_custom_skills",
 ]);
+
+const featureSwitchNotes = {
+  enable_skill_growth_simulation: "自定义技能不在这里填写，请到观察页的“技能成长”卡片新增、隐藏、冻结成长或合并别名。",
+};
 
 const providerLabels = {
   LLM_PROVIDER_ID: "主模型",
@@ -109,6 +115,9 @@ function normalizeFeatureDraft(features = {}) {
 
 function featureDraftFromOverview(overview = {}) {
   const draft = normalizeFeatureDraft(overview.features || {});
+  hiddenCompatibilityConfigKeys.forEach((key) => {
+    delete draft[key];
+  });
   const settings = overview.settings || {};
   const settingBackedFeatureKeys = [
     "enable_rest_reply_simulation",
@@ -329,11 +338,11 @@ const featureMeta = {
   enable_dialogue_episode_memory: ["私聊片段", "把连续对话整理成共同经历和可续话头。"],
   enable_open_loop_tracking: ["未完话头", "记录用户提到的待办、约定、之后再说的事。"],
   enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么，用于日程细化和主动理解。"],
-  enable_humanized_states: ["拟人身体状态", "生成睡眠、梦境、健康、饥饿和周期等连续状态，影响日程、主动消息和被动回复。"],
+  enable_humanized_states: ["拟人身体状态", "生成精力、睡眠、梦境、健康、饥饿和周期等扮演状态，影响日程、主动消息和被动语气。"],
   enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
-  inject_passive_states: ["被动状态注入", "普通聊天前把当前拟人状态注入提示词，让被动回复也受状态影响。"],
-  enable_cycle_state: ["生理周期模拟", "允许符合人格的人类角色出现周期前、周期中和恢复期状态。"],
-  enable_skill_growth_simulation: ["技能成长", "技能等级与能力边界。"],
+  inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
+  enable_cycle_state: ["生理期模拟", "在人格适合人类身体设定时，允许当前扮演状态偶尔加入生理期前、处于生理期或生理期后的状态。"],
+  enable_skill_growth_simulation: ["技能成长", "能力状态与边界；自定义技能请到观察页的技能成长卡片管理。"],
   enable_message_debounce: ["消息收口防抖", "把文本、图片、转发后的补充说明合并进同一轮；旧版语义收口等待已并入文本补话等待。"],
   enable_smart_message_debounce: ["智能文本收口", "先本地快判完整文本，只在疑似没说完时短时调用小模型。"],
   enable_recall_enhancement: ["撤回增强", "感知撤回事件，支持发送前取消回复、短期防撤回转述和违禁词自动撤回。"],
@@ -565,7 +574,10 @@ const embeddedFeatureParentByKey = {
 const embeddedFeatureKeys = new Set(Object.keys(embeddedFeatureParentByKey));
 
 function visibleFeatureSwitchKey(key) {
+  if (hiddenCompatibilityConfigKeys.has(key)) return false;
   const detailSettingKeys = new Set(Object.values(featureSettingGroups || {}).flat());
+  const groupedFeatureKeys = new Set(featureGroups.flatMap((group) => group.keys));
+  if (detailSettingKeys.has(key) && !groupedFeatureKeys.has(key)) return false;
   const looksLikeFeatureToggle = key.startsWith("enable_") || key === "creative_hidden_mode" || key === "group_repeat_count_distinct_users_only";
   return visibleConfigKey(key) && !embeddedFeatureKeys.has(key) && (looksLikeFeatureToggle || !detailSettingKeys.has(key));
 }
@@ -721,7 +733,7 @@ const configLabels = {
   rest_reply_probability: "休息中概率回复(%)",
   rest_reply_llm_threshold: "模型醒来阈值",
   REST_WAKEUP_PROVIDER_ID: "休息醒来判断模型",
-  enable_cycle_state: "生理周期模拟",
+  enable_cycle_state: "生理期模拟",
   worldview_adaptation_mode: "世界观适配模式",
   worldview_adaptation_prompt: "自定义世界观适配",
   enable_worldview_perception: "世界观适配感知",
@@ -796,7 +808,8 @@ const configLabels = {
   user_habit_max_items: "习惯条目上限",
   skill_growth_rate: "技能成长倍率",
   skill_growth_custom_skills: "自定义技能",
-  enable_skill_growth_schedule_influence: "技能影响日程",
+  enable_skill_growth_passive_injection: "被动回复技能认知",
+  enable_skill_growth_schedule_influence: "能力状态影响日程",
   skill_growth_schedule_influence_strength: "日程影响强度",
   bilibili_boredom_min_interval_hours: "B 站触发间隔",
   bilibili_share_probability: "视频分享概率",
@@ -870,15 +883,15 @@ const configDescriptions = {
   schedule_persona_prompt: "给陪伴插件的日程、状态、主动行为、识图和创作提供角色补充；不会覆盖 AstrBot 主人格。",
   schedule_worldview_prompt: "给陪伴插件判断生活背景和世界规则，适合写所在世界、日常规则、居住/学校/城市环境和与用户的生活关系。",
   roleplay_user_profile_prompt: "描述角色如何称呼用户、用户身份、彼此关系和相处方式；不会作为图片自我识别的外观线索。",
-  humanized_state_intensity: "控制失眠、生病、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
+  humanized_state_intensity: "控制睡眠不佳、健康、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
   enable_humanized_states: "总开关。关闭后不再生成拟人身体/梦境状态，只保留基础平稳状态。",
-  inject_passive_states: "开启后普通聊天也会吃到当前拟人状态；关闭后状态主要影响日程和主动行为。",
+  inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
   enable_rest_reply_simulation: "开启后，日程处于睡眠、午休或休息段时，普通被动回复会先经过休息闸门；未放行时静默不回复。",
   rest_reply_mode: "仅概率醒来只按概率放行；模型判断会让模型按消息重要性、是否明确叫醒、情绪/安全需要等打分。",
   rest_reply_probability: "仅概率醒来模式使用。越低越不容易在睡眠/休息中被普通消息叫醒。",
   rest_reply_llm_threshold: "模型判断模式使用。模型输出 0-100 分，达到该阈值才醒来回复；建议 60-75。",
   REST_WAKEUP_PROVIDER_ID: "可选。用于休息醒来判断的轻量模型；留空时优先使用回复审校模型，再回退主模型。",
-  enable_cycle_state: "开启后，且人格适合人类身体设定时，才允许出现周期相关状态；非人类人格会自动判定不适用。",
+  enable_cycle_state: "开启后，只有人格适合人类身体设定时，才可能在“当前扮演状态”里出现生理期相关状态；它只影响语气、精力和回复节奏，不是医学记录或真实日期追踪。非适用人格会自动判定不适用。",
   environment_perception_timezone: "用于判断当前时段、日期语境、节假日和日程跨日。默认 Asia/Shanghai。",
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
   enable_holiday_perception: "开启后会把节假日、调休和工作日判断注入环境感知。",
@@ -1022,8 +1035,9 @@ const configDescriptions = {
   user_habit_max_items: "每个私聊对象最多保留多少条行为习惯模式。",
   skill_growth_rate: "技能经验增长倍率。1 为默认速度，越高升级越快。",
   skill_growth_custom_skills: "手动补充技能名，可用逗号、换行或 JSON 列表表达。",
-  enable_skill_growth_schedule_influence: "开启后技能等级会约束日程表现，例如高等级物理不再被常规物理题难住。",
-  skill_growth_schedule_influence_strength: "技能等级影响日程生成的强度，0 表示只记录不约束。",
+  enable_skill_growth_passive_injection: "开启后普通聊天会注入 Bot 当前能力状态和自我认知。默认关闭；关闭时技能成长仍会结算，并可继续影响日程和能力边界。",
+  enable_skill_growth_schedule_influence: "开启后能力状态会约束日程表现，例如已经顺手的物理不再被常规物理题难住。",
+  skill_growth_schedule_influence_strength: "能力状态影响日程生成的强度，0 表示只记录不约束。",
   bilibili_boredom_min_interval_hours: "Bot 无聊刷 B 站的最小间隔。",
   bilibili_share_probability: "看完视频后主动分享给用户的概率，0-1。",
   bilibili_share_min_score: "视频评分达到多少才考虑分享。",
@@ -1142,7 +1156,7 @@ const featureSettingGroups = {
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity"],
   enable_cycle_state: ["humanized_state_intensity"],
-  enable_skill_growth_simulation: ["skill_growth_rate", "skill_growth_custom_skills", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
+  enable_skill_growth_simulation: ["skill_growth_rate", "enable_skill_growth_passive_injection", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
   enable_message_debounce: ["inbound_message_debounce_seconds", "text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds", "enable_smart_message_debounce", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "smart_message_debounce_model_timeout_seconds", "smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds", "smart_message_debounce_examples_limit"],
   enable_recall_enhancement: ["enable_recall_cancel_reply", "enable_recall_message_cache", "enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items", "enable_forbidden_word_recall", "recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_recall_cancel_reply: ["recall_message_cache_ttl_seconds"],
@@ -1895,12 +1909,13 @@ function renderStats() {
   const dailyLimit = Number(budget.limit || 0);
   const featureKeys = visibleTopLevelFeatureKeys(overview.features || {});
   const enabledFeatures = featureKeys.filter((key) => overview.features?.[key]).length;
-  const energy = Number(daily.energy || 0);
-  const mood = daily.mood_bias || daily.note || "暂无状态";
+  const energyLabel = roleplayEnergyLabel(daily.energy);
+  const energyNumber = daily.energy === undefined || daily.energy === "" ? "" : `${formatNumber(Number(daily.energy || 0))}/100`;
+  const mood = normalizeRoleplayStateText(daily.mood_bias) || daily.note || "暂无状态";
   $("#stats").innerHTML = [
     statCard(`私聊 ${privateInfo.enabled_user_count || 0} · 群聊 ${groupInfo.enabled_group_count || 0}`, `总数：对象 ${privateInfo.user_count || 0} · 群聊 ${groupInfo.group_count || 0}`),
     statCard(dailyLimit > 0 ? `${formatCompactNumber(dailyUsed)} / ${formatCompactNumber(dailyLimit)}` : `${formatCompactNumber(dailyUsed)} / 不限`, "今日 Token 消耗 / 上限"),
-    statCard(energy ? `${energy}/100` : "-", `心理能量 · ${mood}`),
+    statCard(energyLabel || "-", `心理能量${energyNumber ? ` ${energyNumber}` : ""} · ${mood}`),
     statCard(`${enabledFeatures}/${featureKeys.length}`, "开启主开关 / 主开关总数"),
   ].join("");
 }
@@ -2520,6 +2535,12 @@ function troubleshootingChainTestMarkup(results) {
       title: "主动消息",
       text: "预约 1 分钟后的临时主动私聊，检查生成、复核、发送和历史归档",
       button: "测试主动消息",
+    },
+    {
+      type: "skill_similarity",
+      title: "技能相似项",
+      text: "先本地筛出疑似重复/别名冲突，再调用模型复核；只给建议，不自动修改",
+      button: "检查相似技能",
     },
   ];
   return tests.map((test) => {
@@ -4644,7 +4665,7 @@ function renderMemory() {
   renderStatePillBoard(daily);
   renderDiaryCards(life.diaries || []);
   renderDreamFragments(life.dream_fragments || []);
-  renderDl("#dailyState", daily);
+  renderDl("#dailyState", normalizeDailyStateForDisplay(daily));
   renderDailyTimeline();
   renderSkillGrowth();
   renderInteractionImpact();
@@ -4668,71 +4689,119 @@ function renderSkillGrowth() {
   panel.innerHTML = `
     <div class="skill-growth-head">
       <span>${escapeHtml(growth.skill_count || items.length)} 项技能</span>
+      ${growth.hidden_count ? `<span>隐藏 ${escapeHtml(growth.hidden_count)}</span>` : ""}
+      ${growth.frozen_count ? `<span>冻结 ${escapeHtml(growth.frozen_count)}</span>` : ""}
       <span>成长倍率 ${escapeHtml(growth.rate || 1)}</span>
       <span>${growth.schedule_influence ? `影响日程 ${escapeHtml(growth.schedule_influence_strength ?? "-")}` : "不影响日程"}</span>
       <span>更新 ${escapeHtml(growth.updated || "-")}</span>
     </div>
-    <div class="skill-growth-grid">
-      ${items.map((item) => {
-        const logs = Array.isArray(item.recent_logs) ? item.recent_logs : [];
-        return `
-          <article class="skill-card is-collapsed">
-            <button type="button" class="skill-card-toggle" data-skill-toggle aria-expanded="false">
-              <header>
-                <div>
-                  <span>${escapeHtml(item.category || "能力")}</span>
-                  <h3>${escapeHtml(item.name || "未命名技能")}</h3>
-                </div>
-                <b>Lv.${escapeHtml(item.level || 1)}</b>
-              </header>
-            </button>
-            <div class="skill-level-line">
-              <span>${escapeHtml(item.level_title || "")}</span>
-              <small>${escapeHtml(item.next_exp ? `${item.exp}/${item.next_exp}` : `${item.exp}`)}</small>
-            </div>
-            <div class="skill-meter"><i style="width:${escapeHtml(item.progress || 0)}%"></i></div>
-            <div class="skill-card-body">
-              <p>${escapeHtml(item.description || "")}</p>
-              <div class="skill-meta">
-                <span>训练 ${escapeHtml(item.training_count || 0)} 次</span>
-                <span>最近 ${escapeHtml(item.last_trained || "未训练")}</span>
-              </div>
-              ${logs.length ? `
-                <div class="skill-log">
-                  ${logs.slice().reverse().map((log) => `
-                    <p><b>${escapeHtml(log.level_up ? "升级" : `+${log.exp || 0}`)}</b><span>${escapeHtml(log.activity || "日程练习")}</span><small>${escapeHtml(log.time || "")}</small></p>
-                  `).join("")}
-                </div>
-              ` : ""}
-              <details class="skill-editor">
-                <summary>管理</summary>
-                <div class="skill-editor-grid">
-                  <label>名称 <input data-skill-name="${escapeHtml(item.id || "")}" value="${escapeHtml(item.name || "")}" maxlength="32" /></label>
-                  <label>分类 <input data-skill-category="${escapeHtml(item.id || "")}" value="${escapeHtml(item.category || "")}" maxlength="20" /></label>
-                  <label>等级
-                    <select data-skill-level="${escapeHtml(item.id || "")}">
-                      ${[1, 2, 3, 4, 5, 6].map((level) => `<option value="${level}" ${Number(item.level || 1) === level ? "selected" : ""}>Lv.${level}</option>`).join("")}
-                    </select>
-                  </label>
-                  <label>经验 <input data-skill-exp="${escapeHtml(item.id || "")}" type="number" min="0" step="1" value="${escapeHtml(item.exp || 0)}" /></label>
-                  <label class="wide-field">关键词 <input data-skill-keywords="${escapeHtml(item.id || "")}" value="${escapeHtml((item.keywords || []).join(", "))}" maxlength="180" /></label>
-                </div>
-                <div class="skill-editor-actions">
-                  <button type="button" data-skill-save="${escapeHtml(item.id || "")}">保存技能</button>
-                  <button type="button" class="danger-outline" data-skill-delete="${escapeHtml(item.id || "")}">删除</button>
-                </div>
-              </details>
-            </div>
-          </article>
-        `;
-      }).join("")}
+    <div class="skill-category-list">
+      ${renderSkillCategoryGroups(items)}
     </div>
   `;
   bindSkillGrowthActions();
 }
 
+function renderSkillCategoryGroups(items) {
+  const groups = new Map();
+  items.forEach((item) => {
+    const category = String(item.category || "能力").trim() || "能力";
+    if (!groups.has(category)) groups.set(category, []);
+    groups.get(category).push(item);
+  });
+  return Array.from(groups.entries()).map(([category, groupItems]) => {
+    const maxItem = groupItems.reduce((best, item) => Number(item.level || 1) > Number(best.level || 1) ? item : best, groupItems[0]);
+    const totalTraining = groupItems.reduce((sum, item) => sum + Number(item.training_count || 0), 0);
+    const hiddenCount = groupItems.filter((item) => item.hidden).length;
+    const frozenCount = groupItems.filter((item) => item.frozen).length;
+    return `
+      <details class="skill-category-group ${escapeHtml(categorySlug(category))}">
+        <summary>
+          <span>${escapeHtml(category)}</span>
+          <small>${escapeHtml(groupItems.length)} 项｜最好 ${escapeHtml(maxItem?.level_title || "能力状态")}｜训练 ${escapeHtml(totalTraining)} 次${hiddenCount ? `｜隐藏 ${escapeHtml(hiddenCount)}` : ""}${frozenCount ? `｜冻结 ${escapeHtml(frozenCount)}` : ""}</small>
+        </summary>
+        <div class="skill-growth-grid">
+          ${groupItems.map(renderSkillCard).join("")}
+        </div>
+      </details>
+    `;
+  }).join("");
+}
+
+function renderSkillCard(item) {
+  const logs = Array.isArray(item.recent_logs) ? item.recent_logs : [];
+  const badges = [
+    item.hidden ? "已隐藏" : "",
+    item.frozen ? "已冻结" : "",
+  ].filter(Boolean);
+  return `
+    <article class="skill-card is-collapsed ${item.hidden ? "is-hidden-skill" : ""} ${item.frozen ? "is-frozen-skill" : ""}">
+      <button type="button" class="skill-card-toggle" data-skill-toggle aria-expanded="false">
+        <header>
+          <div>
+            <span>${escapeHtml(item.category || "能力")}</span>
+            <h3>${escapeHtml(item.name || "未命名技能")}</h3>
+          </div>
+          <b>${escapeHtml(item.level_title || "能力状态")}</b>
+        </header>
+      </button>
+      <div class="skill-level-line">
+        <span>${badges.length ? badges.map((badge) => `<em>${escapeHtml(badge)}</em>`).join("") : "能力状态"}</span>
+        <small>${escapeHtml(item.next_exp ? `${item.exp}/${item.next_exp}` : `${item.exp}`)}</small>
+      </div>
+      <div class="skill-meter"><i style="width:${escapeHtml(item.progress || 0)}%"></i></div>
+      <div class="skill-card-body">
+        <p>${escapeHtml(item.description || "")}</p>
+        <div class="skill-meta">
+          <span>训练 ${escapeHtml(item.training_count || 0)} 次</span>
+          <span>最近 ${escapeHtml(item.last_trained || "未训练")}</span>
+        </div>
+        ${logs.length ? `
+          <div class="skill-log">
+            ${logs.slice().reverse().map((log) => `
+              <p><b>${escapeHtml(log.level_up ? "升级" : `+${log.exp || 0}`)}</b><span>${escapeHtml(log.activity || "日程练习")}</span><small>${escapeHtml(log.time || "")}</small></p>
+            `).join("")}
+          </div>
+        ` : ""}
+        <details class="skill-editor">
+          <summary>管理</summary>
+          <div class="skill-editor-grid">
+            <label>名称 <input data-skill-name="${escapeHtml(item.id || "")}" value="${escapeHtml(item.name || "")}" maxlength="32" /></label>
+            <label>分类 <input data-skill-category="${escapeHtml(item.id || "")}" value="${escapeHtml(item.category || "")}" maxlength="20" /></label>
+            <label>等级
+              <select data-skill-level="${escapeHtml(item.id || "")}">
+                ${[1, 2, 3, 4, 5, 6].map((level) => `<option value="${level}" ${Number(item.level || 1) === level ? "selected" : ""}>${escapeHtml(skillLevelLabel(level))}</option>`).join("")}
+              </select>
+            </label>
+            <label>经验 <input data-skill-exp="${escapeHtml(item.id || "")}" type="number" min="0" step="1" value="${escapeHtml(item.exp || 0)}" /></label>
+            <label class="wide-field">关键词 <input data-skill-keywords="${escapeHtml(item.id || "")}" value="${escapeHtml((item.keywords || []).join(", "))}" maxlength="180" /></label>
+            <label class="wide-field">合并别名 <input data-skill-aliases="${escapeHtml(item.id || "")}" value="${escapeHtml((item.aliases || []).join(", "))}" maxlength="180" placeholder="同义叫法会合并到这项技能" /></label>
+            <label class="check-field"><input data-skill-hidden="${escapeHtml(item.id || "")}" type="checkbox" ${item.hidden ? "checked" : ""} /> 隐藏：不参与日程、注入和自动成长</label>
+            <label class="check-field"><input data-skill-frozen="${escapeHtml(item.id || "")}" type="checkbox" ${item.frozen ? "checked" : ""} /> 冻结成长：保留能力状态，但不再自动加经验</label>
+          </div>
+          <div class="skill-editor-actions">
+            <button type="button" data-skill-save="${escapeHtml(item.id || "")}">保存技能</button>
+            <button type="button" class="danger-outline" data-skill-delete="${escapeHtml(item.id || "")}">删除</button>
+          </div>
+        </details>
+      </div>
+    </article>
+  `;
+}
+
 function skillExpFloor(level) {
   return { 1: 0, 2: 100, 3: 260, 4: 520, 5: 900, 6: 1400 }[Number(level || 1)] || 0;
+}
+
+function skillLevelLabel(level) {
+  return {
+    1: "还不太熟",
+    2: "能慢慢试",
+    3: "能自己做",
+    4: "已经顺手",
+    5: "很拿手",
+    6: "有自己的办法",
+  }[Number(level || 1)] || "能力状态";
 }
 
 function skillField(id, field) {
@@ -4767,6 +4836,9 @@ function bindSkillGrowthActions() {
         level: Number(skillField(id, "level")?.value || 1),
         exp: Number(skillField(id, "exp")?.value || 0),
         keywords: skillField(id, "keywords")?.value || "",
+        aliases: skillField(id, "aliases")?.value || "",
+        hidden: Boolean(skillField(id, "hidden")?.checked),
+        frozen: Boolean(skillField(id, "frozen")?.checked),
       }), "已保存技能", button);
     });
   });
@@ -4782,9 +4854,12 @@ function bindSkillGrowthActions() {
 function renderLifeHero(daily, life) {
   const energy = Number(daily.energy || 0);
   const pct = Math.max(0, Math.min(100, energy));
-  $("#lifeEnergy").textContent = daily.energy === undefined || daily.energy === "" ? "--" : `${formatNumber(energy)}`;
+  const energyText = roleplayEnergyLabel(daily.energy);
+  $("#lifeEnergy").textContent = energyText || "--";
+  $("#lifeEnergy").title = daily.energy === undefined || daily.energy === "" ? "" : `心理能量 ${formatNumber(energy)}/100`;
   $("#lifeEnergyBar").style.width = `${pct}%`;
-  $("#lifeMood").textContent = daily.mood_bias || "平稳";
+  $("#lifeEnergyBar").title = daily.energy === undefined || daily.energy === "" ? "" : `心理能量 ${formatNumber(energy)}/100`;
+  $("#lifeMood").textContent = normalizeRoleplayStateText(daily.mood_bias || "平稳");
   $("#lifeNote").textContent = daily.note || daily.sleep || "暂无额外备注";
   $("#lifeLocation").textContent = normalizeLocationText(daily.location);
   $("#lifeWeather").textContent = daily.weather || "暂无天气";
@@ -4793,10 +4868,44 @@ function renderLifeHero(daily, life) {
   $("#lifeCurrentSeed").textContent = [current.time, current.mood, current.message_seed].filter(Boolean).join(" · ") || "暂无细化";
 }
 
+function roleplayEnergyLabel(value) {
+  if (value === undefined || value === null || value === "") return "";
+  const energy = Number(value);
+  if (!Number.isFinite(energy)) return normalizeRoleplayStateText(value);
+  if (energy < 35) return "完全没精神";
+  if (energy < 55) return "提不起劲";
+  if (energy > 84) return "很精神";
+  if (energy > 70) return "精神还不错";
+  return "状态一般";
+}
+
 function normalizeLocationText(value) {
   const text = String(value || "").trim();
   if (!text || text === "地点感平稳" || text === "地点无明显变化") return "随当前日程变化";
   return text;
+}
+
+function normalizeRoleplayStateText(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const replacements = {
+    "黏人": "粘人",
+    "睡眠平稳": "睡得很踏实",
+    "饥饿感平稳": "无饥饿感",
+    "无明显周期影响": "不处于生理期",
+  };
+  return replacements[text] || text;
+}
+
+function normalizeDailyStateForDisplay(daily) {
+  if (!daily || typeof daily !== "object") return {};
+  const result = { ...daily };
+  ["mood_bias", "sleep", "hunger", "body_cycle"].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(result, key)) {
+      result[key] = normalizeRoleplayStateText(result[key]);
+    }
+  });
+  return result;
 }
 
 function renderDreamCard(dream) {
@@ -4824,9 +4933,9 @@ function renderStatePillBoard(daily) {
     ["梦境", daily.dream],
     ["健康", daily.health],
     ["饥饿", daily.hunger],
-    ["生理周期", daily.body_cycle],
-    ["天气", daily.weather],
-  ].filter(([, value]) => value !== undefined && value !== "");
+    ["生理期状态", daily.body_cycle],
+  ].map(([label, value]) => [label, normalizeRoleplayStateText(value)])
+    .filter(([, value]) => value !== undefined && value !== "");
   $("#statePillBoard").innerHTML = items.length
     ? items.map(([label, value]) => `
       <span>
@@ -5867,6 +5976,7 @@ function proactiveAuditHtml(items) {
       item.text_preview ? `消息：${item.text_preview}` : "",
       item.has_image ? "包含图片" : "",
       item.extra_count ? `组件 ${item.extra_count}` : "",
+      Number(item.duplicate_count || 0) > 1 ? `重复 ${item.duplicate_count} 次` : "",
       item.scheduled_ts ? `计划：${item.scheduled || "-"}` : "",
       item.created_ts ? `开始：${item.created || "-"}` : "",
       item.updated_ts ? `更新：${item.updated || "-"}` : "",
@@ -7679,7 +7789,7 @@ function renderFeatureSwitches() {
   if (embeddedFeatureParentByKey[state.selectedFeatureKey]) {
     state.selectedFeatureKey = embeddedFeatureParentByKey[state.selectedFeatureKey];
   }
-  if (state.selectedFeatureKey && !visibleConfigKey(state.selectedFeatureKey)) {
+  if (state.selectedFeatureKey && !visibleFeatureSwitchKey(state.selectedFeatureKey)) {
     state.selectedFeatureKey = "";
   }
   if (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft, state.selectedFeatureKey)) {
@@ -8063,9 +8173,9 @@ const featureDetailGuides = {
     disabled: "Bot 仍按当下聊天判断，不会积累时段习惯。",
   },
   enable_humanized_states: {
-    summary: "生成睡眠、清醒、疲惫、饥饿、健康、情绪底色等连续状态，让 Bot 像有自己的生活节奏。",
+    summary: "生成精力、睡眠、梦境、健康、饥饿和周期等当前扮演状态，让 Bot 像有自己的身体节奏。",
     trigger: "日程生成、状态刷新、主动消息和被动回复注入时。",
-    enabled: "当前状态会影响日程、语气、主动行为和可用生活片段。",
+    enabled: "当前扮演状态会影响日程、主动行为和被动回复的语气、长短、节奏。",
     disabled: "状态退化为较平稳的基础信息，拟人生活感会明显减少。",
   },
   enable_segmented_proactive_reply: {
@@ -8075,22 +8185,22 @@ const featureDetailGuides = {
     disabled: "符合场景的文本一次性发送完整内容。",
   },
   inject_passive_states: {
-    summary: "普通被动聊天也注入当前状态，让用户主动来聊时 Bot 能表现出刚睡醒、疲惫或正忙完的感觉。",
+    summary: "普通被动聊天也注入“当前扮演状态”，只作为回复底色使用。",
     trigger: "私聊或允许的群聊回复前。",
-    enabled: "回复会自然带上当前日程和状态余味。",
+    enabled: "回复会参考精力、情绪、睡眠、健康、饥饿、周期或叠加状态，但不汇报字段。",
     disabled: "状态主要影响主动行为，普通回复不一定体现状态。",
   },
   enable_cycle_state: {
-    summary: "在人设适合时模拟周期状态，并控制开始时间、持续天数和恢复节奏。",
-    trigger: "状态刷新和日程生成时。",
-    enabled: "符合人类身体设定的角色可能出现周期相关状态。",
-    disabled: "不会生成新的周期状态，已有异常状态会逐步回到普通身体状态。",
+    summary: "作为拟人身体状态的一部分，偶尔生成生理期前、处于生理期或生理期后的状态底色。",
+    trigger: "拟人身体状态刷新时，且人格适合人类身体设定。",
+    enabled: "当前扮演状态可能出现生理期相关描述，并轻微影响精力、语气、长短和节奏；不会当成真实日期或医学记录追踪。",
+    disabled: "不会新增生理期状态；已有状态会按持续时间自然结束，之后回到“不处于生理期”。",
   },
   enable_skill_growth_simulation: {
-    summary: "为 Bot 模拟技能等级和成长过程，并让能力边界影响日程表现。",
+    summary: "为 Bot 模拟能力状态和成长过程，并让能力边界影响日程表现。",
     trigger: "日程包含学习、练习、创作或兴趣活动后。",
     enabled: "技能会从低等级慢慢成长，高等级技能不会再写出明显不符合能力的日程。",
-    disabled: "技能页不再增长，日程不受技能等级约束。",
+    disabled: "技能页不再增长，日程不受能力状态约束。",
   },
   enable_message_debounce: {
     summary: "分别控制文本、图片和合并转发的补话等待；旧版语义收口等待已并入文本等待。",
@@ -8436,11 +8546,15 @@ function featureDetailExplanation(key) {
 
 function featureDetailGuideRows(key) {
   const guide = featureDetailGuides[key] || {};
-  return [
+  const rows = [
     ["何时生效", guide.trigger || "该功能对应场景触发时生效。"],
     ["开启后", guide.enabled || "相关能力会参与判断、注入或后台整理。"],
     ["关闭后", guide.disabled || "相关能力停止新增处理，已有数据通常仍可在页面查看。"],
   ];
+  if (featureSwitchNotes[key]) {
+    rows.push(["管理入口", featureSwitchNotes[key]]);
+  }
+  return rows;
 }
 
 function featureImpactLines(key) {
@@ -9873,6 +9987,9 @@ $("#skillAddForm").addEventListener("submit", async (event) => {
     level,
     exp: skillExpFloor(level),
     keywords: form.get("keywords") || name,
+    aliases: form.get("aliases") || "",
+    hidden: false,
+    frozen: false,
   }), "已添加技能", event.submitter);
   event.currentTarget.reset();
 });
