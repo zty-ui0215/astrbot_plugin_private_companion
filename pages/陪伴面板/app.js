@@ -64,6 +64,7 @@ const providerLabels = {
   RESPONSE_REVIEW_PROVIDER_ID: "主动消息润色",
   TROUBLESHOOTING_PROVIDER_ID: "排障检查",
   RELATIONSHIP_ANALYSIS_PROVIDER_ID: "关系站位分析",
+  EMOTION_JUDGEMENT_PROVIDER_ID: "情绪变化判断",
   COMPANION_MEMORY_PROVIDER_ID: "长期画像整理",
   DIALOGUE_EPISODE_PROVIDER_ID: "私聊片段整理",
   GROUP_INTERJECT_PROVIDER_ID: "群聊主动插话",
@@ -236,6 +237,11 @@ const providerGuides = {
     fit: "适合情绪和关系判断细腻、分类稳定、不会过度脑补的模型。",
     fallback: "留空时跟随陪伴通用模型。",
   },
+  EMOTION_JUDGEMENT_PROVIDER_ID: {
+    purpose: "可选复核用户消息是否会触发 Bot 自身短期情绪余波，只做分类判断，不生成回复。",
+    fit: "适合便宜、低延迟、JSON 稳定、对玩笑/反讽/第三方抱怨判断保守的小模型。",
+    fallback: "留空时先跟随排障检查模型，再回退到关系站位、陪伴通用和主模型。",
+  },
   COMPANION_MEMORY_PROVIDER_ID: {
     purpose: "把原始私聊记忆整理成用户画像、兴趣、边界、关系备注和说话习惯。",
     fit: "适合结构化抽取能力好、便宜、能区分事实和推测的模型。",
@@ -310,7 +316,7 @@ const providerGroups = [
     id: "memory",
     title: "记忆与关系",
     desc: "整理长期画像、对话片段和关系站位。",
-    keys: ["HISTORY_SUMMARY_PROVIDER_ID", "RELATIONSHIP_ANALYSIS_PROVIDER_ID", "COMPANION_MEMORY_PROVIDER_ID", "DIALOGUE_EPISODE_PROVIDER_ID"],
+    keys: ["HISTORY_SUMMARY_PROVIDER_ID", "RELATIONSHIP_ANALYSIS_PROVIDER_ID", "EMOTION_JUDGEMENT_PROVIDER_ID", "COMPANION_MEMORY_PROVIDER_ID", "DIALOGUE_EPISODE_PROVIDER_ID"],
   },
   {
     id: "group",
@@ -341,7 +347,7 @@ const featureMeta = {
   enable_llm_timer_scheduling: ["对话临时预约", "把聊天里自然形成的稍后提醒、叫醒、回头说等约定转写成 AstrBot 官方定时计划；插件本身不再单独调度。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
   enable_relationship_state_machine: ["关系距离感", "根据亲近、冷淡、边界和回应情况调整相处分寸。"],
-  enable_emotion_simulation: ["情绪模拟", "维护 Bot 自身的受伤、拒近、恢复和亲近余波。"],
+  enable_emotion_simulation: ["情绪模拟", "维护 Bot 自身被刺到、缓和、恢复和短暂回避的余波。"],
   enable_dialogue_episode_memory: ["私聊片段", "把连续对话整理成共同经历和可续话头。"],
   enable_open_loop_tracking: ["未完话头", "记住对话里还留着、之后可能会回头接的事。"],
   enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么；被动只在相关时理解，主动可到点关心。"],
@@ -451,7 +457,7 @@ const featureGroups = [
   },
   {
     title: "情绪模拟",
-    note: "Bot 自身短期情绪余波、受伤收敛和可选公开发泄行为。",
+    note: "Bot 自身短期情绪余波、收敛和可选公开心情动态。",
     keys: [
       "enable_emotion_simulation",
     ],
@@ -1195,14 +1201,16 @@ const configDescriptions = {
   atrelay_sensitive_confirm: "敏感、私密或带情绪的转述是否先向用户确认。",
   atrelay_default_relay_style: "默认转述方式：persona 按人格改写，soft 委婉，original 原话。",
   atrelay_multi_target_limit: "一次转述最多允许几个目标，防止刷屏。",
-  emotional_gate_hurt_threshold: "用户消息触发受伤状态的强度阈值。",
-  emotional_gate_refuse_threshold: "累计受伤分进入拒近状态的阈值。",
-  emotional_gate_recovery_per_hour: "受伤情绪每小时自然恢复多少分。",
-  emotional_gate_max_hurt_minutes: "单次受伤事件最长收敛/暂停主动的分钟数。",
-  enable_qzone_emotional_vent_publish: "极端情绪下是否允许低频发布公开心情说说。",
-  qzone_emotional_vent_threshold: "触发发泄说说所需的情绪分绝对值。",
-  qzone_emotional_vent_cooldown_hours: "两次发泄说说之间的最小间隔。",
-  qzone_emotional_vent_probability: "达到条件后实际尝试发泄说说的概率。",
+  emotional_gate_hurt_threshold: "用户消息让 Bot 伤心、短期变安静的触发阈值；应低于生气触发阈值。",
+  emotional_gate_refuse_threshold: "累计刺痛感让 Bot 生气、短暂回避的触发阈值；应高于伤心触发阈值。",
+  emotional_gate_recovery_per_hour: "情绪余波每小时自然缓和多少分。",
+  emotional_gate_max_hurt_minutes: "单次刺痛事件最长收敛/暂停主动的分钟数。",
+  enable_llm_emotion_judgement: "可选使用模型异步复核用户消息是否会改变 Bot 自身短期情绪余波；本轮被动回复仍使用缓存状态。",
+  emotion_judgement_mode: "模型复核范围：可疑项更省消耗，总是复核更细但更耗；结果主要影响后续轮次。",
+  enable_qzone_emotional_vent_publish: "短期余波很重时是否允许低频发布公开心情说说。",
+  qzone_emotional_vent_threshold: "触发公开心情动态所需的短期余波强度。",
+  qzone_emotional_vent_cooldown_hours: "两次公开心情动态之间的最小间隔。",
+  qzone_emotional_vent_probability: "达到条件后实际尝试公开心情动态的概率。",
 };
 
 const featureSettingGroups = {
@@ -1233,7 +1241,7 @@ const featureSettingGroups = {
   enable_response_self_review: ["response_review_mode", "response_review_max_chars"],
   enable_passive_topic_suppression: ["passive_topic_memory_hours"],
   enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
-  enable_emotion_simulation: ["emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
+  enable_emotion_simulation: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
   enable_dialogue_episode_memory: ["episode_memory_refresh_messages", "episode_memory_refresh_minutes", "max_dialogue_episodes"],
   enable_open_loop_tracking: ["max_dialogue_episodes"],
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
@@ -1365,7 +1373,7 @@ const featureSettingSections = {
     },
     {
       title: "关系与习惯",
-      note: "关系距离、未完话头和用户时段习惯。Bot 自身受伤余波在“情绪模拟”里配置。",
+      note: "关系距离、未完话头和用户时段习惯。Bot 自身短期余波在“情绪模拟”里配置。",
       keys: ["enable_relationship_state_machine", "proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours", "enable_open_loop_tracking", "enable_user_habit_learning", "user_habit_min_count", "user_habit_max_items"],
     },
   ],
@@ -1504,12 +1512,12 @@ const featureSettingSections = {
   ],
   enable_emotion_simulation: [
     {
-      title: "情绪闸门",
-      note: "控制受伤、拒近、恢复和主动收敛的阈值。",
-      keys: ["emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes"],
+      title: "情绪余波",
+      note: "控制被刺到后的收敛、缓和和主动暂停节奏。",
+      keys: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes"],
     },
     {
-      title: "极端发泄",
+      title: "公开心情动态",
       note: "默认关闭；仅主人可触发，且必须同时满足 QZone 可用、冷却、阈值和概率。",
       keys: ["enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
     },
@@ -1646,6 +1654,7 @@ const featureSettingTypes = {
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
   response_review_mode: { type: "select", options: [["severe_only", "主动高风险调用模型"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
+  emotion_judgement_mode: { type: "select", options: [["suspicious", "仅复核可疑项"], ["always", "总是复核普通文本"], ["off", "关闭复核"]] },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
   REST_WAKEUP_PROVIDER_ID: { type: "provider" },
@@ -3881,8 +3890,8 @@ function emotionGateBlock(detail) {
   const now = Math.floor(Date.now() / 1000);
   const remaining = hurtUntil > now ? `${Math.ceil((hurtUntil - now) / 60)} 分钟` : "无";
   const pairs = [
-    ["模式", mode],
-    ["情绪分", moodScore ? String(moodScore) : "0"],
+    ["状态", mode],
+    ["余波值", moodScore ? String(moodScore) : "0"],
     ["收敛轮数", rel.silence_turns || 0],
     ["剩余收敛", remaining],
     ["上次事件", rel.last_emotion_event || intent.emotion_event || "neutral"],
@@ -3893,8 +3902,8 @@ function emotionGateBlock(detail) {
     ["情绪置信度", rel.last_emotion_confidence ?? intent.emotion_confidence ?? "-"],
     ["原因", rel.last_emotion_reason || intent.emotion_reason || rel.last_hurt_reason || ""],
   ];
-  const preText = rel.last_hurt_text ? `最近触发文本：${rel.last_hurt_text}` : "";
-  return detailBlock("情绪闸门", preText, pairs);
+  const preText = rel.last_hurt_text ? `最近留下余波的话：${rel.last_hurt_text}` : "";
+  return detailBlock("情绪余波", preText, pairs);
 }
 
 function userHabitPairs(habits) {
@@ -8430,9 +8439,9 @@ const featureDetailGuides = {
     disabled: "关系更像静态设定，距离变化和边界收敛会弱一些。",
   },
   enable_emotion_simulation: {
-    summary: "维护 Bot 自身的短期情绪余波，例如受伤、拒近、恢复和正向亲近。",
+    summary: "维护 Bot 自身的短期情绪余波，例如被刺到后的收敛、慢慢缓和和不满时的短暂回避。",
     trigger: "私聊出现伤害性表达、道歉、安抚、夸奖或亲密互动后；不强依赖意图画像开关。",
-    enabled: "Bot 会在极端受伤时短期收敛、暂停主动贴近；可选启用 QQ 空间发泄说说。",
+    enabled: "Bot 会在情绪余波较重时短期收敛、暂停主动贴近；可选启用 QQ 空间公开心情动态。",
     disabled: "Bot 不维护自身情绪余波，关系距离感仍可处理边界和相处分寸。",
   },
   enable_dialogue_episode_memory: {
@@ -9296,6 +9305,9 @@ function resolveProviderId(key, values = currentProviderValues()) {
   if (values[key]) return values[key];
   if (noFallbackProviderKeys.has(key)) return "";
   if (key === "TROUBLESHOOTING_PROVIDER_ID" && values.RESPONSE_REVIEW_PROVIDER_ID) return values.RESPONSE_REVIEW_PROVIDER_ID;
+  if (key === "EMOTION_JUDGEMENT_PROVIDER_ID") {
+    return values.TROUBLESHOOTING_PROVIDER_ID || values.RELATIONSHIP_ANALYSIS_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
+  }
   if (key !== "LLM_PROVIDER_ID" && values.MAI_STYLE_PROVIDER_ID) return values.MAI_STYLE_PROVIDER_ID;
   return values.LLM_PROVIDER_ID || "";
 }

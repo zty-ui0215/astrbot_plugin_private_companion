@@ -275,6 +275,13 @@
     "default": "",
     "_special": "select_provider"
   },
+  "EMOTION_JUDGEMENT_PROVIDER_ID": {
+    "description": "情绪变化判断模型（留空自动回退）",
+    "type": "string",
+    "hint": "用于可选复核用户消息是否会触发 Bot 自身短期情绪余波。建议选择便宜、低延迟、分类保守的小模型；留空会先回退到排障检查模型，再回退到关系站位/陪伴通用/主模型。",
+    "default": "",
+    "_special": "select_provider"
+  },
   "COMPANION_MEMORY_PROVIDER_ID": {
     "description": "陪伴长期画像整理模型（留空跟随陪伴通用模型）",
     "type": "string",
@@ -1154,7 +1161,7 @@
   "enable_relationship_state_machine": {
     "description": "启用关系距离感",
     "type": "bool",
-    "hint": "根据用户的边界、亲近、冷淡、玩笑、长期互动和是否回应主动消息，调整 Bot 的距离感、主动频率和相处分寸。Bot 自身受伤/拒近等情绪余波由“情绪模拟”单独控制。",
+    "hint": "根据用户的边界、亲近、冷淡、玩笑、长期互动和是否回应主动消息，调整 Bot 的距离感、主动频率和相处分寸。Bot 自身被刺到后的短期余波由“情绪模拟”单独控制。",
     "default": true,
     "condition": {
       "enable_mai_style_integration": true
@@ -1163,16 +1170,34 @@
   "enable_emotion_simulation": {
     "description": "启用情绪模拟",
     "type": "bool",
-    "hint": "维护 Bot 自身的短期情绪余波，例如受伤、拒近、恢复和亲近状态。会影响普通回复和主动行为；公开发泄行为需另开子项。",
+    "hint": "维护 Bot 自身短期情绪余波，例如被刺到后的收敛、缓和后的恢复，以及不满时的短暂回避。只在非平稳状态影响回复和主动行为；公开心情动态需另开子项。",
     "default": true,
     "condition": {
       "enable_mai_style_integration": true
     }
   },
+  "enable_llm_emotion_judgement": {
+    "description": "启用模型复核情绪变化",
+    "type": "bool",
+    "hint": "开启后，本地快判会先记录；可疑边界、玩笑、道歉、安抚或负向表达会交给模型后台复核，再更新短期情绪余波。本轮被动回复不等待模型，仍使用缓存情绪状态，默认关闭以保持低延迟。",
+    "default": false,
+    "condition": {
+      "enable_emotion_simulation": true
+    }
+  },
+  "emotion_judgement_mode": {
+    "description": "模型复核范围",
+    "type": "string",
+    "hint": "suspicious 只复核容易误判或已命中情绪信号的消息；always 会复核所有普通文本消息。复核异步进行，结果主要影响后续回复和主动行为。",
+    "default": "suspicious",
+    "condition": {
+      "enable_llm_emotion_judgement": true
+    }
+  },
   "emotional_gate_hurt_threshold": {
-    "description": "受伤触发阈值",
+    "description": "伤心触发阈值",
     "type": "int",
-    "hint": "用户消息被判定为伤害性表达且强度达到该值时，Bot 会进入短期受伤/收敛状态。越高越不容易触发。",
+    "hint": "用户消息被判定为足够刺痛且达到该值时，Bot 会短期变得更安静、更收着。越高越不容易触发；应低于“生气触发阈值”。",
     "slider": {
       "min": 10,
       "max": 100,
@@ -1184,9 +1209,9 @@
     }
   },
   "emotional_gate_refuse_threshold": {
-    "description": "拒近触发阈值",
+    "description": "生气触发阈值",
     "type": "int",
-    "hint": "累计受伤分达到该值后，Bot 会进入更明显的拒近状态，回复更短并暂停主动贴近。",
+    "hint": "累计刺痛感达到该值后，Bot 会表现出更明显的不满和短暂回避。应高于“伤心触发阈值”；若配置过低，运行时会自动抬高。",
     "slider": {
       "min": 20,
       "max": 100,
@@ -1198,9 +1223,9 @@
     }
   },
   "emotional_gate_recovery_per_hour": {
-    "description": "情绪每小时恢复量",
+    "description": "每小时缓和量",
     "type": "int",
-    "hint": "受伤分会随时间自然回到 0；道歉、安抚、夸奖也会额外恢复。",
+    "hint": "情绪余波会随时间自然回到稳定；道歉、安抚、夸奖也会额外缓和。",
     "slider": {
       "min": 1,
       "max": 60,
@@ -1212,9 +1237,9 @@
     }
   },
   "emotional_gate_max_hurt_minutes": {
-    "description": "最长受伤收敛分钟",
+    "description": "最长收敛分钟",
     "type": "int",
-    "hint": "单次伤害事件造成的最长主动暂停/收敛时长。道歉或安抚可以提前恢复。",
+    "hint": "单次刺痛事件造成的最长主动暂停/收敛时长。道歉或安抚可以提前恢复。",
     "slider": {
       "min": 10,
       "max": 720,
@@ -1226,18 +1251,18 @@
     }
   },
   "enable_qzone_emotional_vent_publish": {
-    "description": "极端情绪发泄说说",
+    "description": "公开心情动态",
     "type": "bool",
-    "hint": "情绪分达到极端拒近状态时，可在 QQ 空间动态层可用且冷却通过的情况下低频发布一条模糊心情说说。默认关闭，避免未经确认公开发布。",
+    "hint": "短期余波很重时，可在 QQ 空间动态层可用且冷却通过的情况下低频发布一条模糊心情说说。默认关闭，避免未经确认公开发布。",
     "default": false,
     "condition": {
       "enable_emotion_simulation": true
     }
   },
   "qzone_emotional_vent_threshold": {
-    "description": "发泄说说情绪阈值",
+    "description": "心情动态触发阈值",
     "type": "int",
-    "hint": "情绪分绝对值达到该值后，才可能触发极端情绪发泄说说。",
+    "hint": "短期余波达到该值后，才可能触发公开心情动态。",
     "slider": {
       "min": 40,
       "max": 100,
@@ -1249,9 +1274,9 @@
     }
   },
   "qzone_emotional_vent_cooldown_hours": {
-    "description": "发泄说说冷却小时",
+    "description": "心情动态冷却小时",
     "type": "int",
-    "hint": "两次极端情绪发泄说说之间的最小间隔。",
+    "hint": "两次公开心情动态之间的最小间隔。",
     "slider": {
       "min": 4,
       "max": 336,
@@ -1263,7 +1288,7 @@
     }
   },
   "qzone_emotional_vent_probability": {
-    "description": "发泄说说触发概率",
+    "description": "心情动态触发概率",
     "type": "float",
     "hint": "达到极端情绪阈值并通过冷却后，实际尝试发布说说的概率。",
     "slider": {

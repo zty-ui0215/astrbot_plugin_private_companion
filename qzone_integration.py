@@ -990,7 +990,7 @@ class QzoneMixin(QzoneMediaMixin):
                 role = ""
             if role != "owner":
                 logger.info(
-                    "[PrivateCompanion] 情绪发泄说说跳过: user_role=%s score=%s",
+                    "[PrivateCompanion] 公开心情动态跳过: user_role=%s score=%s",
                     role or "friend",
                     mood_score,
                 )
@@ -1002,7 +1002,7 @@ class QzoneMixin(QzoneMediaMixin):
             state = self.data["qzone_integration"]
         cooldown = max(4, _safe_int(getattr(self, "qzone_emotional_vent_cooldown_hours", 72), 72, 4, 336)) * 3600
         if now - _safe_float(state.get("last_emotional_vent_at"), 0) < cooldown:
-            logger.info("[PrivateCompanion] 情绪发泄说说跳过: cooldown score=%s", mood_score)
+            logger.info("[PrivateCompanion] 公开心情动态跳过: cooldown score=%s", mood_score)
             return
         if now - _safe_float(state.get("last_emotional_vent_failed_at"), 0) < 15 * 60:
             return
@@ -1068,11 +1068,11 @@ class QzoneMixin(QzoneMediaMixin):
                 state["last_emotional_vent_at"] = now
                 state.pop("last_emotional_vent_failed_at", None)
                 state["last_emotional_vent_status"] = "published"
-                logger.info("[PrivateCompanion] 情绪发泄说说已发布: score=%s text=%s", mood_score, _single_line(result.get("text") or text, 120))
+                logger.info("[PrivateCompanion] 公开心情动态已发布: score=%s text=%s", mood_score, _single_line(result.get("text") or text, 120))
             else:
                 state["last_emotional_vent_failed_at"] = now
                 state["last_emotional_vent_status"] = f"failed:{_single_line(result.get('message'), 80)}"
-                logger.warning("[PrivateCompanion] 情绪发泄说说发布失败: %s", _single_line(result.get("message"), 120))
+                logger.warning("[PrivateCompanion] 公开心情动态发布失败: %s", _single_line(result.get("message"), 120))
             state["last_emotional_vent_checked_at"] = now
             state["last_emotional_vent_text"] = _single_line(result.get("text") or text, 180)
             state["last_emotional_vent_images"] = len(image_sources) if result.get("success") else 0
@@ -1082,5 +1082,5 @@ class QzoneMixin(QzoneMediaMixin):
             state["last_emotional_vent_status"] = f"failed:{_single_line(exc, 80)}"
             state["last_emotional_vent_checked_at"] = now
             self._save_data_sync()
-            logger.warning("[PrivateCompanion] 情绪发泄说说异常: %s", _single_line(exc, 160), exc_info=True)
+            logger.warning("[PrivateCompanion] 公开心情动态异常: %s", _single_line(exc, 160), exc_info=True)
 

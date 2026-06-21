@@ -396,7 +396,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.2.0",
+    "4.3.0",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -847,8 +847,14 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.enable_passive_topic_suppression = self._cfg_bool(c, "enable_passive_topic_suppression", True)
         self.enable_relationship_state_machine = self._cfg_bool(c, "enable_relationship_state_machine", True)
         self.enable_emotion_simulation = self._cfg_bool(c, "enable_emotion_simulation", True)
+        self.enable_llm_emotion_judgement = self._cfg_bool(c, "enable_llm_emotion_judgement", False)
+        self.emotion_judgement_mode = self._cfg_str(c, "emotion_judgement_mode", "suspicious", "suspicious").lower()
+        if self.emotion_judgement_mode not in {"suspicious", "always", "off"}:
+            self.emotion_judgement_mode = "suspicious"
         self.emotional_gate_hurt_threshold = self._cfg_int(c, "emotional_gate_hurt_threshold", 55, 10, 100)
         self.emotional_gate_refuse_threshold = self._cfg_int(c, "emotional_gate_refuse_threshold", 80, 20, 100)
+        if self.emotional_gate_refuse_threshold <= self.emotional_gate_hurt_threshold:
+            self.emotional_gate_refuse_threshold = min(100, self.emotional_gate_hurt_threshold + 5)
         self.emotional_gate_recovery_per_hour = self._cfg_int(c, "emotional_gate_recovery_per_hour", 12, 1, 60)
         self.emotional_gate_max_hurt_minutes = self._cfg_int(c, "emotional_gate_max_hurt_minutes", 180, 10, 720)
         self.enable_dialogue_episode_memory = self._cfg_bool(c, "enable_dialogue_episode_memory", True)
@@ -871,6 +877,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.relationship_analysis_provider_id = self._cfg_str(c, "RELATIONSHIP_ANALYSIS_PROVIDER_ID", "")
         self.response_review_provider_id = self._cfg_str(c, "RESPONSE_REVIEW_PROVIDER_ID", "")
         self.troubleshooting_provider_id = self._cfg_str(c, "TROUBLESHOOTING_PROVIDER_ID", "")
+        self.emotion_judgement_provider_id = self._cfg_str(c, "EMOTION_JUDGEMENT_PROVIDER_ID", "")
         self.response_review_max_chars = self._cfg_int(c, "response_review_max_chars", 260, 80, 900)
         self.passive_topic_memory_hours = self._cfg_int(c, "passive_topic_memory_hours", 8, 1, 72)
         self.episode_memory_refresh_messages = self._cfg_int(c, "episode_memory_refresh_messages", 8, 3, 40)
@@ -1463,11 +1470,20 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not chain:
             return
         changed = False
+        protected_tts_tokens = getattr(event, "_private_companion_tts_block_tokens", None)
+        preserve_private_tts_tokens = (
+            bool(getattr(self, "enable_tts_enhancement", False))
+            and isinstance(protected_tts_tokens, dict)
+            and bool(protected_tts_tokens)
+        )
         for comp in chain:
             if not isinstance(comp, Plain):
                 continue
             original = str(getattr(comp, "text", "") or "")
-            cleaned = _strip_outbound_control_blocks(original)
+            cleaned = _strip_outbound_control_blocks(
+                original,
+                preserve_private_tts_tokens=preserve_private_tts_tokens,
+            )
             if not bool(getattr(self, "enable_tts_enhancement", False)):
                 cleaned = re.sub(r"</?t{2,}s\b[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
             if cleaned != original:
@@ -1963,6 +1979,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     @filter.on_decorating_result()
     async def attach_group_reply_quote(self, event: AstrMessageEvent):
         """群聊回复发送前自动补引用，保持上下文对齐。"""
+        result = None
+        chain: list[Any] = []
         if not self.enabled:
             return
         if not bool(getattr(self, "enable_proactive_quote_trigger_message", False)):
@@ -1971,7 +1989,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             return
         if self._proactive_only_blocks_passive_event(event, "enable_group_companion"):
             return
-        result = event.get_result()
+        try:
+            result = event.get_result()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 群聊补引用读取结果失败: %s", _single_line(exc, 120))
+            return
         if result is None:
             return
         try:
@@ -1979,13 +2001,25 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 return
         except Exception:
             pass
-        chain = list(getattr(result, "chain", []) or [])
+        try:
+            chain = list(getattr(result, "chain", []) or [])
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 群聊补引用读取消息链失败: %s", _single_line(exc, 120))
+            return
         if not chain or self._chain_has_reply_component(chain):
             return
-        quote_message_id = self._group_current_reply_quote_message_id(event, text_or_chain=chain)
+        try:
+            quote_message_id = self._group_current_reply_quote_message_id(event, text_or_chain=chain)
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 群聊补引用计算引用目标失败: %s", _single_line(exc, 120))
+            return
         if not quote_message_id:
             return
-        quoted_chain = self._with_optional_reply(chain, quote_message_id, event=event)
+        try:
+            quoted_chain = self._with_optional_reply(chain, quote_message_id, event=event)
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 群聊补引用构建消息链失败: %s", _single_line(exc, 120))
+            return
         if quoted_chain == chain:
             return
         try:
@@ -4378,7 +4412,16 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     intent_profile = self._analyze_inbound_intent(text)
                     if self.enable_intent_emotion_analysis:
                         user["intent_profile"] = intent_profile
-                    self._update_relationship_state_from_intent(user, intent_profile)
+                    if self._should_use_llm_emotion_judgement(text, intent_profile):
+                        # 模型复核不阻塞本轮被动回复；本轮继续使用进入请求前缓存的情绪状态。
+                        user["pending_emotion_judgement"] = {
+                            "text": _single_line(text, 240),
+                            "created_at": _now_ts(),
+                            "local": deepcopy(intent_profile),
+                        }
+                        asyncio.create_task(self._refine_inbound_emotion_with_model(user_id, text, deepcopy(intent_profile)))
+                    else:
+                        self._update_relationship_state_from_intent(user, intent_profile)
                 if is_target_user and self._cancel_inbound_conflicting_greeting(user, now=_now_ts()):
                     logger.info("[PrivateCompanion] 用户已在当前问候时段自然来聊,已取消冲突问候候选: %s", user_id)
                     if not self._simulation_active(user) and _safe_float(user.get("next_proactive_at"), 0) <= 0:

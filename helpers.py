@@ -67,10 +67,11 @@ def _strip_internal_message_blocks(text: Any) -> str:
     return normalized
 
 
-def _strip_outbound_control_blocks(text: Any) -> str:
+def _strip_outbound_control_blocks(text: Any, *, preserve_private_tts_tokens: bool = False) -> str:
     normalized = str(text or "")
     normalized = re.sub(r"\[\[TTSBLOCK:[^\]]*\]\]", "", normalized)
-    normalized = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", normalized)
+    if not preserve_private_tts_tokens:
+        normalized = re.sub(r"\[\[PCTTS:[^\]]*\]\]", "", normalized)
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
     return normalized
