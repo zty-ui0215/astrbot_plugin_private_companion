@@ -1740,7 +1740,12 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             return [], False, ""
 
         quote_message_id = ""
-        if not reply_prefix and not self._chain_has_reply_component(chain):
+        if (
+            bool(getattr(self, "enable_proactive_quote_trigger_message", False))
+            and bool(getattr(self, "enable_quote_group_reply", True))
+            and not reply_prefix
+            and not self._chain_has_reply_component(chain)
+        ):
             quote_message_id = self._group_current_reply_quote_message_id(event, text_or_chain=content_chain)
             reply = self._make_reply_component(quote_message_id, event=event)
             if reply is not None:
@@ -1959,6 +1964,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     async def attach_group_reply_quote(self, event: AstrMessageEvent):
         """群聊回复发送前自动补引用，保持上下文对齐。"""
         if not self.enabled:
+            return
+        if not bool(getattr(self, "enable_proactive_quote_trigger_message", False)):
+            return
+        if not bool(getattr(self, "enable_quote_group_reply", True)):
             return
         if self._proactive_only_blocks_passive_event(event, "enable_group_companion"):
             return
