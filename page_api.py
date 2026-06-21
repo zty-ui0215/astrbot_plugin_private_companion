@@ -3292,6 +3292,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_humanized_states",
             "enable_segmented_proactive_reply",
             "enable_proactive_quote_trigger_message",
+            "enable_quote_group_reply",
+            "enable_quote_group_interjection",
+            "enable_quote_private_proactive",
             "enable_photo_text_action",
             "inject_passive_states",
             "enable_cycle_state",
@@ -3664,6 +3667,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_semantic_message_debounce",
             "semantic_message_debounce_seconds",
             "enable_proactive_quote_trigger_message",
+            "enable_quote_group_reply",
+            "enable_quote_group_interjection",
+            "enable_quote_private_proactive",
+            "quote_skip_short_reply_chars",
+            "quote_target_strategy",
             "enable_photo_text_action",
             "photo_action_max_daily",
             "photo_generation_backend",
@@ -4525,6 +4533,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_humanized_states",
             "enable_segmented_proactive_reply",
             "enable_proactive_quote_trigger_message",
+            "enable_quote_group_reply",
+            "enable_quote_group_interjection",
+            "enable_quote_private_proactive",
             "enable_photo_text_action",
             "inject_passive_states",
             "enable_cycle_state",
@@ -4711,6 +4722,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_semantic_message_debounce",
             "semantic_message_debounce_seconds",
             "enable_proactive_quote_trigger_message",
+            "enable_quote_group_reply",
+            "enable_quote_group_interjection",
+            "enable_quote_private_proactive",
+            "quote_skip_short_reply_chars",
+            "quote_target_strategy",
             "photo_action_max_daily",
             "photo_generation_backend",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME",
@@ -4906,6 +4922,19 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return normalizer(value)
             text = str(value or "prompt").strip().lower()
             return text if text in {"auto", "prompt", "system_prompt"} else "prompt"
+        if key == "quote_target_strategy":
+            text = str(value or "current").strip().lower()
+            aliases = {
+                "当前": "current",
+                "当前消息": "current",
+                "触发消息": "current",
+                "引用旧消息": "quoted",
+                "旧消息": "quoted",
+                "被引用消息": "quoted",
+                "自动": "auto",
+            }
+            text = aliases.get(text, text)
+            return text if text in {"current", "quoted", "auto"} else "current"
         if key == "private_user_aliases":
             return str(value or "").strip()[:4000]
         if key == "worldbook_config_paths":
@@ -5144,6 +5173,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(0, min(100, int(value)))
             except (TypeError, ValueError):
                 return 65
+        if key == "quote_skip_short_reply_chars":
+            try:
+                return max(0, min(120, int(value)))
+            except (TypeError, ValueError):
+                return 0
         if key in {
             "check_interval_seconds",
             "daily_token_limit",
@@ -5404,6 +5438,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "recall_forbidden_word_case_sensitive",
             "enable_semantic_message_debounce",
             "enable_proactive_quote_trigger_message",
+            "enable_quote_group_reply",
+            "enable_quote_group_interjection",
+            "enable_quote_private_proactive",
             "enable_local_photo_load_guard",
             "enable_private_image_self_recognition",
             "enable_private_image_gif_enhancement",
@@ -6792,6 +6829,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             status = "due" if scheduled_ts <= now else "scheduled"
             if scheduled_ts < now - 15 * 60:
                 status = "overdue"
+            if timer_event and self._single_line(timer_event.get("backend"), 40) == "astrbot_cron" and scheduled_ts <= now:
+                status = "handed_off"
+            timer_status = self._single_line(timer_event.get("status"), 40)
+            if timer_status in {"failed", "cancelled", "cancel_failed", "cancel_skipped"}:
+                status = timer_status
             user_summary = self._user_summary(str(user_id), user)
             source_counts[source] = source_counts.get(source, 0) + 1
             status_counts[status] = status_counts.get(status, 0) + 1
@@ -6846,6 +6888,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "created_ts": self._float(timer_event.get("created_at")),
                     "created": self.plugin._format_timestamp_elapsed(timer_event.get("created_at", 0)),
                     "origin": self._single_line(timer_event.get("origin"), 40),
+                    "backend": self._single_line(timer_event.get("backend"), 40),
+                    "job_id": self._single_line(timer_event.get("job_id"), 80),
+                    "timer_status": timer_status,
+                    "timer_error": self._single_line(timer_event.get("error") or timer_event.get("replace_error"), 180),
+                    "replaced_job_id": self._single_line(timer_event.get("replaced_job_id"), 80),
+                    "cancelled_job_id": self._single_line(timer_event.get("cancelled_job_id"), 80),
                     "raw_time": self._single_line(timer_event.get("raw_time"), 40),
                     "trigger_message_id": self._single_line(timer_event.get("trigger_message_id"), 120),
                     "trigger_umo": self._single_line(timer_event.get("trigger_umo"), 160),

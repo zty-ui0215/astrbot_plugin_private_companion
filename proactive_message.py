@@ -1730,11 +1730,9 @@ class ProactiveMessageMixin:
                 return ""
             cleaned_text, payloads = self._extract_timer_directives(raw_text)
             if payloads:
-                await self._schedule_llm_timer(
-                    str(user.get("user_id") or ""),
-                    payloads[-1],
-                    source_text=cleaned_text or raw_text,
-                    source_origin="proactive_llm",
+                logger.info(
+                    "[PrivateCompanion] 主动消息中清理到对话临时预约标签,不再由主动链路登记: user=%s",
+                    _single_line(user.get("user_id"), 40),
                 )
             return cleaned_text
         except Exception as exc:
@@ -4576,6 +4574,8 @@ class ProactiveMessageMixin:
         )
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else ""
+            if quote_message_id and self._quote_skip_reason_for_short_reply(outbound_text):
+                quote_message_id = ""
             if outbound_text:
                 recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
                 if recalled_message_id:
@@ -4592,6 +4592,8 @@ class ProactiveMessageMixin:
                 quote_message_id = ""
             else:
                 for index, segment in enumerate(segments):
+                    if index == 0 and quote_message_id and self._quote_skip_reason_for_short_reply(segment):
+                        quote_message_id = ""
                     recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
                     if recalled_message_id:
                         logger.info("[PrivateCompanion] 触发消息已撤回，停止主动分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
@@ -4659,6 +4661,8 @@ class ProactiveMessageMixin:
         )
         if len(segments) <= 1:
             outbound_text = segments[0] if segments else text
+            if quote_message_id and self._quote_skip_reason_for_short_reply(outbound_text):
+                quote_message_id = ""
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
             if recalled_message_id:
                 logger.info("[PrivateCompanion] 触发消息已撤回，取消主动消息发送: umo=%s message_id=%s", umo, recalled_message_id)
@@ -4678,6 +4682,8 @@ class ProactiveMessageMixin:
         if await self._send_segmented_proactive_forward_message(umo, segments, source="proactive_text"):
             return
         for index, segment in enumerate(segments):
+            if index == 0 and quote_message_id and self._quote_skip_reason_for_short_reply(segment):
+                quote_message_id = ""
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
             if recalled_message_id:
                 logger.info("[PrivateCompanion] 触发消息已撤回，停止主动消息分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)

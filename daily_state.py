@@ -5773,12 +5773,11 @@ class DailyStateMixin:
     def _format_timer_scheduling_instruction(self) -> str:
         if not self.enable_llm_timer_scheduling:
             return ""
-        return """【主动消息预约】
-如果你觉得这段对话晚些时候还会自然延伸一次,可以在回复末尾附一个隐藏标签：
-<timer>{"time":"YYYY-MM-DD HH:MM:SS","reason":"可选","topic":"可选","motive":"可选","action":"可选"}</timer>
-也可以只写时间。
-这个标签用户看不到,只用来预约你下一次主动开口。
-只在确实有自然后续时才写,不要每轮都加。"""
+        return """【对话临时预约】
+仅当用户明确要求稍后提醒/叫醒/回头说,或双方形成了明确临时约定时,在回复末尾写：
+<timer>{"time":"YYYY-MM-DD HH:MM:SS","topic":"约定内容"}</timer>
+改时间直接写新时间；取消同一约定时写：<timer>{"action":"cancel"}</timer>
+时间和约定不明确就不要写。该标签只会转写为 AstrBot 官方定时计划。"""
 
     def _extract_timer_directives(self, text: str) -> tuple[str, list[dict[str, Any]]]:
         raw_text = str(text or "")
@@ -5790,6 +5789,48 @@ class DailyStateMixin:
         cleaned = TIMER_TAG_PATTERN.sub("", raw_text)
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
         return cleaned, payloads
+
+    def _llm_response_has_official_timer_tool(self, resp: Any) -> bool:
+        names = getattr(resp, "tools_call_name", None)
+        if isinstance(names, (list, tuple, set)) and any(str(name).strip() == "future_task" for name in names):
+            return True
+        raw_completion = getattr(resp, "raw_completion", None)
+        candidates = [
+            getattr(raw_completion, "model_extra", None),
+            getattr(raw_completion, "additional_kwargs", None),
+            getattr(resp, "metadata", None),
+            getattr(resp, "extra_content", None),
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                text = json.dumps(candidate, ensure_ascii=False)
+            except Exception:
+                text = str(candidate)
+            if "future_task" in text:
+                return True
+        return False
+
+    def _text_mentions_official_timer_created(self, text: str) -> bool:
+        cleaned = _single_line(text, 500)
+        if not cleaned:
+            return False
+        lower = cleaned.lower()
+        has_explicit_job_id = bool(
+            re.search(r"(?:job[_\s-]?id|任务\s*id|future task|cron job)\s*[:：#]?\s*[A-Za-z0-9_-]{6,}", cleaned, re.I)
+        )
+        if not has_explicit_job_id:
+            return False
+        if "future_task" in lower or "future task" in lower or "cron job" in lower or "cronjob" in lower:
+            if any(token in lower for token in ("scheduled", "created", "job_id", "task")):
+                return True
+        official_markers = ("官方定时", "定时计划", "定时任务", "预约任务", "任务ID", "任务 id")
+        success_markers = ("已创建", "已添加", "已登记", "已安排", "创建成功", "登记成功", "安排好了")
+        return any(marker in cleaned for marker in official_markers) and any(marker in cleaned for marker in success_markers)
+
+    def _should_skip_timer_capture_for_official_task(self, resp: Any, text: str) -> bool:
+        return self._llm_response_has_official_timer_tool(resp) or self._text_mentions_official_timer_created(text)
 
     def _parse_timer_directive(self, raw: str) -> dict[str, Any] | None:
         content = str(raw or "").strip()
@@ -5806,6 +5847,15 @@ class DailyStateMixin:
             payload = {str(key): value for key, value in loaded.items()}
         else:
             payload = {"time": content}
+
+        action_text = str(payload.get("action") or payload.get("operation") or "").strip().lower()
+        cancel_requested = bool(payload.get("cancel")) or action_text in {"cancel", "delete", "remove", "取消", "删除", "撤销"}
+        if cancel_requested:
+            return {
+                "cancel": True,
+                "action": "cancel",
+                "topic": _single_line(payload.get("topic") or payload.get("reason"), 60),
+            }
 
         time_text = ""
         for key in ("time", "timer", "at", "datetime", "date"):
@@ -5933,6 +5983,11 @@ class DailyStateMixin:
         raw = user.get("llm_timer_event")
         if not isinstance(raw, dict) or not raw:
             return None
+        if _single_line(raw.get("backend"), 40) != "astrbot_cron":
+            return None
+        status = _single_line(raw.get("status"), 40)
+        if status not in {"pending", "scheduled"}:
+            return None
         scheduled_ts = _safe_float(raw.get("scheduled_ts"), 0)
         if scheduled_ts <= 0:
             return None
@@ -5942,8 +5997,31 @@ class DailyStateMixin:
         event = self._get_active_llm_timer(user)
         if not isinstance(event, dict):
             return False
+        if not self._llm_timer_can_use_internal_scheduler(event):
+            return False
         now = now or _now_ts()
         return now >= _safe_float(event.get("scheduled_ts"), 0)
+
+    def _llm_timer_can_use_internal_scheduler(self, event: dict[str, Any] | None) -> bool:
+        """LLM timer is now a compatibility layer; execution belongs to AstrBot cron."""
+        return False
+
+    def _clear_llm_timer_internal_plan_fields(self, user: dict[str, Any]) -> None:
+        if not isinstance(user, dict):
+            return
+        if str(user.get("planned_proactive_source") or "") != "timer":
+            return
+        user["next_proactive_at"] = 0
+        user["planned_proactive_reason"] = ""
+        user["planned_proactive_action"] = ""
+        user["planned_proactive_source"] = ""
+        user["planned_proactive_motive"] = ""
+        user["planned_proactive_topic"] = ""
+        user["planned_event_chain"] = []
+        user["planned_opener_mode"] = ""
+        user["planned_followup_kind"] = ""
+        user["planned_proactive_quota_exempt"] = False
+        self._clear_planned_proactive_trigger(user)
 
     def _clear_llm_timer_event(self, user: dict[str, Any], *, event_id: str = "") -> None:
         raw = user.get("llm_timer_event")
@@ -5987,6 +6065,182 @@ class DailyStateMixin:
             summary_parts.append(f"现在离约好的时间还差 {self._format_duration_brief(scheduled_ts - now)}。")
         return " ".join(summary_parts)
 
+    def _llm_timer_timezone_name(self) -> str:
+        timezone_name = _single_line(getattr(self, "environment_perception_timezone", ""), 64) or "Asia/Shanghai"
+        try:
+            zoneinfo.ZoneInfo(timezone_name)
+            return timezone_name
+        except Exception:
+            return "Asia/Shanghai"
+
+    def _llm_timer_run_at(self, scheduled_ts: float) -> datetime:
+        timezone_name = self._llm_timer_timezone_name()
+        try:
+            tzinfo = zoneinfo.ZoneInfo(timezone_name)
+        except Exception:
+            tzinfo = zoneinfo.ZoneInfo("Asia/Shanghai")
+        return datetime.fromtimestamp(scheduled_ts, tzinfo)
+
+    def _format_official_timer_note(
+        self,
+        *,
+        scheduled_ts: float,
+        reason: str,
+        action: str,
+        topic: str,
+        motive: str,
+        source_text: str,
+    ) -> str:
+        when = self._environment_fromtimestamp(scheduled_ts).strftime("%Y-%m-%d %H:%M")
+        lines = [
+            "这是 PrivateCompanion 从聊天中确认出的临时约定。到点后请按约定自然联系用户,不要解释这是定时任务。",
+            f"约定时间：{when}",
+        ]
+        if topic:
+            lines.append(f"约定内容：{topic}")
+        if motive:
+            lines.append(f"补充语境：{motive}")
+        if reason:
+            lines.append(f"类型：{reason}")
+        if action and action != "message":
+            lines.append(f"期望动作：{action}")
+        seed = _single_line(source_text, 180)
+        if seed:
+            lines.append(f"聊天线索：{seed}")
+        lines.append("执行方式：使用 send_message_to_user 给原会话发一条简短自然的消息；如果是叫醒/提醒,直接完成提醒。")
+        return "\n".join(lines)
+
+    def _official_cron_manager(self) -> Any | None:
+        context = getattr(self, "context", None)
+        manager = getattr(context, "cron_manager", None)
+        if manager is not None:
+            return manager
+        nested = getattr(context, "context", None)
+        return getattr(nested, "cron_manager", None)
+
+    async def _add_official_llm_timer_job(
+        self,
+        *,
+        user_id: str,
+        user: dict[str, Any],
+        timer_event: dict[str, Any],
+        note: str,
+        trigger_umo: str,
+    ) -> tuple[str, str]:
+        cron_mgr = self._official_cron_manager()
+        if cron_mgr is None:
+            return "", "AstrBot 官方定时计划不可用"
+        scheduled_ts = _safe_float(timer_event.get("scheduled_ts"), 0)
+        if scheduled_ts <= 0:
+            return "", "预约时间无效"
+        run_at = self._llm_timer_run_at(scheduled_ts)
+        session = _single_line(trigger_umo, 180) or _single_line(user.get("umo"), 180)
+        if not session:
+            return "", "缺少私聊会话"
+        payload = {
+            "session": session,
+            "sender_id": str(user_id),
+            "note": note,
+            "origin": "private_companion_timer",
+            "private_companion": {
+                "timer_id": _single_line(timer_event.get("id"), 40),
+                "reason": _single_line(timer_event.get("reason"), 40),
+                "action": _single_line(timer_event.get("action"), 40),
+                "topic": _single_line(timer_event.get("topic"), 80),
+            },
+        }
+        try:
+            job = await cron_mgr.add_active_job(
+                name="PrivateCompanion 临时约定",
+                cron_expression=None,
+                payload=payload,
+                description=_single_line(timer_event.get("topic") or note, 180),
+                timezone=self._llm_timer_timezone_name(),
+                enabled=True,
+                persistent=True,
+                run_once=True,
+                run_at=run_at,
+            )
+        except Exception as exc:
+            return "", _single_line(exc, 180) or repr(exc)
+        return _single_line(getattr(job, "job_id", ""), 80), ""
+
+    async def _delete_official_llm_timer_job(self, job_id: str) -> tuple[bool, str]:
+        normalized_job_id = _single_line(job_id, 80)
+        if not normalized_job_id:
+            return False, "缺少官方任务 ID"
+        cron_mgr = self._official_cron_manager()
+        if cron_mgr is None:
+            return False, "AstrBot 官方定时计划不可用"
+        try:
+            await cron_mgr.delete_job(normalized_job_id)
+        except Exception as exc:
+            return False, _single_line(exc, 180) or repr(exc)
+        return True, ""
+
+    async def _cancel_llm_timer(
+        self,
+        user_id: str,
+        payload: dict[str, Any],
+        *,
+        source_text: str,
+        source_origin: str,
+        trigger_message_id: str = "",
+        trigger_umo: str = "",
+    ) -> None:
+        now_ts = _now_ts()
+        async with self._data_lock:
+            user = self._get_user(user_id)
+            existing = user.get("llm_timer_event") if isinstance(user.get("llm_timer_event"), dict) else {}
+            existing_active = (
+                isinstance(existing, dict)
+                and _single_line(existing.get("backend"), 40) == "astrbot_cron"
+                and _single_line(existing.get("status"), 40) in {"pending", "scheduled"}
+                and _safe_float(existing.get("scheduled_ts"), 0) > now_ts
+            )
+            existing_job_id = _single_line(existing.get("job_id"), 80) if existing_active else ""
+            existing_scheduled_ts = _safe_float(existing.get("scheduled_ts"), 0) or now_ts
+            cancel_event = {
+                "id": uuid.uuid4().hex,
+                "scheduled_ts": existing_scheduled_ts,
+                "raw_time": _single_line(existing.get("raw_time"), 32),
+                "reason": _single_line(existing.get("reason"), 40),
+                "action": "cancel",
+                "topic": _single_line(payload.get("topic") or existing.get("topic") or "取消临时约定", 60),
+                "motive": _single_line(source_text, 140),
+                "seed_text": _single_line(source_text, 80),
+                "origin": source_origin,
+                "created_at": now_ts,
+                "trigger_message_id": _single_line(trigger_message_id, 120),
+                "trigger_umo": _single_line(trigger_umo, 160),
+                "trigger_ts": now_ts if trigger_message_id else 0,
+                "backend": "astrbot_cron",
+                "job_id": existing_job_id,
+                "cancelled_job_id": existing_job_id,
+                "status": "cancel_pending" if existing_job_id else "cancel_skipped",
+                "error": "" if existing_job_id else "没有可取消的对话临时预约",
+            }
+            self._clear_llm_timer_internal_plan_fields(user)
+        ok = False
+        error = ""
+        if existing_job_id:
+            ok, error = await self._delete_official_llm_timer_job(existing_job_id)
+        async with self._data_lock:
+            user = self._get_user(user_id)
+            if existing_job_id:
+                cancel_event["status"] = "cancelled" if ok else "cancel_failed"
+                cancel_event["error"] = "" if ok else error
+            user["llm_timer_event"] = cancel_event
+            self._clear_llm_timer_internal_plan_fields(user)
+            self._save_data_sync()
+        logger.info(
+            "[PrivateCompanion] 对话临时预约取消%s: user=%s job=%s error=%s",
+            "完成" if ok else "跳过/失败",
+            user_id,
+            existing_job_id or "-",
+            error or cancel_event.get("error") or "-",
+        )
+
     async def _schedule_llm_timer(
         self,
         user_id: str,
@@ -5997,9 +6251,23 @@ class DailyStateMixin:
         trigger_message_id: str = "",
         trigger_umo: str = "",
     ) -> None:
+        if bool(payload.get("cancel")):
+            await self._cancel_llm_timer(
+                user_id,
+                payload,
+                source_text=source_text,
+                source_origin=source_origin,
+                trigger_message_id=trigger_message_id,
+                trigger_umo=trigger_umo,
+            )
+            return
         scheduled_ts = max(_now_ts() + 30, _safe_float(payload.get("scheduled_ts"), 0))
         if scheduled_ts <= 0:
             return
+        timer_event: dict[str, Any] | None = None
+        note = ""
+        user_snapshot: dict[str, Any] = {}
+        replaced_job_id = ""
         async with self._data_lock:
             user = self._get_user(user_id)
             if not self._user_enabled_for_proactive(user_id, user):
@@ -6027,6 +6295,14 @@ class DailyStateMixin:
                 source_text=source_text,
                 topic=topic,
             )
+            existing = user.get("llm_timer_event") if isinstance(user.get("llm_timer_event"), dict) else {}
+            if (
+                isinstance(existing, dict)
+                and _single_line(existing.get("backend"), 40) == "astrbot_cron"
+                and _single_line(existing.get("status"), 40) in {"scheduled", "pending"}
+                and _safe_float(existing.get("scheduled_ts"), 0) > _now_ts()
+            ):
+                replaced_job_id = _single_line(existing.get("job_id"), 80)
             timer_event = {
                 "id": uuid.uuid4().hex,
                 "scheduled_ts": scheduled_ts,
@@ -6044,34 +6320,62 @@ class DailyStateMixin:
                 "trigger_ts": _now_ts() if trigger_message_id else 0,
                 "chain": list(payload.get("chain") or []) if isinstance(payload.get("chain"), list) else [],
                 "silence_until_due": self._timer_source_implies_user_unavailable(source_text, payload),
+                "backend": "astrbot_cron",
+                "status": "pending",
+                "replaced_job_id": replaced_job_id,
             }
-            user["llm_timer_event"] = timer_event
-            user["next_proactive_at"] = scheduled_ts
-            user["planned_proactive_reason"] = reason
-            user["planned_proactive_action"] = action
-            user["planned_proactive_source"] = "timer"
-            user["planned_proactive_motive"] = timer_event["motive"]
-            user["planned_proactive_topic"] = topic
-            user["planned_event_chain"] = [] if self._private_user_role(user) == "friend" else (
-                list(payload.get("chain") or []) if isinstance(payload.get("chain"), list) else []
+            note = self._format_official_timer_note(
+                scheduled_ts=scheduled_ts,
+                reason=reason,
+                action=action,
+                topic=topic,
+                motive=timer_event["motive"],
+                source_text=source_text,
             )
-            user["planned_opener_mode"] = ""
-            user["planned_followup_kind"] = ""
-            user["planned_proactive_quota_exempt"] = False
-            self._set_planned_proactive_trigger(
-                user,
-                message_id=timer_event["trigger_message_id"],
-                umo=timer_event["trigger_umo"],
-                created_at=timer_event["trigger_ts"],
+            user_snapshot = dict(user)
+        replace_error = ""
+        if replaced_job_id:
+            _, replace_error = await self._delete_official_llm_timer_job(replaced_job_id)
+        if replace_error:
+            job_id, error = "", f"旧官方任务删除失败: {replace_error}"
+        else:
+            job_id, error = await self._add_official_llm_timer_job(
+                user_id=user_id,
+                user=user_snapshot,
+                timer_event=timer_event,
+                note=note,
+                trigger_umo=trigger_umo,
             )
-            self._save_data_sync()
+        async with self._data_lock:
+            user = self._get_user(user_id)
+            if job_id:
+                timer_event["job_id"] = job_id
+                timer_event["status"] = "scheduled"
+                timer_event["note"] = _single_line(note, 220)
+                if replace_error:
+                    timer_event["replace_error"] = replace_error
+                user["llm_timer_event"] = timer_event
+                self._clear_llm_timer_internal_plan_fields(user)
+                self._save_data_sync()
+            else:
+                timer_event["status"] = "failed"
+                timer_event["error"] = error or "官方定时计划登记失败"
+                if replace_error:
+                    timer_event["replace_error"] = replace_error
+                user["llm_timer_event"] = timer_event
+                self._clear_llm_timer_internal_plan_fields(user)
+                self._save_data_sync()
         logger.info(
-            "[PrivateCompanion] 已记录 LLM 自预约: user=%s time=%s reason=%s action=%s topic=%s",
+            "[PrivateCompanion] LLM 临时预约已转写到官方定时计划: user=%s time=%s reason=%s action=%s topic=%s job=%s replaced=%s error=%s replace_error=%s",
             user_id,
             self._environment_fromtimestamp(scheduled_ts).strftime("%m-%d %H:%M:%S"),
             reason,
             action,
             topic,
+            job_id or "-",
+            replaced_job_id or "-",
+            error or "-",
+            replace_error or "-",
         )
 
     def _format_remaining(self, end_ts: Any) -> str:
@@ -7713,7 +8017,11 @@ class DailyStateMixin:
                             sent_greetings.append(reason)
                     self._clear_llm_timer_event(current, event_id=due_timer_id)
                     next_timer = self._get_active_llm_timer(current)
-                    if isinstance(next_timer, dict) and _safe_float(next_timer.get("scheduled_ts"), 0) > _now_ts():
+                    if (
+                        isinstance(next_timer, dict)
+                        and self._llm_timer_can_use_internal_scheduler(next_timer)
+                        and _safe_float(next_timer.get("scheduled_ts"), 0) > _now_ts()
+                    ):
                         current["next_proactive_at"] = _safe_float(next_timer.get("scheduled_ts"), 0)
                         current["planned_proactive_reason"] = str(next_timer.get("reason") or "check_in")
                         current["planned_proactive_action"] = str(next_timer.get("action") or "message")

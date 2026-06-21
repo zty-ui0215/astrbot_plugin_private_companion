@@ -131,9 +131,9 @@ class InteractionUtilsMixin:
         recalled_message_id = await self._should_cancel_reply_for_missing_or_recalled_trigger(event)
         if recalled_message_id:
             return
-        quote_message_id = self._group_current_reply_quote_message_id(event) if quote_current else ""
+        quote_message_id = self._group_current_reply_quote_message_id(event, text_or_chain=text) if quote_current else ""
         if quote_message_id and text:
-            await event.send(event.chain_result(self._with_optional_reply([Plain(text)], quote_message_id)))
+            await event.send(event.chain_result(self._with_optional_reply([Plain(text)], quote_message_id, event=event)))
             return
         await event.send(event.plain_result(text))
 
@@ -146,6 +146,8 @@ class InteractionUtilsMixin:
         quote_message_id: str = "",
     ):
         quote_message_id = _single_line(quote_message_id, 120) if getattr(self, "enable_proactive_quote_trigger_message", False) else ""
+        if quote_message_id and self._quote_skip_reason_for_short_reply(text):
+            quote_message_id = ""
         recalled_message_id = await self._should_cancel_reply_for_missing_or_recalled_trigger(event, quote_message_id)
         if recalled_message_id:
             return
@@ -155,12 +157,13 @@ class InteractionUtilsMixin:
                     self._with_optional_reply(
                         self._build_outbound_chain(text, image_path, extra_components=extra_components),
                         quote_message_id,
+                        event=event,
                     )
                 )
             )
             return
         if quote_message_id and text:
-            await event.send(event.chain_result(self._with_optional_reply([Plain(text)], quote_message_id)))
+            await event.send(event.chain_result(self._with_optional_reply([Plain(text)], quote_message_id, event=event)))
             return
         if not text:
             return

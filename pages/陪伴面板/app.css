@@ -7854,18 +7854,23 @@ textarea {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0;
+  align-items: start;
 }
 
 .feature-switch-item {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-  min-height: 86px;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  min-height: 72px;
   padding: 12px;
   border-right: 1px solid var(--line-soft);
   border-bottom: 1px solid var(--line-soft);
   background: #fff;
+}
+
+.feature-switch-item.locked {
+  grid-template-columns: 34px minmax(0, 1fr) auto;
 }
 
 .feature-switch-item:nth-child(2n) {
@@ -7924,9 +7929,12 @@ textarea {
   transform: translateX(16px);
 }
 
+.feature-switch-body {
+  min-width: 0;
+}
+
 .feature-switch-text b,
 .feature-switch-text small,
-.feature-switch-text em,
 .feature-state-text {
   display: block;
 }
@@ -7949,9 +7957,16 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.feature-switch-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
 .feature-state-text {
   width: fit-content;
-  margin-top: 5px;
   border-radius: 999px;
   padding: 2px 8px;
   background: #f5ece2;
@@ -8032,16 +8047,33 @@ textarea {
   color: var(--blue);
 }
 
+.feature-lock-note,
+.feature-lock-related {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.feature-lock-related {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
 .feature-temp-unlock-btn,
 .feature-temp-unlock-actions button {
   border: 1px solid rgba(47, 117, 102, 0.24);
   border-radius: 8px;
-  padding: 7px 10px;
+  padding: 6px 10px;
   background: rgba(255, 255, 255, 0.86);
   color: var(--accent-strong);
   cursor: pointer;
   font-family: inherit;
   font-size: 12px;
+}
+
+.feature-temp-unlock-btn {
+  align-self: center;
+  white-space: nowrap;
 }
 
 .feature-temp-unlock-btn:hover,
@@ -8059,13 +8091,6 @@ textarea {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
-}
-
-.feature-switch-text em {
-  margin-top: 5px;
-  color: var(--muted);
-  font-style: normal;
-  line-height: 1.45;
 }
 
 .feature-detail-page {

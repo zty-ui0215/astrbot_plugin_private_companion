@@ -1033,7 +1033,7 @@ class ProactiveMixin:
             base_time = now + random.uniform(delay_hours[0] * 3600, delay_hours[1] * 3600)
             scheduled = self._move_timestamp_into_reason_window(base_time, reason)
         timer_event = self._get_active_llm_timer(user)
-        if isinstance(timer_event, dict):
+        if isinstance(timer_event, dict) and self._llm_timer_can_use_internal_scheduler(timer_event):
             timer_scheduled = _safe_float(timer_event.get("scheduled_ts"), 0)
             if timer_scheduled > now and (scheduled <= 0 or timer_scheduled <= scheduled):
                 user["next_proactive_at"] = timer_scheduled

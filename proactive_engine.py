@@ -376,14 +376,16 @@ class ProactiveEngineMixin:
             return False
         timer_event = self._get_active_llm_timer(user)
         timer_scheduled = _safe_float(timer_event.get("scheduled_ts"), 0) if isinstance(timer_event, dict) else 0.0
-        if timer_scheduled > now and scheduled < timer_scheduled:
-            if self._in_llm_timer_silence_window(user, now=now):
-                self._remember_silenced_candidate_for_timer(user, candidate, now=now)
-            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有用户预约/定时主动")
+        if timer_scheduled > now and scheduled < timer_scheduled and self._in_llm_timer_silence_window(user, now=now):
+            self._remember_silenced_candidate_for_timer(user, candidate, now=now)
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有聊天临时预约临近")
             return False
         if _safe_float(user.get("next_proactive_at"), 0) > 0 and str(user.get("planned_proactive_source") or "") == "timer":
-            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有用户预约/定时主动")
-            return False
+            current_timer = self._get_active_llm_timer(user)
+            if self._llm_timer_can_use_internal_scheduler(current_timer if isinstance(current_timer, dict) else None):
+                self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有用户预约/定时主动")
+                return False
+            self._clear_llm_timer_internal_plan_fields(user)
         current_next = _safe_float(user.get("next_proactive_at"), 0)
         if current_next > 0 and current_next <= scheduled:
             self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有更早主动候选")
@@ -525,6 +527,8 @@ class ProactiveEngineMixin:
         event = self._get_active_llm_timer(user)
         if not isinstance(event, dict):
             return False
+        if not self._llm_timer_can_use_internal_scheduler(event):
+            return False
         check_now = _now_ts() if now is None else now
         scheduled_ts = _safe_float(event.get("scheduled_ts"), 0)
         if scheduled_ts <= 0 or scheduled_ts > check_now:
@@ -552,6 +556,8 @@ class ProactiveEngineMixin:
     def _promote_upcoming_llm_timer_plan(self, user: dict[str, Any], *, now: float | None = None) -> bool:
         event = self._get_active_llm_timer(user)
         if not isinstance(event, dict):
+            return False
+        if not self._llm_timer_can_use_internal_scheduler(event):
             return False
         check_now = _now_ts() if now is None else now
         scheduled_ts = _safe_float(event.get("scheduled_ts"), 0)
@@ -612,6 +618,11 @@ class ProactiveEngineMixin:
             return False, "每日上限为 0"
         now = _now_ts()
         due_timer_active = self._has_due_llm_timer(user, now=now)
+        if not is_troubleshooting and planned_source == "timer" and not due_timer_active:
+            self._clear_llm_timer_internal_plan_fields(user)
+            if _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now)
+            return False, "对话临时预约已交给官方定时计划"
         if (
             not is_troubleshooting
             and

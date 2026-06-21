@@ -707,7 +707,12 @@ class NewsExplorationMixin:
                 continue
             if now - _safe_float(user.get("last_bilibili_share_at"), 0) < 10 * 3600:
                 continue
-            if _safe_float(user.get("next_proactive_at"), 0) > 0 and str(user.get("planned_proactive_source") or "") == "timer":
+            timer_event = self._get_active_llm_timer(user)
+            if (
+                _safe_float(user.get("next_proactive_at"), 0) > 0
+                and str(user.get("planned_proactive_source") or "") == "timer"
+                and self._llm_timer_can_use_internal_scheduler(timer_event if isinstance(timer_event, dict) else None)
+            ):
                 continue
             score = _safe_int(candidate.get("score"), 0, 0, 10)
             decision = self._external_event_share_decision(

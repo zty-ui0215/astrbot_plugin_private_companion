@@ -1386,6 +1386,8 @@ class EventDispatchMixin:
     def _planned_proactive_quote_message_id(self, user: dict[str, Any], umo: str) -> str:
         if not getattr(self, "enable_proactive_quote_trigger_message", False):
             return ""
+        if not getattr(self, "enable_quote_private_proactive", True):
+            return ""
         message_id = _single_line(user.get("planned_proactive_trigger_message_id"), 120)
         if not message_id:
             return ""
@@ -1397,31 +1399,70 @@ class EventDispatchMixin:
             return ""
         return message_id
 
-    def _make_reply_component(self, message_id: str) -> Any | None:
+    def _quote_cache_key(self, event: AstrMessageEvent | None = None) -> str:
+        if event is None:
+            return "default"
+        try:
+            platform = str(event.get_platform_name() or "").strip()
+        except Exception:
+            platform = ""
+        umo = _single_line(getattr(event, "unified_msg_origin", ""), 160)
+        origin = umo.split(":", 1)[0] if ":" in umo else umo
+        return platform or origin or "default"
+
+    def _make_reply_component(self, message_id: str, event: AstrMessageEvent | None = None) -> Any | None:
         if Reply is None:
+            logger.debug("[PrivateCompanion] 当前 AstrBot 运行环境缺少 Reply 组件，引用触发消息已降级。")
             return None
         message_id = _single_line(message_id, 120)
         if not message_id:
             return None
+        cache_key = self._quote_cache_key(event)
+        style_cache = getattr(self, "_reply_component_style_cache", None)
+        if not isinstance(style_cache, dict):
+            style_cache = {}
+            self._reply_component_style_cache = style_cache
         candidate_ids: list[Any] = [message_id]
         try:
             candidate_ids.append(int(message_id))
         except (TypeError, ValueError):
             pass
+        cached = style_cache.get(cache_key)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            style, value_kind = cached
+            for value in candidate_ids:
+                if value_kind == "int" and not isinstance(value, int):
+                    continue
+                if value_kind == "str" and not isinstance(value, str):
+                    continue
+                try:
+                    if style == "positional":
+                        return Reply(value)
+                    return Reply(**{style: value})
+                except Exception:
+                    break
+            style_cache.pop(cache_key, None)
         for value in candidate_ids:
             for kwargs in ({"id": value}, {"message_id": value}, {"msg_id": value}):
                 try:
+                    style_cache[cache_key] = (next(iter(kwargs.keys())), "int" if isinstance(value, int) else "str")
                     return Reply(**kwargs)
                 except Exception:
                     continue
             try:
+                style_cache[cache_key] = ("positional", "int" if isinstance(value, int) else "str")
                 return Reply(value)
             except Exception:
                 continue
+        logger.info(
+            "[PrivateCompanion] 当前平台未能构造 Reply 引用组件，已降级为普通发送: platform=%s message_id=%s",
+            cache_key,
+            message_id,
+        )
         return None
 
-    def _with_optional_reply(self, chain: list[Any], message_id: str) -> list[Any]:
-        reply = self._make_reply_component(message_id)
+    def _with_optional_reply(self, chain: list[Any], message_id: str, event: AstrMessageEvent | None = None) -> list[Any]:
+        reply = self._make_reply_component(message_id, event=event)
         if reply is None:
             return chain
         return [reply, *chain]
@@ -1434,33 +1475,110 @@ class EventDispatchMixin:
                 return True
         return False
 
-    def _group_current_reply_quote_message_id(self, event: AstrMessageEvent) -> str:
-        if not getattr(self, "enable_proactive_quote_trigger_message", False):
+    def _quote_plain_text_len(self, value: Any) -> int:
+        if isinstance(value, list):
+            parts: list[str] = []
+            for comp in value:
+                if hasattr(comp, "text"):
+                    parts.append(str(getattr(comp, "text", "") or ""))
+            text = "".join(parts)
+        else:
+            text = str(value or "")
+        return len(re.sub(r"\s+", "", text))
+
+    def _quote_skip_reason_for_short_reply(self, text_or_chain: Any = None) -> str:
+        threshold = _safe_int(getattr(self, "quote_skip_short_reply_chars", 0), 0, 0)
+        if threshold <= 0 or text_or_chain is None:
             return ""
-        if not self.enable_group_companion:
-            return ""
-        if not self._extract_group_id_from_event(event):
-            return ""
-        message_id = self._event_message_id(event)
-        if not message_id:
-            return ""
-        scene = getattr(event, "private_companion_group_scene", None)
-        if isinstance(scene, dict):
-            if str(scene.get("talking_to") or "") == "bot":
-                return message_id
-            if str(scene.get("trigger") or "") in {
-                "at_bot",
-                "reply_bot",
-                "mention_bot_name",
-                "group_wakeup_direct_word",
-                "group_wakeup_context_word",
-                "group_wakeup_interest",
-                "bot_conversation_followup",
-            }:
-                return message_id
-        if getattr(event, "is_at_or_wake_command", False) or getattr(event, "is_wake", False):
-            return message_id
+        length = self._quote_plain_text_len(text_or_chain)
+        if 0 < length <= threshold:
+            return f"short_reply:{length}<={threshold}"
         return ""
+
+    def _event_quoted_original_message_id(self, event: AstrMessageEvent) -> str:
+        for message_id in self._event_reply_message_ids(event):
+            if message_id and message_id != self._event_message_id(event):
+                return message_id
+        return ""
+
+    def _quote_scene_allowed(self, scene_name: str) -> bool:
+        if not getattr(self, "enable_proactive_quote_trigger_message", False):
+            return False
+        if scene_name == "group_reply":
+            return bool(getattr(self, "enable_quote_group_reply", True))
+        if scene_name == "group_interjection":
+            return bool(getattr(self, "enable_quote_group_interjection", True))
+        if scene_name == "private_proactive":
+            return bool(getattr(self, "enable_quote_private_proactive", True))
+        return True
+
+    def _resolve_quote_message_id(
+        self,
+        event: AstrMessageEvent,
+        *,
+        scene_name: str = "group_reply",
+        text_or_chain: Any = None,
+        force_refresh: bool = False,
+    ) -> str:
+        if not self._quote_scene_allowed(scene_name):
+            return ""
+        fixed = _single_line(getattr(event, "private_companion_quote_message_id", ""), 120)
+        fixed_scene = _single_line(getattr(event, "private_companion_quote_scene", ""), 40)
+        if fixed and not force_refresh and (not fixed_scene or fixed_scene == scene_name):
+            if self._quote_skip_reason_for_short_reply(text_or_chain):
+                return ""
+            return fixed
+        if scene_name in {"group_reply", "group_interjection"}:
+            if not self.enable_group_companion:
+                return ""
+            if not self._extract_group_id_from_event(event):
+                return ""
+            if scene_name == "group_reply":
+                scene = getattr(event, "private_companion_group_scene", None)
+                triggered = False
+                if isinstance(scene, dict):
+                    if str(scene.get("talking_to") or "") == "bot":
+                        triggered = True
+                    if str(scene.get("trigger") or "") in {
+                        "at_bot",
+                        "reply_bot",
+                        "mention_bot_name",
+                        "group_wakeup_direct_word",
+                        "group_wakeup_context_word",
+                        "group_wakeup_interest",
+                        "bot_conversation_followup",
+                    }:
+                        triggered = True
+                if getattr(event, "is_at_or_wake_command", False) or getattr(event, "is_wake", False):
+                    triggered = True
+                if not triggered:
+                    return ""
+        current_id = self._event_message_id(event)
+        if not current_id:
+            return ""
+        quote_id = current_id
+        reason = "current_trigger"
+        if scene_name == "group_reply":
+            scene = getattr(event, "private_companion_group_scene", None)
+            trigger = _single_line((scene or {}).get("trigger") if isinstance(scene, dict) else "", 40)
+            quoted_id = self._event_quoted_original_message_id(event)
+            strategy = _single_line(getattr(self, "quote_target_strategy", "current"), 20).lower()
+            if strategy not in {"current", "quoted", "auto"}:
+                strategy = "current"
+            if quoted_id and trigger == "reply_bot" and strategy in {"quoted", "auto"}:
+                quote_id = quoted_id
+                reason = f"{strategy}_quoted_bot_message"
+        short_reason = self._quote_skip_reason_for_short_reply(text_or_chain)
+        if short_reason:
+            setattr(event, "private_companion_quote_skip_reason", short_reason)
+            return ""
+        setattr(event, "private_companion_quote_message_id", quote_id)
+        setattr(event, "private_companion_quote_scene", scene_name)
+        setattr(event, "private_companion_quote_reason", reason)
+        return quote_id
+
+    def _group_current_reply_quote_message_id(self, event: AstrMessageEvent, text_or_chain: Any = None) -> str:
+        return self._resolve_quote_message_id(event, scene_name="group_reply", text_or_chain=text_or_chain)
 
     def _strip_internal_identity_anchors(self, text: str) -> str:
         cleaned = str(text or "")

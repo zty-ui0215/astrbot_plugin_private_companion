@@ -591,7 +591,12 @@ class GroupObservationMixin:
             last_at = _safe_float(user.get("last_group_share_at"), 0)
             if last_key == cooldown_key or now - last_at < 18 * 3600:
                 continue
-            if _safe_float(user.get("next_proactive_at"), 0) > 0 and str(user.get("planned_proactive_source") or "") == "timer":
+            timer_event = self._get_active_llm_timer(user)
+            if (
+                _safe_float(user.get("next_proactive_at"), 0) > 0
+                and str(user.get("planned_proactive_source") or "") == "timer"
+                and self._llm_timer_can_use_internal_scheduler(timer_event if isinstance(timer_event, dict) else None)
+            ):
                 continue
             kind = _single_line(candidate.get("kind"), 32) or "funny"
             score = _safe_int(candidate.get("score"), 0, 0)
@@ -1777,7 +1782,6 @@ class GroupObservationMixin:
                 "topic_signature": self._group_topic_signature(text),
             }
             return
-        quote_message_id = self._event_message_id(event) if getattr(self, "enable_proactive_quote_trigger_message", False) else ""
         allowed, reason = self._group_interjection_allowed(group, text)
         if not allowed:
             return
@@ -1812,8 +1816,13 @@ class GroupObservationMixin:
             return
         if self._response_review_flags(reply, {}):
             return
+        quote_message_id = self._resolve_quote_message_id(
+            event,
+            scene_name="group_interjection",
+            text_or_chain=reply,
+        )
         if quote_message_id:
-            await event.send(event.chain_result(self._with_optional_reply([Plain(reply)], quote_message_id)))
+            await event.send(event.chain_result(self._with_optional_reply([Plain(reply)], quote_message_id, event=event)))
         else:
             await event.send(event.plain_result(reply))
         group["last_interject_at"] = _now_ts()

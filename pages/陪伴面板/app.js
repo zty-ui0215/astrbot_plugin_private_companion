@@ -146,6 +146,7 @@ const pluginIntegrationAvailabilityRules = {
   enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
   enable_qzone_integration: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_life_publish: () => Boolean(state.overview?.qzone?.available),
+  enable_qzone_generated_image_publish: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
 };
 
@@ -338,7 +339,7 @@ const featureMeta = {
   enable_companion_reply_planner: ["回复规划", "先判断接话策略，再生成回复，减少机械问答。"],
   enable_intent_emotion_analysis: ["意图情绪", "识别用户情绪和真实意图，用于关系与回复策略。"],
   enable_response_self_review: ["回复自检", "发送前检查是否生硬、越界、太像系统提示。"],
-  enable_llm_timer_scheduling: ["隐藏预约定时", "允许模型输出隐藏 <timer> 标签预约下一次主动开口；关闭后只保留 AstrBot 原生主动任务路径。"],
+  enable_llm_timer_scheduling: ["对话临时预约", "把聊天里自然形成的稍后提醒、叫醒、回头说等约定转写成 AstrBot 官方定时计划；插件本身不再单独调度。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
   enable_relationship_state_machine: ["关系状态机", "维护陌生、熟悉、亲近等关系阶段。"],
   enable_emotion_simulation: ["情绪模拟", "维护 Bot 自身的受伤、拒近、恢复和亲近余波。"],
@@ -401,6 +402,7 @@ const featureMeta = {
   enable_web_exploration_boredom_search: ["空档自主搜索", "空闲或无聊时先自行决定搜索主题，再调用网页搜索了解新鲜事物。"],
   enable_qzone_integration: ["QQ 空间动态", "整合查看、点赞、评论和发布说说入口。"],
   enable_qzone_life_publish: ["生活说说", "根据状态、日程和日记余味低频发布公开生活动态。"],
+  enable_qzone_generated_image_publish: ["说说配图", "发布生活说说时可按概率调用主动生图能力生成配图。"],
   enable_photo_text_action: ["主动拍照/生图", "允许 Bot 在合适的主动动机下生成真实图片；本地 ComfyUI 可在电脑忙时自动延后。"],
   enable_private_reading_integration: ["夹层阅读素材", "检测到可用素材能力时，允许作为低频私下阅读来源。"],
   enable_private_reading_boredom_read: ["私下阅读", "空档、无聊或夜里低频自己搜索并阅读，形成内部印象。"],
@@ -566,6 +568,7 @@ const embeddedFeatureParentByKey = {
   enable_external_event_self_link: "enable_news_integration",
   enable_web_exploration_boredom_search: "enable_web_exploration",
   enable_qzone_life_publish: "enable_qzone_integration",
+  enable_qzone_generated_image_publish: "enable_qzone_integration",
   enable_qzone_emotional_vent_publish: "enable_emotion_simulation",
   enable_private_reading_boredom_read: "enable_private_reading_integration",
   enable_private_reading_ask_recommendation: "enable_private_reading_integration",
@@ -745,6 +748,11 @@ const configLabels = {
   enable_semantic_message_debounce: "旧版收口兼容开关",
   semantic_message_debounce_seconds: "旧版文本等待秒数",
   enable_proactive_quote_trigger_message: "引用触发消息",
+  enable_quote_group_reply: "群回复引用",
+  enable_quote_group_interjection: "群主动插话引用",
+  enable_quote_private_proactive: "私聊主动引用",
+  quote_skip_short_reply_chars: "短回复不引用阈值",
+  quote_target_strategy: "引用目标策略",
   private_image_vision_wait_seconds: "单图等待识图秒数",
   enable_private_image_gif_enhancement: "GIF 动图强化",
   private_image_gif_max_frames: "GIF 抽帧数",
@@ -902,6 +910,8 @@ const configLabels = {
   QZONE_COOKIE: "QQ 空间手动 Cookie",
   qzone_life_publish_min_interval_hours: "说说最小间隔",
   qzone_life_publish_probability: "说说触发概率",
+  enable_qzone_generated_image_publish: "说说配图",
+  qzone_generated_image_probability: "说说配图概率",
   enable_photo_text_action: "主动拍照/生图",
   photo_action_max_daily: "每日主动生图上限",
   photo_generation_backend: "主动生图后端",
@@ -950,7 +960,7 @@ const configDescriptions = {
   humanized_state_intensity: "控制睡眠不佳、健康、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
   enable_humanized_states: "总开关。关闭后不再生成拟人身体/梦境状态，只保留基础平稳状态。",
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
-  passive_injection_position: "选择被动状态、环境感知和 TTS 本轮频控等动态片段的注入位置。当前请求末尾更利于缓存；系统提示词约束更强但更容易降低缓存命中。",
+  passive_injection_position: "选择被动状态、环境感知和 TTS 本轮频控等动态片段的注入位置。当前请求末尾更利于缓存；系统提示词约束更强但更容易降低缓存命中。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
   enable_rest_reply_simulation: "开启后，日程处于睡眠、午休或休息段时，普通被动回复会先经过休息闸门；未放行时静默不回复。",
   rest_reply_mode: "仅概率醒来只按概率放行；模型判断会让模型按消息重要性、是否明确叫醒、情绪/安全需要等打分。",
   rest_reply_probability: "仅概率醒来模式使用。越低越不容易在睡眠/休息中被普通消息叫醒。",
@@ -971,7 +981,7 @@ const configDescriptions = {
   TROUBLESHOOTING_PROVIDER_ID: "用于排障中心的模型复核。留空时先跟随回复自检改写模型，再回退到陪伴通用/主模型。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
-  timer_pre_silence_minutes: "已有明确自预约/定时主动时，距离预约时间不足该分钟数会暂停普通主动、链式追问和未回复补一句。若预约文本带有休息/睡觉/起床语义，会从预约创建起静默到到点。",
+  timer_pre_silence_minutes: "已有聊天临时预约时，距离预约时间不足该分钟数会暂停普通主动、链式追问和未回复补一句，避免抢在官方定时计划前打扰。若预约文本带有休息/睡觉/起床语义，会从预约创建起静默到到点。",
   max_daily_messages: "每个私聊对象每天最多收到多少条插件主动消息。",
   passive_topic_memory_hours: "记录最近被动回复主题的时间窗口，用来判断短时间内是否又在重复同类话题。",
   tts_generation_mode: "先决定语音从哪里来。快速标签模式追求低延迟：主模型可写 <pc_tts>，插件发送前轻处理。后处理模式追求稳定：主模型只写普通回复，发送前由 TTS 文本模型判断是否需要语音并完成翻译/改写。",
@@ -1030,6 +1040,11 @@ const configDescriptions = {
   enable_semantic_message_debounce: "旧版兼容项，已并入消息收口防抖，不再单独配置。",
   semantic_message_debounce_seconds: "旧版兼容项，读取时会迁移为文本补话等待秒数。",
   enable_proactive_quote_trigger_message: "开启后，群聊被 @、引用、唤醒或连续对话保持时，Bot 的普通回复会引用当前触发消息；群聊主动插话会引用触发消息；模型预约的私聊主动若能追溯到同一私聊消息，也会引用。复读跟读/打断不会引用。",
+  enable_quote_group_reply: "控制普通群聊回复是否自动带引用。只在总开关开启后生效。",
+  enable_quote_group_interjection: "控制群主动插话是否引用触发它的群消息。复读跟读/打断仍不会引用。",
+  enable_quote_private_proactive: "控制可追溯到某条私聊消息的主动发送是否带引用。",
+  quote_skip_short_reply_chars: "回复正文不超过该字数时不附带引用。0 表示不按长度跳过。",
+  quote_target_strategy: "current 引用用户当前这条触发消息；quoted/auto 在用户引用 Bot 旧消息追问时优先引用那条旧消息。",
   private_image_vision_wait_seconds: "私聊单图确认没有继续补充后，最多等待视觉转述多久。不是图片收口时间；视觉提前完成会立刻进入主链。",
   enable_private_image_gif_enhancement: "图片转述增强的可选子功能。开启后动态 GIF 会抽取代表帧，让视觉模型理解动作、表情变化和文字变化；关闭后按普通 GIF/图片路径处理。",
   private_image_gif_max_frames: "动态 GIF 进入视觉转述时最多抽取多少个代表帧。帧数越多越能理解动作变化，但会增加识图耗时和视觉输入量。",
@@ -1135,6 +1150,8 @@ const configDescriptions = {
   QZONE_COOKIE: "可填写浏览器 QQ 空间 Cookie，作为查看、点赞、评论和发布说说的优先凭据；留空时仍使用 OneBot 自动 Cookie。",
   qzone_life_publish_min_interval_hours: "两次低频生活说说之间的最小间隔。",
   qzone_life_publish_probability: "满足条件时发布生活说说的概率，0-1。",
+  enable_qzone_generated_image_publish: "开启后，生活说说或情绪说说发布前可按概率调用主动生图能力生成一张配图。需要同时启用 QQ 空间动态和可用的主动生图后端。",
+  qzone_generated_image_probability: "满足发说说条件后尝试生成配图的概率，0-1。",
   photo_action_max_daily: "每个私聊对象每天最多生成几张主动图片。真实生成成功就消耗额度，避免失败重试时反复生图。",
   photo_generation_backend: "auto 优先本地 ComfyUI；电脑高负荷且在线图片 API 可用时会绕开本地。comfyui 只用本地，external 只用在线。",
   COMFYUI_TEXT2IMG_WORKFLOW_NAME: "用于普通随手拍、风景、桌面小物等 photo_text 的 ComfyUI 工作流名。",
@@ -1232,6 +1249,7 @@ const featureSettingGroups = {
   enable_recall_cancel_reply: ["recall_message_cache_ttl_seconds"],
   enable_recall_message_cache: ["enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items"],
   enable_forbidden_word_recall: ["recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
+  enable_proactive_quote_trigger_message: ["enable_quote_group_reply", "enable_quote_group_interjection", "enable_quote_private_proactive", "quote_skip_short_reply_chars", "quote_target_strategy"],
   enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
   enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception"],
@@ -1313,8 +1331,9 @@ const featureSettingGroups = {
   enable_external_event_self_link: ["external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_share_probability", "web_exploration_share_probability"],
   enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
   enable_web_exploration_boredom_search: ["web_exploration_interests", "web_exploration_min_interval_hours", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
-  enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
+  enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability"],
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
+  enable_qzone_generated_image_publish: ["qzone_generated_image_probability"],
   enable_photo_text_action: ["photo_action_max_daily", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "photo_generation_style", "photo_generation_style_custom_prompt"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
@@ -1377,6 +1396,18 @@ const featureSettingSections = {
       title: "违禁词撤回",
       note: "命中配置词时拦截待发送内容或尝试撤回已发消息。",
       keys: ["enable_forbidden_word_recall", "recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
+    },
+  ],
+  enable_proactive_quote_trigger_message: [
+    {
+      title: "生效场景",
+      note: "总开关开启后，再按场景决定是否真正附带引用。",
+      keys: ["enable_quote_group_reply", "enable_quote_group_interjection", "enable_quote_private_proactive"],
+    },
+    {
+      title: "引用策略",
+      note: "控制短回复是否跳过引用，以及用户引用 Bot 旧消息追问时应该挂当前消息还是旧消息。",
+      keys: ["quote_skip_short_reply_chars", "quote_target_strategy"],
     },
   ],
   enable_environment_perception: [
@@ -1468,7 +1499,7 @@ const featureSettingSections = {
     {
       title: "生活说说",
       note: "根据状态、日程和日记余味低频发布公开生活动态。",
-      keys: ["enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
+      keys: ["enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability"],
     },
   ],
   enable_emotion_simulation: [
@@ -1614,6 +1645,8 @@ const featureSettingTypes = {
   tts_constraint_mode: { type: "select", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：硬禁语音"]] },
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
+  quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
+  quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
   REST_WAKEUP_PROVIDER_ID: { type: "provider" },
   tts_voice_language: { type: "select", options: [["ja", "日语"], ["zh", "中文"], ["en", "英语"]] },
   tts_conversion_provider_id: { type: "provider" },
@@ -6000,6 +6033,11 @@ function proactiveTaskMarkup(item) {
     item.last_skip_reason ? `最近${item.last_skip_prefix || "跳过"}：${item.last_skip_reason}` : "",
     item.last_skip_ts ? `记录：${item.last_skip || "-"}` : "",
     item.created_ts ? `登记：${item.created || "-"}` : "",
+    item.job_id ? `官方任务：${item.job_id}` : "",
+    item.replaced_job_id ? `替换旧任务：${item.replaced_job_id}` : "",
+    item.cancelled_job_id ? `取消任务：${item.cancelled_job_id}` : "",
+    item.timer_status ? `预约状态：${item.timer_status}` : "",
+    item.timer_error ? `错误：${item.timer_error}` : "",
     item.raw_time ? `原始时间：${item.raw_time}` : "",
     item.trigger_message_id ? `触发消息：${item.trigger_message_id}` : "",
     item.silence_until_due ? "到点前静默" : "",
@@ -6114,6 +6152,11 @@ function proactiveTaskStatusLabel(status) {
     scheduled: "已登记",
     due: "已到点",
     overdue: "超时未发",
+    handed_off: "已交官方",
+    failed: "登记失败",
+    cancelled: "已取消",
+    cancel_failed: "取消失败",
+    cancel_skipped: "无可取消",
   }[status] || status || "未知";
 }
 
@@ -6129,7 +6172,7 @@ function proactiveAuditStatusLabel(status) {
 }
 
 function proactiveTaskSourceLabel(source, hasTimerEvent = false) {
-  if (source === "timer" || hasTimerEvent) return "插件隐藏预约";
+  if (source === "timer" || hasTimerEvent) return "官方定时计划";
   if (source === "candidate") return "主动候选";
   if (source === "followup") return "链式追问";
   if (source === "external") return "外部主动能力";
@@ -8043,19 +8086,26 @@ function featureSwitchItem(key) {
   const locked = featureLockedByProactiveOnlyMode(key);
   const tempUnlocked = featureTemporarilyUnlockedByProactiveOnly(key);
   const related = proactiveOnlyRelatedUnlocks(key);
+  const stateText = locked ? (tempUnlocked ? "临时放行" : "已锁定") : checked ? "开启" : "关闭";
+  const lockNote = tempUnlocked ? "已临时放行，关闭主动专用模式后清空" : "主动专用模式覆盖，原配置保留";
+  const relatedText = related.length ? `建议同步：${related.map((item) => item.label || item.key).join("、")}` : "";
   return `
     <section class="feature-switch-item ${checked ? "on" : "off"} ${locked ? "locked" : ""}" title="${escapeHtml(locked ? "主动消息专用模式开启时，此功能在普通被动链路中被锁定覆盖，原配置会保留。" : featureDescription(key))}">
       <label class="feature-toggle-hit" aria-label="${escapeHtml(featureLabel(key))}">
         <input type="checkbox" data-feature-key="${escapeHtml(key)}" ${checked ? "checked" : ""} ${locked ? "disabled" : ""}>
         <span class="feature-toggle-visual"></span>
       </label>
-      <button type="button" class="feature-switch-text" data-feature-open="${escapeHtml(key)}">
-        <b>${escapeHtml(featureLabel(key))}</b>
-        <span class="feature-state-text">${escapeHtml(locked ? (tempUnlocked ? "临时放行" : "已锁定") : checked ? "开启" : "关闭")}</span>
-        ${locked ? `<em>${escapeHtml(tempUnlocked ? "主动专用模式下已临时放行；关闭主动专用模式后会清空" : "被主动消息专用模式覆盖，原配置保留")}</em>` : ""}
-        ${locked && related.length ? `<em>建议同步：${escapeHtml(related.map((item) => item.label || item.key).join("、"))}</em>` : ""}
-        <small>${escapeHtml(key)}</small>
-      </button>
+      <div class="feature-switch-body">
+        <button type="button" class="feature-switch-text" data-feature-open="${escapeHtml(key)}">
+          <b>${escapeHtml(featureLabel(key))}</b>
+          <small>${escapeHtml(key)}</small>
+        </button>
+        <div class="feature-switch-meta">
+          <span class="feature-state-text">${escapeHtml(stateText)}</span>
+          ${locked ? `<span class="feature-lock-note">${escapeHtml(lockNote)}</span>` : ""}
+        </div>
+        ${locked && relatedText ? `<div class="feature-lock-related">${escapeHtml(relatedText)}</div>` : ""}
+      </div>
       ${locked ? `<button type="button" class="feature-temp-unlock-btn" data-proactive-temp-unlock="${escapeHtml(key)}" data-action="${tempUnlocked ? "clear" : "unlock"}">${escapeHtml(tempUnlocked ? "取消放行" : "临时放行")}</button>` : ""}
     </section>
   `;
@@ -8298,6 +8348,7 @@ function featureDependencyLines(key) {
   if (["enable_bilibili_boredom_watch"].includes(key)) dependencies.push(["依赖", "B 站能力可用"]);
   if (["enable_web_exploration", "enable_web_exploration_boredom_search"].includes(key)) dependencies.push(["依赖", "AstrBot 网页搜索"]);
   if (["enable_qzone_life_publish"].includes(key)) dependencies.push(["依赖", "QQ 空间动态层"]);
+  if (key === "enable_qzone_generated_image_publish") dependencies.push(["依赖", "QQ 空间动态层 + 主动拍照/生图"]);
   if (key === "enable_qzone_emotional_vent_publish") dependencies.push(["依赖", "情绪模拟 + QQ 空间动态层"]);
   if (key === "enable_photo_text_action") dependencies.push(["依赖", "ComfyUI 或在线图片 API"]);
   if (key === "enable_tts_enhancement") dependencies.push(["依赖", "当前会话 TTS provider"]);
@@ -8416,7 +8467,7 @@ const featureDetailGuides = {
   passive_injection_position: {
     summary: "选择动态提示词注入到当前请求末尾还是系统提示词。",
     trigger: "被动状态注入或请求级环境感知生效时。",
-    enabled: "当前请求末尾更利于服务端缓存；系统提示词约束更强；自动目前按缓存优先处理。",
+    enabled: "当前请求末尾更利于服务端缓存，也更适合与长期记忆/记忆召回在尾部结合；系统提示词约束更强；自动目前按缓存优先处理。",
     disabled: "不影响被动状态总开关，只决定注入位置。",
   },
   enable_cycle_state: {
@@ -8713,6 +8764,12 @@ const featureDetailGuides = {
     enabled: "Bot 可能把自己的生活片段发到空间。",
     disabled: "只读动态，不主动发布生活说说。",
   },
+  enable_qzone_generated_image_publish: {
+    summary: "给生活说说或情绪说说追加可选配图，由主动生图能力生成。",
+    trigger: "说说文本已准备发布，且满足配图概率时。",
+    enabled: "发布前会尝试生成一张符合说说内容的图片；失败时回退纯文字，不阻断发布。",
+    disabled: "空间说说只发文字或用户指令中明确提供的图片。",
+  },
   enable_private_reading_integration: {
     summary: "启用书柜夹层的私下阅读素材入口；仅在检测到对应素材能力时显示相关配置。",
     trigger: "素材能力可用、书柜打开或私下阅读检查时。",
@@ -8744,9 +8801,9 @@ const featureDetailGuides = {
     disabled: "用户不回时不会因此额外识屏。",
   },
   enable_proactive_quote_trigger_message: {
-    summary: "回复或主动消息能追溯到触发消息时，自动带引用，帮助用户确认 Bot 回的是哪一句。",
+    summary: "回复或主动消息能追溯到触发消息时，自动带引用；可按场景拆分，并可跳过过短回复。",
     trigger: "群聊被 @、引用、唤醒、连续对话保持、群主动插话，或模型预约的私聊主动能追溯触发消息时。",
-    enabled: "普通群回复、群主动插话和可追溯的私聊主动会引用触发消息；复读跟读/打断不引用。",
+    enabled: "按子开关决定普通群回复、群主动插话和私聊主动是否引用。用户引用 Bot 旧消息追问时，可选择引用当前消息或被引用的旧消息。",
     disabled: "这些消息不主动附带引用，用户需要从上下文判断回复对象。",
   },
   enable_creative_writing: {
@@ -9023,6 +9080,7 @@ function bindProactiveOnlyTempUnlockActions(root = document) {
       const key = button.dataset.proactiveTempUnlock || "";
       const action = button.dataset.action || "unlock";
       const syncRelated = button.dataset.syncRelated === "1";
+      const modeWasEnabled = proactiveOnlyModeEnabled();
       const confirmKey = `proactive-temp-${action}-${key}-${syncRelated ? "sync" : "single"}`;
       const confirmText = action === "clear"
         ? "再次点击取消临时放行"
@@ -9030,17 +9088,22 @@ function bindProactiveOnlyTempUnlockActions(root = document) {
           ? "再次点击确认同步放行"
           : "再次点击确认临时放行";
       if (!requireSecondClick(button, confirmKey, confirmText, confirmText)) return;
-      await runAction(
-        async () => {
-          const result = await postJson("/proactive_only/unlock", { key, action, sync_related: syncRelated });
-          state.overview = state.overview || {};
-          state.overview.proactive_only = result.proactive_only || state.overview.proactive_only || {};
-          renderFeatureSwitches();
-          return result;
-        },
-        action === "clear" ? "已取消临时放行" : "已临时放行",
-        button,
-      );
+      setActionBusy(button, true);
+      showToast("正在处理...");
+      try {
+        const result = await postJson("/proactive_only/unlock", { key, action, sync_related: syncRelated });
+        state.overview = state.overview || {};
+        state.overview.proactive_only = result.proactive_only || state.overview.proactive_only || {};
+        if (modeWasEnabled && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, "enable_proactive_only_mode")) {
+          state.featureDraft.enable_proactive_only_mode = true;
+        }
+        renderFeatureSwitches();
+        showToast(action === "clear" ? "已取消临时放行" : "已临时放行");
+      } catch (error) {
+        showToast(`操作失败：${error.message}`, "error");
+      } finally {
+        setActionBusy(button, false);
+      }
     });
   });
 }

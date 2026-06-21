@@ -710,7 +710,7 @@
   "timer_pre_silence_minutes": {
     "description": "预约前静默窗口（分钟）",
     "type": "int",
-    "hint": "已有明确自预约/定时主动时，距离预约时间不足该分钟数会暂停普通主动、链式追问和未回复补一句，只保留到点后的预约消息。若预约文本带有休息/睡觉/起床语义，会从预约创建起静默到到点。设为 0 只关闭普通预约的临近静默。",
+    "hint": "已有聊天临时预约时，距离预约时间不足该分钟数会暂停普通主动、链式追问和未回复补一句，避免抢在官方定时计划前打扰。若预约文本带有休息/睡觉/起床语义，会从预约创建起静默到到点。设为 0 只关闭普通预约的临近静默。",
     "slider": {
       "min": 0,
       "max": 240,
@@ -762,9 +762,9 @@
     "default": 12
   },
   "enable_llm_timer_scheduling": {
-    "description": "允许模型隐藏预约下一次主动消息",
+    "description": "对话临时预约",
     "type": "bool",
-    "hint": "开启后，私聊正常回复和框架式主动回复都可以通过隐藏的 <timer> 标签预约下一次主动开口。标签不会直接发给用户，只用于内部调度。",
+    "hint": "开启后，私聊中自然形成的稍后提醒、叫醒、回头说等临时约定会被模型写成内部 <timer> 标签；插件只负责识别、确认和转写 note，然后交给 AstrBot 官方定时计划执行，不再使用插件内部调度。",
     "default": true
   },
   "enable_proactive_decorating_hooks": {
@@ -784,6 +784,41 @@
     "type": "bool",
     "hint": "开启后，群聊中明确 @、引用、唤醒或连续对话保持触发的 Bot 回复会引用当前消息；群聊主动插话会引用触发消息；模型预约的私聊主动若能追溯到同一私聊消息，也会引用。复读跟读/打断不会引用。",
     "default": false
+  },
+  "enable_quote_group_reply": {
+    "description": "引用普通群回复触发消息",
+    "type": "bool",
+    "hint": "总开关开启后生效。群聊中被 @、被引用、唤醒或连续对话保持触发的普通回复，会按策略引用当前触发消息或被引用的 Bot 旧消息。",
+    "default": true
+  },
+  "enable_quote_group_interjection": {
+    "description": "引用群主动插话触发消息",
+    "type": "bool",
+    "hint": "总开关开启后生效。群主动插话会引用触发它的群消息；复读跟读和打断仍不会引用。",
+    "default": true
+  },
+  "enable_quote_private_proactive": {
+    "description": "引用私聊主动触发消息",
+    "type": "bool",
+    "hint": "总开关开启后生效。模型预约等能追溯到某条私聊消息的主动发送，会引用那条触发消息。",
+    "default": true
+  },
+  "quote_skip_short_reply_chars": {
+    "description": "短回复不引用阈值",
+    "type": "int",
+    "hint": "回复正文不超过该字数时不附带引用，适合避免“嗯嗯”“好哦”这类轻反应显得过重。0 表示不按长度跳过。",
+    "slider": {
+      "min": 0,
+      "max": 120,
+      "step": 1
+    },
+    "default": 0
+  },
+  "quote_target_strategy": {
+    "description": "引用目标策略",
+    "type": "string",
+    "hint": "current=总是引用当前触发消息；quoted=用户引用 Bot 旧消息追问时优先引用被引用的旧消息；auto=当前等同 quoted 的保守自动策略，其他场景仍引用当前消息。",
+    "default": "current"
   },
   "max_proactive_plan_lag_minutes": {
     "description": "主动候选过期重排时间（分钟）",
@@ -2943,7 +2978,7 @@
   "passive_injection_position": {
     "description": "动态提示词注入位置",
     "type": "string",
-    "hint": "控制被动状态、请求级环境感知和 TTS 本轮频控等动态片段注入到哪里。当前请求末尾更利于服务端缓存；系统提示词约束更强但更容易降低缓存命中；自动当前等同当前请求末尾。",
+    "hint": "控制被动状态、请求级环境感知和 TTS 本轮频控等动态片段注入到哪里。当前请求末尾更利于服务端缓存；系统提示词约束更强但更容易降低缓存命中；自动当前等同当前请求末尾。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
     "options": [
       "prompt",
       "system_prompt",
