@@ -336,9 +336,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_ALIASES = {
 _PROACTIVE_ONLY_TEMP_UNLOCK_LABELS = {
     "all": "全部被动链路",
     "inject_passive_states": "被动状态注入",
-    "enable_companion_reply_planner": "回复规划",
     "enable_intent_emotion_analysis": "意图/情绪分析",
-    "enable_response_self_review": "回复自检",
     "enable_llm_timer_scheduling": "对话临时预约",
     "enable_passive_topic_suppression": "重复话题抑制",
     "enable_environment_perception": "环境感知",
@@ -368,9 +366,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_GROUPS = {
     },
     "llm_request": {
         "inject_passive_states",
-        "enable_companion_reply_planner",
         "enable_intent_emotion_analysis",
-        "enable_response_self_review",
         "enable_llm_timer_scheduling",
         "enable_passive_topic_suppression",
         "enable_environment_perception",
@@ -400,7 +396,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.1.0",
+    "4.2.0",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
@@ -557,6 +553,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.check_interval_seconds = self._cfg_int(c, "check_interval_seconds", 60, 30)
         self.idle_minutes = self._cfg_int(c, "idle_minutes", 60, 5)
         self.min_interval_minutes = self._cfg_int(c, "min_interval_minutes", 120, 10)
+        self.proactive_unanswered_slowdown_start = self._cfg_int(c, "proactive_unanswered_slowdown_start", 1, 1, 10)
+        self.proactive_unanswered_max_interval_multiplier = min(
+            8.0,
+            max(1.0, self._cfg_float(c, "proactive_unanswered_max_interval_multiplier", 2.2, 1.0)),
+        )
+        self.friend_unanswered_max_cooldown_hours = min(
+            168.0,
+            max(1.0, self._cfg_float(c, "friend_unanswered_max_cooldown_hours", 60.0, 1.0)),
+        )
         self.timer_pre_silence_minutes = self._cfg_int(c, "timer_pre_silence_minutes", 20, 0, 240)
         self.max_daily_messages = self._cfg_int(c, "max_daily_messages", 8, 0, 12)
         self.inbound_message_debounce_seconds = self._cfg_float(c, "inbound_message_debounce_seconds", 3.0, 0.0)
@@ -834,9 +839,11 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.enable_mai_style_integration = self._cfg_bool(c, "enable_mai_style_integration", True)
         self.enable_companion_memory = self._cfg_bool(c, "enable_companion_memory", True)
         self.enable_expression_learning = self._cfg_bool(c, "enable_expression_learning", True)
-        self.enable_companion_reply_planner = self._cfg_bool(c, "enable_companion_reply_planner", True)
         self.enable_intent_emotion_analysis = self._cfg_bool(c, "enable_intent_emotion_analysis", True)
         self.enable_response_self_review = self._cfg_bool(c, "enable_response_self_review", True)
+        self.response_review_mode = self._cfg_str(c, "response_review_mode", "severe_only", "severe_only").lower()
+        if self.response_review_mode not in {"local_only", "severe_only", "full"}:
+            self.response_review_mode = "severe_only"
         self.enable_passive_topic_suppression = self._cfg_bool(c, "enable_passive_topic_suppression", True)
         self.enable_relationship_state_machine = self._cfg_bool(c, "enable_relationship_state_machine", True)
         self.enable_emotion_simulation = self._cfg_bool(c, "enable_emotion_simulation", True)
@@ -1955,9 +1962,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             return
         if self._proactive_only_blocks_passive_event(event, "enable_group_companion"):
             return
-        quote_message_id = self._group_current_reply_quote_message_id(event, text_or_chain=chain)
-        if not quote_message_id:
-            return
         result = event.get_result()
         if result is None:
             return
@@ -1968,6 +1972,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             pass
         chain = list(getattr(result, "chain", []) or [])
         if not chain or self._chain_has_reply_component(chain):
+            return
+        quote_message_id = self._group_current_reply_quote_message_id(event, text_or_chain=chain)
+        if not quote_message_id:
             return
         quoted_chain = self._with_optional_reply(chain, quote_message_id, event=event)
         if quoted_chain == chain:
@@ -2716,9 +2723,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             return True
         full_path_keys = {
             "inject_passive_states",
-            "enable_companion_reply_planner",
             "enable_intent_emotion_analysis",
-            "enable_response_self_review",
             "enable_llm_timer_scheduling",
             "enable_passive_topic_suppression",
             "enable_private_image_self_recognition",
@@ -3787,13 +3792,13 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             elif action in {"记忆", "陪伴记忆"}:
                 response = "当前陪伴记忆：\n" + self._format_companion_memory_for_prompt(user)
             elif action in {"表达学习", "说话风格", "口癖"}:
-                response = "当前表达学习：\n" + self._format_expression_profile_for_prompt(user)
+                response = "当前表达节奏学习：\n" + self._format_expression_profile_for_prompt(user)
             elif action in {"气氛", "意图", "关系状态"}:
                 response = "当前气氛判断：\n" + (self._format_intent_relationship_injection(user) or "暂无样本。")
             elif action in {"片段", "对话片段", "共同经历", "未完成"}:
                 episode_text = self._format_dialogue_episodes_for_prompt(user) or "暂无对话片段记忆。"
                 loop_text = self._format_open_loops_for_prompt(user) or "暂无未完成约定。"
-                response = f"当前对话片段：\n{episode_text}\n\n未完成约定/可续话头：\n{loop_text}"
+                response = f"当前对话片段：\n{episode_text}\n\n未完话头：\n{loop_text}"
             elif action in {"长期记忆", "livingmemory", "lmem", "向量记忆"}:
                 response = self._format_livingmemory_status()
             elif action in {"日记", "bot日记", "小记"}:

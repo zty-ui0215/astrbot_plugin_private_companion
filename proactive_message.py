@@ -1881,7 +1881,160 @@ class ProactiveMessageMixin:
             return ""
         if self._should_drop_misstaged_proactive_text(cleaned, reason=reason, action=action):
             return ""
-        return self._normalize_proactive_sentence_flow(cleaned)
+        reviewed = await self._review_proactive_message_stance(
+            user,
+            cleaned,
+            reason=reason,
+            action=action,
+            action_context=action_context,
+            motive=motive,
+        )
+        if not reviewed:
+            return ""
+        return self._normalize_proactive_sentence_flow(reviewed)
+
+    def _proactive_reply_air_flags(
+        self,
+        text: str,
+        *,
+        reason: str,
+        action: str,
+        action_context: str = "",
+    ) -> list[str]:
+        cleaned = _single_line(text, 260)
+        if not cleaned or action not in {"message", "photo_text"}:
+            return []
+        flags: list[str] = []
+        reply_opener_pattern = (
+            r"^(?:好呀|好啊|可以呀|可以啊|行呀|行啊|嗯好|那就|你说呢|要不|不然|"
+            r"确实|对呀|对啊|是吧|也是|哈哈[,，\s]*我也|我也觉得|你说得对)"
+        )
+        if re.search(reply_opener_pattern, cleaned):
+            flags.append("reply_air_opener")
+        if re.search(r"(?:刚看到|才看到|刚才看到|看到你(?:刚刚|刚才)?发|看到你说)", cleaned):
+            flags.append("pretends_recent_inbound")
+        if re.search(r"你(?:刚刚|刚才|现在)?(?:叫|喊|问|说|发|来找|找|催)我", cleaned):
+            flags.append("inverts_initiator")
+        if re.search(r"(?:你问|你说|你刚才说|你刚刚说)[^。！？\n]{0,24}(?:我觉得|我也|确实|可以|好呀|好啊)", cleaned):
+            flags.append("answers_old_context")
+        if reason in {"morning_greeting", "noon_greeting", "evening_greeting", "check_in"} and re.search(
+            r"(?:一直等着|等你问|你到时候|到时候叫|到时候喊|那就这么说定|按你说的)",
+            cleaned,
+        ):
+            flags.append("stale_agreement")
+        if "真实图片文件：" not in str(action_context or "") and "图片路径：" not in str(action_context or ""):
+            if re.search(r"(?:发你看|给你看图|看图|图里|照片里|图片里)", cleaned):
+                flags.append("claims_missing_media")
+        return list(dict.fromkeys(flags))
+
+    async def _review_proactive_message_stance(
+        self,
+        user: dict[str, Any],
+        text: str,
+        *,
+        reason: str,
+        action: str,
+        action_context: str = "",
+        motive: str = "",
+    ) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        flags = self._proactive_reply_air_flags(
+            cleaned,
+            reason=reason,
+            action=action,
+            action_context=action_context,
+        )
+        if not flags:
+            return cleaned
+        if not bool(getattr(self, "enable_response_self_review", True)):
+            logger.info(
+                "[PrivateCompanion] 主动消息疑似回复空气,自检关闭已丢弃: flags=%s text=%s",
+                ",".join(flags),
+                _single_line(cleaned, 120),
+            )
+            return ""
+        mode = str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower()
+        if mode not in {"local_only", "severe_only", "full"}:
+            mode = "severe_only"
+        if mode == "local_only":
+            logger.info(
+                "[PrivateCompanion] 主动消息疑似回复空气,仅本地保护已丢弃: flags=%s text=%s",
+                ",".join(flags),
+                _single_line(cleaned, 120),
+            )
+            return ""
+        prompt = f"""
+把下面这条主动私聊消息改成真正的主动开口。
+它不是在回复用户刚发来的消息；聊天历史只能当背景。
+
+【原主动消息】
+{cleaned}
+
+【问题】
+{", ".join(flags)}
+
+【主动原因】
+{reason or "check_in"}
+
+【动机/话题】
+{_single_line(motive or user.get("planned_proactive_motive"), 160)}
+{_single_line(user.get("planned_proactive_topic"), 120)}
+
+【动作上下文】
+{_single_line(action_context, 260) or "（无）"}
+
+要求：
+- 只输出要发送的正文
+- 不要写成“好呀/确实/我也觉得/刚看到/你刚刚问我/你来找我了”
+- 不要把历史消息当成当前正在发生的对话
+- 没有真实图片或工具结果时，不要说已经发图、看图、转述或执行动作
+- 尽量 1 到 2 句，像自然想起对方后随手说一句
+""".strip()
+        started = time.perf_counter()
+        rewritten = await self._llm_call(
+            prompt,
+            max_tokens=180,
+            provider_id=self._task_provider(self.response_review_provider_id, self.mai_style_provider_id),
+            task="response_review",
+        )
+        candidate = self._sanitize_proactive_text(str(rewritten or "").strip())
+        candidate = self._sanitize_action_boundaries(
+            candidate,
+            reason=reason,
+            action=action,
+            action_context=action_context,
+            has_real_image="真实图片文件：" in action_context or "图片路径：" in action_context,
+        )
+        logger.info(
+            "[PrivateCompanion] 主动消息润色完成: mode=%s flags=%s elapsed=%dms before=%s after=%s",
+            mode,
+            ",".join(flags),
+            int((time.perf_counter() - started) * 1000),
+            _single_line(cleaned, 100),
+            _single_line(candidate, 100),
+        )
+        if not candidate:
+            return ""
+        if len(candidate) > max(len(cleaned) + 80, 260):
+            return ""
+        if re.search(r"(提示词|系统|JSON|改写后|以下是|主动消息|聊天历史)", candidate, re.IGNORECASE):
+            return ""
+        remaining_flags = self._proactive_reply_air_flags(
+            candidate,
+            reason=reason,
+            action=action,
+            action_context=action_context,
+        )
+        if remaining_flags:
+            logger.info(
+                "[PrivateCompanion] 主动消息润色后仍疑似回复空气,已丢弃: flags=%s text=%s",
+                ",".join(remaining_flags),
+                _single_line(candidate, 120),
+            )
+            return ""
+        return candidate
 
     def _repair_proactive_subject_drift(
         self,

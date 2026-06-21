@@ -61,7 +61,7 @@ const providerLabels = {
   PHOTO_PROMPT_PROVIDER_ID: "生图提示词",
   NARRATION_PROVIDER_ID: "工具结果转述",
   HISTORY_SUMMARY_PROVIDER_ID: "昨日对话摘要",
-  RESPONSE_REVIEW_PROVIDER_ID: "回复自检改写",
+  RESPONSE_REVIEW_PROVIDER_ID: "主动消息润色",
   TROUBLESHOOTING_PROVIDER_ID: "排障检查",
   RELATIONSHIP_ANALYSIS_PROVIDER_ID: "关系站位分析",
   COMPANION_MEMORY_PROVIDER_ID: "长期画像整理",
@@ -176,7 +176,7 @@ const providerGuides = {
     fallback: "留空时使用 AstrBot 默认会话模型。",
   },
   MAI_STYLE_PROVIDER_ID: {
-    purpose: "陪伴风格通用模型，也是多数分项能力留空后的第一层兜底。",
+    purpose: "私聊互动策略通用模型，也是多数分项能力留空后的第一层兜底。",
     fit: "适合稳定、成本可控、中文口语自然、能守住人格边界的模型。",
     fallback: "留空时跟随主模型。",
   },
@@ -222,14 +222,14 @@ const providerGuides = {
     fallback: "留空时跟随日程生成模型。",
   },
   RESPONSE_REVIEW_PROVIDER_ID: {
-    purpose: "只在少数回复不自然时做二次自检和轻改写，减少助手腔、越界和提示词泄露。",
+    purpose: "主要用于主动消息发送前轻改写，避免把历史消息当成用户刚发来的话来回复。",
     fit: "适合便宜、短文本改写自然、边界判断稳的模型。",
     fallback: "留空时回退到陪伴通用模型，再回退到主模型。",
   },
   TROUBLESHOOTING_PROVIDER_ID: {
     purpose: "扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。",
     fit: "适合便宜、低延迟、指令遵循稳定、分类判断保守的小模型。",
-    fallback: "留空时先跟随回复自检改写模型，再回退到陪伴通用模型和主模型。",
+    fallback: "留空时先跟随主动消息润色模型，再回退到陪伴通用模型和主模型。",
   },
   RELATIONSHIP_ANALYSIS_PROVIDER_ID: {
     purpose: "分析关系阶段、亲近度、打扰边界和互动站位，影响后续语气判断。",
@@ -333,19 +333,18 @@ const providerGroupByKey = providerGroups.reduce((acc, group) => {
 
 const featureMeta = {
   enable_proactive_only_mode: ["主动消息专用模式", "只保留主动私聊调度、生成和发送；普通私聊/群聊不再进入本插件被动增强。"],
-  enable_mai_style_integration: ["陪伴风格整合", "把关系站位、记忆和自然对话规则注入回复。"],
+  enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
   enable_companion_memory: ["长期画像", "沉淀用户偏好、边界、关系线索和可复用事实。"],
-  enable_expression_learning: ["表达学习", "学习用户常用短句、语气和称呼，提升贴近感。"],
-  enable_companion_reply_planner: ["回复规划", "先判断接话策略，再生成回复，减少机械问答。"],
-  enable_intent_emotion_analysis: ["意图情绪", "识别用户情绪和真实意图，用于关系与回复策略。"],
-  enable_response_self_review: ["回复自检", "发送前检查是否生硬、越界、太像系统提示。"],
+  enable_expression_learning: ["表达节奏学习", "统计用户句长、标点、句尾和短句节奏，只影响回复口感。"],
+  enable_intent_emotion_analysis: ["本地意图/情绪快判", "用带置信度的本地规则识别求助、低落、玩笑、亲近和边界。"],
+  enable_response_self_review: ["主动消息润色", "主动消息发送前防“回复空气”；普通被动回复只保留轻量本地保护。"],
   enable_llm_timer_scheduling: ["对话临时预约", "把聊天里自然形成的稍后提醒、叫醒、回头说等约定转写成 AstrBot 官方定时计划；插件本身不再单独调度。"],
   enable_passive_topic_suppression: ["话题抑制", "避免短时间反复主动提同一个话题。"],
-  enable_relationship_state_machine: ["关系状态机", "维护陌生、熟悉、亲近等关系阶段。"],
+  enable_relationship_state_machine: ["关系距离感", "根据亲近、冷淡、边界和回应情况调整相处分寸。"],
   enable_emotion_simulation: ["情绪模拟", "维护 Bot 自身的受伤、拒近、恢复和亲近余波。"],
   enable_dialogue_episode_memory: ["私聊片段", "把连续对话整理成共同经历和可续话头。"],
-  enable_open_loop_tracking: ["未完话头", "记录用户提到的待办、约定、之后再说的事。"],
-  enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么，用于日程细化和主动理解。"],
+  enable_open_loop_tracking: ["未完话头", "记住对话里还留着、之后可能会回头接的事。"],
+  enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么；被动只在相关时理解，主动可到点关心。"],
   enable_humanized_states: ["拟人身体状态", "生成精力、睡眠、梦境、健康、饥饿和周期等扮演状态，影响日程、主动消息和被动语气。"],
   enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
@@ -441,7 +440,6 @@ const featureGroups = [
       "enable_mai_style_integration",
       "enable_companion_memory",
       "enable_expression_learning",
-      "enable_companion_reply_planner",
       "enable_intent_emotion_analysis",
       "enable_response_self_review",
       "enable_passive_topic_suppression",
@@ -585,9 +583,7 @@ const embeddedFeatureKeys = new Set(Object.keys(embeddedFeatureParentByKey));
 
 const proactiveOnlyLockedFeatureKeys = new Set([
   "inject_passive_states",
-  "enable_companion_reply_planner",
   "enable_intent_emotion_analysis",
-  "enable_response_self_review",
   "enable_llm_timer_scheduling",
   "enable_passive_topic_suppression",
   "enable_environment_perception",
@@ -820,6 +816,9 @@ const configLabels = {
   passive_topic_memory_hours: "话题抑制记忆小时",
   idle_minutes: "空闲门槛分钟",
   min_interval_minutes: "最小主动间隔分钟",
+  proactive_unanswered_slowdown_start: "未回应降频起点",
+  proactive_unanswered_max_interval_multiplier: "未回应最大间隔倍率",
+  friend_unanswered_max_cooldown_hours: "朋友未回应最长冷却",
   timer_pre_silence_minutes: "预约前静默窗口",
   check_interval_seconds: "后台检查间隔秒",
   enabled: "群聊总开关",
@@ -871,7 +870,7 @@ const configLabels = {
   atrelay_multi_target_limit: "多目标单次上限",
   memory_refresh_interval_minutes: "长期画像整理间隔",
   max_companion_memory_items: "长期画像条目上限",
-  max_learned_expression_items: "表达样本上限",
+  max_learned_expression_items: "表达节奏样本上限",
   episode_memory_refresh_messages: "片段整理消息阈值",
   episode_memory_refresh_minutes: "片段整理时间阈值",
   max_dialogue_episodes: "私聊片段上限",
@@ -978,9 +977,12 @@ const configDescriptions = {
   enable_almanac_perception: "开启后生成轻量宜忌氛围标签，只作表达参考。",
   enable_yesterday_screen_diary_context: "读取 screen_companion 的昨日屏幕观察日记脱敏摘要，作为今日状态、日程和生活节奏背景；不会读取今天实时屏幕。",
   screen_diary_context_max_chars: "注入给状态和日程模型的昨日屏幕观察摘要最大字符数。建议较短，只保留活动类型和节奏。",
-  TROUBLESHOOTING_PROVIDER_ID: "用于排障中心的模型复核。留空时先跟随回复自检改写模型，再回退到陪伴通用/主模型。",
+  TROUBLESHOOTING_PROVIDER_ID: "用于排障中心的模型复核。留空时先跟随主动消息润色模型，再回退到陪伴通用/主模型。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
+  proactive_unanswered_slowdown_start: "用户连续几次不回应 Bot 主动消息后，开始自动降低主动频率。",
+  proactive_unanswered_max_interval_multiplier: "连续未回应时，最小主动间隔最多放大到多少倍。",
+  friend_unanswered_max_cooldown_hours: "朋友用户持续未回应时，主动消息最长可延后到多少小时内再尝试。",
   timer_pre_silence_minutes: "已有聊天临时预约时，距离预约时间不足该分钟数会暂停普通主动、链式追问和未回复补一句，避免抢在官方定时计划前打扰。若预约文本带有休息/睡觉/起床语义，会从预约创建起静默到到点。",
   max_daily_messages: "每个私聊对象每天最多收到多少条插件主动消息。",
   passive_topic_memory_hours: "记录最近被动回复主题的时间窗口，用来判断短时间内是否又在重复同类话题。",
@@ -1111,11 +1113,11 @@ const configDescriptions = {
   group_slang_web_search_results: "黑话释义联网参考开启时，每个候选词最多保留多少条网页摘要给模型判断匹配程度。",
   memory_refresh_interval_minutes: "长期画像整理的最小间隔，越短越容易产生模型调用。",
   max_companion_memory_items: "每个私聊对象最多保留多少条长期画像条目。",
-  max_learned_expression_items: "每个私聊对象最多保留多少条表达习惯样本。",
+  max_learned_expression_items: "每个私聊对象最多保留多少条短句、句尾和标点节奏样本；不作为长期记忆事实。",
   episode_memory_refresh_messages: "累计多少条私聊消息后尝试整理一次对话片段。",
   episode_memory_refresh_minutes: "距离上次整理多久后允许再次整理私聊片段。",
-  max_dialogue_episodes: "每个私聊对象最多保留多少条对话片段。",
-  user_habit_min_count: "同一时段同类行为至少出现多少次，才被视为可用于提示词的用户习惯。",
+  max_dialogue_episodes: "每个私聊对象最多保留多少条对话片段；实际回复时只择要使用最近或相关片段。",
+  user_habit_min_count: "同一时段同类行为至少出现多少次，才被视为用户习惯；旧习惯会衰减，被动回复还要求当前时段和话题相关。",
   user_habit_max_items: "每个私聊对象最多保留多少条行为习惯模式。",
   skill_growth_rate: "技能经验增长倍率。1 为默认速度，越高升级越快。",
   skill_growth_custom_skills: "手动补充技能名，可用逗号、换行或 JSON 列表表达。",
@@ -1211,7 +1213,6 @@ const featureSettingGroups = {
     "max_companion_memory_items",
     "enable_expression_learning",
     "max_learned_expression_items",
-    "enable_companion_reply_planner",
     "enable_intent_emotion_analysis",
     "enable_response_self_review",
     "enable_passive_topic_suppression",
@@ -1228,11 +1229,10 @@ const featureSettingGroups = {
   ],
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
   enable_expression_learning: ["max_learned_expression_items"],
-  enable_companion_reply_planner: ["default_style"],
-  enable_intent_emotion_analysis: ["default_style"],
-  enable_response_self_review: [],
+  enable_intent_emotion_analysis: [],
+  enable_response_self_review: ["response_review_mode", "response_review_max_chars"],
   enable_passive_topic_suppression: ["passive_topic_memory_hours"],
-  enable_relationship_state_machine: ["default_style"],
+  enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
   enable_emotion_simulation: ["emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
   enable_dialogue_episode_memory: ["episode_memory_refresh_messages", "episode_memory_refresh_minutes", "max_dialogue_episodes"],
   enable_open_loop_tracking: ["max_dialogue_episodes"],
@@ -1350,7 +1350,7 @@ const featureSettingSections = {
   enable_mai_style_integration: [
     {
       title: "回复基座",
-      note: "控制陪伴风格注入和基础语气。",
+      note: "控制私聊接话策略和基础语气。",
       keys: ["default_style"],
     },
     {
@@ -1360,13 +1360,13 @@ const featureSettingSections = {
     },
     {
       title: "回复策略",
-      note: "意图画像、回复规划、自检和重复话题抑制。",
-      keys: ["enable_companion_reply_planner", "enable_intent_emotion_analysis", "enable_response_self_review", "enable_passive_topic_suppression", "passive_topic_memory_hours"],
+      note: "意图画像、主动消息润色和重复话题抑制。",
+      keys: ["enable_intent_emotion_analysis", "enable_response_self_review", "response_review_mode", "response_review_max_chars", "enable_passive_topic_suppression", "passive_topic_memory_hours"],
     },
     {
       title: "关系与习惯",
       note: "关系距离、未完话头和用户时段习惯。Bot 自身受伤余波在“情绪模拟”里配置。",
-      keys: ["enable_relationship_state_machine", "enable_open_loop_tracking", "enable_user_habit_learning", "user_habit_min_count", "user_habit_max_items"],
+      keys: ["enable_relationship_state_machine", "proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours", "enable_open_loop_tracking", "enable_user_habit_learning", "user_habit_min_count", "user_habit_max_items"],
     },
   ],
   enable_message_debounce: [
@@ -1645,6 +1645,7 @@ const featureSettingTypes = {
   tts_constraint_mode: { type: "select", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：硬禁语音"]] },
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
+  response_review_mode: { type: "select", options: [["severe_only", "主动高风险调用模型"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
   REST_WAKEUP_PROVIDER_ID: { type: "provider" },
@@ -1750,7 +1751,7 @@ const tokenTaskLabels = {
   diary: "日记整理",
   memory_profile: "长期画像",
   dialogue_episode: "私聊片段",
-  response_review: "回复自检",
+  response_review: "主动消息润色",
   relationship: "关系分析",
   group_interject: "群聊插话",
   group_episode: "群聊片段",
@@ -3888,6 +3889,8 @@ function emotionGateBlock(detail) {
     ["对象", rel.last_emotion_target || intent.emotion_target || "-"],
     ["规则", rel.last_emotion_rule || intent.emotion_rule || "-"],
     ["强度", rel.last_emotion_intensity ?? intent.emotion_intensity ?? 0],
+    ["意图置信度", rel.last_intent_confidence ?? intent.confidence ?? "-"],
+    ["情绪置信度", rel.last_emotion_confidence ?? intent.emotion_confidence ?? "-"],
     ["原因", rel.last_emotion_reason || intent.emotion_reason || rel.last_hurt_reason || ""],
   ];
   const preText = rel.last_hurt_text ? `最近触发文本：${rel.last_hurt_text}` : "";
@@ -8138,6 +8141,10 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, name)) return Boolean(state.featureDraft[name]);
     return toBool(settings[name]);
   };
+  const valueSetting = (name, fallback = "") => {
+    if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, name)) return state.featureDraft[name];
+    return Object.prototype.hasOwnProperty.call(settings, name) ? settings[name] : fallback;
+  };
   if (featureKey === "enable_humanized_states") {
     const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "REST_WAKEUP_PROVIDER_ID"]);
     if (restChildren.has(settingKey)) {
@@ -8148,6 +8155,12 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
   }
   if (featureKey === "enable_message_debounce") {
     if (settingKey === "text_message_debounce_seconds" && boolSetting("enable_smart_message_debounce")) return false;
+    return true;
+  }
+  if (featureKey === "enable_response_self_review") {
+    if (settingKey === "response_review_max_chars") {
+      return String(valueSetting("response_review_mode", "severe_only")) === "full";
+    }
     return true;
   }
   if (featureKey !== "enable_tts_enhancement") return true;
@@ -8342,8 +8355,8 @@ function featureDependencyLines(key) {
   if (key === "enable_proactive_only_mode") dependencies.push(["注意", "开启后被动增强与群聊观察会被总模式跳过"]);
   if (key !== "enable_group_companion" && key.startsWith("enable_group_")) dependencies.push(["依赖", "群聊总开关"]);
   if (key === "enable_group_conversation_followup") dependencies.push(["依赖", "群聊场景感知"]);
-  if (["enable_companion_memory", "enable_expression_learning", "enable_companion_reply_planner", "enable_intent_emotion_analysis", "enable_response_self_review", "enable_passive_topic_suppression", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking"].includes(key)) {
-    dependencies.push(["依赖", "陪伴风格整合"]);
+  if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_response_self_review", "enable_passive_topic_suppression", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking"].includes(key)) {
+    dependencies.push(["依赖", "私聊互动策略"]);
   }
   if (["enable_bilibili_boredom_watch"].includes(key)) dependencies.push(["依赖", "B 站能力可用"]);
   if (["enable_web_exploration", "enable_web_exploration_boredom_search"].includes(key)) dependencies.push(["依赖", "AstrBot 网页搜索"]);
@@ -8369,9 +8382,9 @@ const featureDetailGuides = {
     disabled: "按各功能开关正常参与私聊被动增强、群聊观察、图片/转发处理和提示词注入。",
   },
   enable_mai_style_integration: {
-    summary: "把插件整理出的关系、记忆、状态和说话风格放进普通回复里，是陪伴回复增强的核心入口。",
+    summary: "把插件整理出的相处分寸、偏好和说话风格放进普通回复里，是私聊回复质感增强的核心入口。",
     trigger: "每次 Bot 正常回复前生效。",
-    enabled: "回复会参考关系阶段、长期画像、表达习惯和当前状态。",
+    enabled: "回复会参考相处分寸、互动偏好、表达习惯和必要时的本轮接话策略；不在这里重复写身份事实。",
     disabled: "其他学习内容仍可记录，但主回复更接近 AstrBot 原本的普通回复。",
   },
   enable_companion_memory: {
@@ -8381,10 +8394,10 @@ const featureDetailGuides = {
     disabled: "不会新增长期画像，已有画像仍可在页面中查看和管理。",
   },
   enable_expression_learning: {
-    summary: "学习用户常用短句、口癖、称呼和语气，让回复更贴近日常相处感。",
-    trigger: "私聊中出现可复用表达时低频记录。",
-    enabled: "Bot 会在合适场景模仿或呼应你的表达习惯。",
-    disabled: "不会继续学习新口癖，回复会更少带用户个人语气痕迹。",
+    summary: "统计用户常用句长、标点、句尾味道和短句节奏，让回复更像同一段聊天里的自然接话。",
+    trigger: "每次私聊文本到达时本地更新统计，不调用模型。",
+    enabled: "Bot 只会参考节奏和语气轻重，不会把样本当成称呼规则、身份事实或长期偏好。",
+    disabled: "不会继续更新表达节奏统计，回复更接近 AstrBot 默认人格的原始表达。",
   },
   enable_tts_enhancement: {
     summary: "支持聊天文本保留中文、<tts> 内生成外语语音，并把 TTS 生成路径、标签规范化、语种控制、语音后中文释义和发送前朗读文本清洗统一收口处理。",
@@ -8392,58 +8405,52 @@ const featureDetailGuides = {
     enabled: "可处理标准或错拼 <tts> 标签，外语语音块缺少中文含义时会自动补一句，并按配置把纯文本短回复转换为语音。",
     disabled: "只保留本插件原有主动 voice 行为，不额外改写普通回复。",
   },
-  enable_companion_reply_planner: {
-    summary: "回复前先判断这轮更适合安慰、接梗、转移、认真回答还是保持沉默感。",
-    trigger: "私聊回复前，尤其是情绪或关系语境明显时。",
-    enabled: "能减少答非所问、机械追问和不合时宜的热情。",
-    disabled: "直接交给主模型回复，少一层陪伴策略判断。",
-  },
   enable_intent_emotion_analysis: {
-    summary: "把用户这句话背后的情绪和真实意图整理成可注入的意图画像，用于回复策略和页面查看。",
-    trigger: "私聊出现情绪、暗示、玩笑或不明确请求时。",
-    enabled: "Bot 更容易分清撒娇、抱怨、求助、玩梗和普通聊天，并把近期意图写入提示词。",
-    disabled: "不再向提示词注入意图画像；情绪模拟和关系状态机仍会使用轻量内部规则维护自己的状态。",
+    summary: "用本地规则快速判断这句话更像求助、低落、玩笑、亲近还是边界，并给出置信度。",
+    trigger: "每次私聊文本进入时本地执行，不调用模型。",
+    enabled: "高置信度结果会影响本轮策略；低置信度只记录在排障信息里，不硬注入提示词。",
+    disabled: "不再注入本轮意图策略；情绪模拟和关系距离感仍可基于自身开关使用轻量状态。",
   },
   enable_response_self_review: {
-    summary: "发送前检查回复是否生硬、越界、重复、太像系统提示或不符合人格。",
-    trigger: "模型生成回复后、发送前。",
-    enabled: "问题回复会被轻微修正或降噪。",
-    disabled: "回复少一次自检，速度略快但稳定性下降。",
+    summary: "主动消息发送前做轻量润色，重点避免主动开口写成“好呀/确实/刚看到你说”这类像在回复空气的话。",
+    trigger: "主动消息生成后、发送前；普通被动回复只保留防漏、防复读和突然换话题等本地保护，full 模式才会积极改写被动回复。",
+    enabled: "主动消息命中回复空气风险时会尝试模型重写；重写后仍不对就丢弃本轮主动，宁可不发。",
+    disabled: "不再调用模型润色主动消息；本地仍会尽量丢弃明显错误的主动消息。",
   },
   enable_passive_topic_suppression: {
     summary: "记录最近被动回复主题，限制短时间内反复把同类话题带回聊天，避免像卡在一个话题上。",
     trigger: "私聊回复生成后和下一轮回复审校时。",
-    enabled: "相似话题会被标记为重复，回复自检可轻微改写或压低重复表达。",
+    enabled: "相似话题会被标记为重复；被动 full 模式下可能参与轻微改写，默认只做本地抑制。",
     disabled: "Bot 可能更频繁重复刚提过的内容或相似收尾。",
   },
   enable_relationship_state_machine: {
-    summary: "维护陌生、熟悉、亲近、疏离等关系阶段，并把变化反馈给回复和主动行为。",
-    trigger: "私聊互动、用户表达边界、长期未联系或重要事件后。",
-    enabled: "Bot 会根据关系阶段调整距离感、称呼和主动程度。",
-    disabled: "关系更像静态设定，变化感会弱一些。",
+    summary: "维护 Bot 和用户之间的距离感，让回复和主动行为随亲近、冷淡、边界、长期未联系和主动消息回应情况自然变化。",
+    trigger: "私聊互动、用户表达边界、亲近或冷淡、长期未联系、主动消息持续未回应或重要事件后。",
+    enabled: "Bot 会更注意什么时候靠近、什么时候退一步；如果对方持续不接主动消息，会逐渐放轻并拉长主动间隔。",
+    disabled: "关系更像静态设定，距离变化和边界收敛会弱一些。",
   },
   enable_emotion_simulation: {
     summary: "维护 Bot 自身的短期情绪余波，例如受伤、拒近、恢复和正向亲近。",
     trigger: "私聊出现伤害性表达、道歉、安抚、夸奖或亲密互动后；不强依赖意图画像开关。",
     enabled: "Bot 会在极端受伤时短期收敛、暂停主动贴近；可选启用 QQ 空间发泄说说。",
-    disabled: "Bot 不维护自身情绪余波，关系状态机仍可处理边界和距离感。",
+    disabled: "Bot 不维护自身情绪余波，关系距离感仍可处理边界和相处分寸。",
   },
   enable_dialogue_episode_memory: {
-    summary: "把连续私聊整理成“共同经历”片段，方便之后自然接上以前聊过的事。",
+    summary: "把连续私聊整理成“共同经历”片段，之后只择要使用最近或相关片段来保持连续感。",
     trigger: "私聊达到消息数或时间整理阈值。",
-    enabled: "Bot 能引用近期片段，而不是只记单条事实。",
+    enabled: "Bot 能自然接回近期共同经历，而不是每次都像重新开始。",
     disabled: "不会新增私聊片段，长期连续感会降低。",
   },
   enable_open_loop_tracking: {
-    summary: "记录未完成的话头、约定、用户说之后再聊的事和需要回头确认的内容。",
-    trigger: "用户提到待办、承诺、悬而未决的话题时。",
-    enabled: "Bot 后续可能自然追问或记得没说完的事。",
+    summary: "主要从私聊片段里整理那些还留着、之后可能会回头接的事，普通回复里会并入近期共同经历。",
+    trigger: "片段整理发现未完成事项，或用户明确说“提醒我 / 记住 / 别忘了”时。",
+    enabled: "Bot 后续能自然接回没说完的事，但不会把它当待办清单塞进回复。",
     disabled: "这些未完话头不会被专门维护。",
   },
   enable_user_habit_learning: {
-    summary: "学习用户常在什么时间做什么、问什么或处于什么状态，用于减少重复询问。",
+    summary: "学习用户常在什么时间做什么、问什么或处于什么状态；被动回复只在当前时段且话题相关时轻量使用。",
     trigger: "用户长期重复出现相似时段行为时。",
-    enabled: "Bot 到点会更懂用户习惯，例如吃饭、睡觉、固定玩笑或固定提问。",
+    enabled: "Bot 被动聊天时只用相关习惯帮助理解；主动消息可以在接近习惯时段时轻轻关心。",
     disabled: "Bot 仍按当下聊天判断，不会积累时段习惯。",
   },
   enable_humanized_states: {

@@ -128,7 +128,6 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     for key, empty in (
                         ("companion_memory", {}),
                         ("expression_profile", {}),
-                        ("reply_planner", {}),
                         ("intent_profile", {}),
                         ("relationship_state", {}),
                         ("recent_reply_topics", []),

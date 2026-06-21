@@ -571,9 +571,18 @@ class ProactiveMixin:
             user["proactive_daypart_day"] = today
             user["proactive_daypart_counts"] = {}
 
-    def _effective_min_interval_seconds(self, user: dict[str, Any]) -> int:
+    def _unanswered_slowdown_count(self, user: dict[str, Any]) -> int:
         ignored_streak = _safe_int(user.get("ignored_streak"), 0)
-        multiplier = min(2.2, 1.0 + ignored_streak * 0.35)
+        start = _safe_int(getattr(self, "proactive_unanswered_slowdown_start", 1), 1, 1, 10)
+        return max(0, ignored_streak - start + 1)
+
+    def _unanswered_interval_multiplier(self, user: dict[str, Any]) -> float:
+        active_count = self._unanswered_slowdown_count(user)
+        max_multiplier = max(1.0, _safe_float(getattr(self, "proactive_unanswered_max_interval_multiplier", 2.2), 2.2, 1.0))
+        return min(max_multiplier, 1.0 + active_count * 0.35)
+
+    def _effective_min_interval_seconds(self, user: dict[str, Any]) -> int:
+        multiplier = self._unanswered_interval_multiplier(user)
         return int(self._effective_user_min_interval_minutes(user) * 60 * multiplier)
 
     def _soft_daily_target(self, user: dict[str, Any]) -> float:
@@ -671,25 +680,33 @@ class ProactiveMixin:
         daily_limit = self._effective_user_daily_limit(user)
         if daily_limit <= 1 or sent_today <= 0:
             return None
-        ignored_streak = _safe_int(user.get("ignored_streak"), 0)
-        if ignored_streak >= 4:
-            return (36.0, 60.0)
-        if ignored_streak >= 3:
-            return (20.0, 36.0)
-        if ignored_streak >= 2:
-            return (12.0, 24.0)
+        ignored_slowdown = self._unanswered_slowdown_count(user)
+        max_cooldown = max(1.0, _safe_float(getattr(self, "friend_unanswered_max_cooldown_hours", 60.0), 60.0, 1.0))
+
+        def cap_delay(delay: tuple[float, float]) -> tuple[float, float]:
+            low, high = delay
+            high = min(max_cooldown, high)
+            low = min(low, max(1.0, high))
+            return (low, high)
+
+        if ignored_slowdown >= 4:
+            return cap_delay((36.0, 60.0))
+        if ignored_slowdown >= 3:
+            return cap_delay((20.0, 36.0))
+        if ignored_slowdown >= 2:
+            return cap_delay((12.0, 24.0))
         minute = now_dt.hour * 60 + now_dt.minute
         if sent_today <= 1:
-            if ignored_streak >= 1:
-                return (8.0, 14.0)
+            if ignored_slowdown >= 1:
+                return cap_delay((8.0, 14.0))
             if minute < 14 * 60:
                 return self._delay_hours_until_local_window(now_dt, 14 * 60, 17 * 60)
             if minute < 18 * 60:
                 return self._delay_hours_until_local_window(now_dt, 19 * 60, 21 * 60 + 20)
             return (6.0, 11.0)
         if sent_today <= 2 and daily_limit >= 3:
-            if ignored_streak >= 1:
-                return (10.0, 18.0)
+            if ignored_slowdown >= 1:
+                return cap_delay((10.0, 18.0))
             if minute < 18 * 60 + 30:
                 return self._delay_hours_until_local_window(now_dt, 18 * 60 + 40, 21 * 60 + 20)
             return (8.0, 14.0)

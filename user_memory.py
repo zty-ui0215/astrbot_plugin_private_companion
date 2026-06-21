@@ -359,13 +359,13 @@ class UserMemoryMixin:
             elif emotion_enabled and mode == "hurt" and _safe_float(rel_state.get("hurt_until"), 0) > _now_ts():
                 hints.append("最近 Bot 有点委屈受伤。表现方式是回复短一点、慢一点、少一点热情,可以绕开亲密动作,用轻微沉默或别过头式的语气表达余波；不要直接把状态说成“我受伤了”,也不要立刻恢复黏人。")
             elif relation_enabled and mode == "backoff" and _safe_float(rel_state.get("backoff_until"), 0) > _now_ts():
-                hints.append("最近用户像是在表达边界或不想被打扰,主动和被动都要明显收敛,短一点,不追问。")
+                hints.append("边界感偏强：短一点、低压、不追问。")
             elif relation_enabled and mode == "careful":
-                hints.append("最近用户情绪或压力偏重,只保留低压关心：先接住一句,不追问、不讲大道理、不把亲密动作压过去。")
+                hints.append("相处要放轻：先接住,不追问,不讲大道理。")
             elif emotion_enabled and mode == "attached":
                 hints.append("最近互动是正向亲近的,可以更软一点、更自然地回应亲近,也可以轻轻接住贴近动作；但不要过度黏、不要把普通对话都变成亲密表演。")
             elif relation_enabled and mode == "warming":
-                hints.append("最近互动有升温或玩笑感,可以更自然亲近一点,但不要过度黏。")
+                hints.append("气氛略近：可以自然一点,别过度黏。")
         return " ".join(hints).strip()
 
     def _update_expression_profile_from_message(self, user: dict[str, Any], text: str) -> None:
@@ -374,44 +374,162 @@ class UserMemoryMixin:
         cleaned = _single_line(text, 220)
         if not cleaned:
             return
+        if self._should_skip_expression_sample(cleaned):
+            return
         profile = user.setdefault("expression_profile", {})
         if not isinstance(profile, dict):
             profile = {}
             user["expression_profile"] = profile
-        samples = _safe_int(profile.get("samples"), 0, 0) + 1
-        profile["samples"] = samples
+        now = _now_ts()
+        samples = profile.get("samples")
+        if not isinstance(samples, list):
+            samples = []
+            legacy_count = _safe_int(profile.get("samples"), 0, 0)
+            legacy_short = _safe_int(profile.get("short_count"), 0, 0)
+            legacy_punctuation = profile.get("punctuation") if isinstance(profile.get("punctuation"), dict) else {}
+            legacy_endings = profile.get("endings") if isinstance(profile.get("endings"), list) else []
+            legacy_phrases = profile.get("recent_phrases") if isinstance(profile.get("recent_phrases"), list) else []
+            punctuation_items = [
+                (str(mark), _safe_int(count, 0, 0))
+                for mark, count in legacy_punctuation.items()
+                if _safe_int(count, 0, 0) > 0
+            ]
+            if legacy_count:
+                migrate_count = min(legacy_count, self.max_learned_expression_items)
+                for idx in range(migrate_count):
+                    punctuation = {}
+                    if punctuation_items:
+                        mark, count = punctuation_items[idx % len(punctuation_items)]
+                        punctuation[mark] = min(3, max(1, count // max(1, migrate_count)))
+                    samples.append(
+                        {
+                            "ts": now - (idx + 1) * 3600,
+                            "length": 12 if idx < legacy_short else 32,
+                            "punctuation": punctuation,
+                            "ending": _single_line(legacy_endings[idx], 12) if idx < len(legacy_endings) else "",
+                            "phrase": _single_line(legacy_phrases[idx], 40) if idx < len(legacy_phrases) else "",
+                        }
+                    )
+        samples = [item for item in samples if isinstance(item, dict)]
+        cutoff = now - 30 * 86400
+        samples = [item for item in samples if _safe_float(item.get("ts"), now) >= cutoff]
         profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-        short_count = _safe_int(profile.get("short_count"), 0, 0)
-        if len(cleaned) <= 18:
-            short_count += 1
-        profile["short_count"] = short_count
-
-        punctuation = profile.get("punctuation")
-        if not isinstance(punctuation, dict):
-            punctuation = {}
+        punctuation = {}
         for mark in ("！", "!", "？", "?", "~", "～", "…", "。"):
             count = cleaned.count(mark)
             if count:
-                punctuation[mark] = min(999, _safe_int(punctuation.get(mark), 0, 0) + count)
-        profile["punctuation"] = punctuation
-
-        endings = profile.get("endings")
-        if not isinstance(endings, list):
-            endings = []
+                punctuation[mark] = count
         stripped = cleaned.rstrip("。！？!?~～… ")
+        ending = ""
         if 2 <= len(stripped) <= 80:
             ending = stripped[-min(6, max(2, len(stripped))):]
-            if ending and ending not in endings:
-                endings.insert(0, ending)
-        profile["endings"] = endings[: self.max_learned_expression_items]
-
-        phrases = profile.get("recent_phrases")
-        if not isinstance(phrases, list):
-            phrases = []
+        phrase = ""
         if 2 <= len(cleaned) <= 40 and not re.search(r"https?://|<[^>]+>", cleaned):
-            phrases.insert(0, cleaned)
-        profile["recent_phrases"] = list(dict.fromkeys(phrases))[: self.max_learned_expression_items]
+            phrase = cleaned
+        samples.insert(
+            0,
+            {
+                "ts": now,
+                "length": len(cleaned),
+                "punctuation": punctuation,
+                "ending": ending,
+                "phrase": phrase,
+            },
+        )
+        profile["samples"] = samples[: self.max_learned_expression_items]
+        self._refresh_expression_profile_legacy_summary(profile)
+
+    def _should_skip_expression_sample(self, cleaned: str) -> bool:
+        if len(cleaned) > 120:
+            return True
+        if re.search(r"https?://|www\.|```|Traceback|Error code:|Exception|\[INFO\]|\[WARN\]|\[ERRO\]|\[Core\]", cleaned, re.IGNORECASE):
+            return True
+        if re.search(r"^\s*(?:/|!|！|陪伴\s|sudo\b|git\b|python\b|node\b|npm\b|pnpm\b|pip\b)", cleaned, re.IGNORECASE):
+            return True
+        if cleaned.count("\n") >= 2 or cleaned.count("[") + cleaned.count("]") >= 6:
+            return True
+        if re.search(r"(傻逼|滚|闭嘴|垃圾|废物|妈的|草泥马|操你|死全家)", cleaned):
+            return True
+        if re.search(r"(复制|日志|报错|堆栈|代码|配置|schema|版本号|commit|diff|traceback)", cleaned, re.IGNORECASE):
+            return True
+        return False
+
+    def _refresh_expression_profile_legacy_summary(self, profile: dict[str, Any]) -> None:
+        samples = profile.get("samples")
+        if not isinstance(samples, list):
+            return
+        profile["sample_count"] = len(samples)
+        profile["short_count"] = sum(1 for item in samples if isinstance(item, dict) and _safe_int(item.get("length"), 0, 0) <= 18)
+        punctuation: dict[str, int] = {}
+        endings: list[str] = []
+        phrases: list[str] = []
+        for item in samples:
+            if not isinstance(item, dict):
+                continue
+            marks = item.get("punctuation")
+            if isinstance(marks, dict):
+                for mark, count in marks.items():
+                    punctuation[str(mark)] = punctuation.get(str(mark), 0) + _safe_int(count, 0, 0)
+            ending = _single_line(item.get("ending"), 12)
+            if ending and ending not in endings:
+                endings.append(ending)
+            phrase = _single_line(item.get("phrase"), 40)
+            if phrase and phrase not in phrases:
+                phrases.append(phrase)
+        profile["punctuation"] = punctuation
+        profile["endings"] = endings[: self.max_learned_expression_items]
+        profile["recent_phrases"] = phrases[: self.max_learned_expression_items]
+
+    def _classify_companion_memory_candidate(self, cleaned: str) -> dict[str, Any]:
+        lowered = cleaned.lower()
+        explicit_tokens = (
+            "记住", "记得", "以后", "一直", "永远", "长期", "固定", "默认",
+            "不要再", "别再", "以后别", "以后不要", "不许", "雷点", "底线",
+            "叫我", "我叫", "我生日", "我的生日", "生日是", "纪念日",
+        )
+        durable_tokens = (
+            "以后", "一直", "永远", "长期", "固定", "默认",
+            "不要再", "别再", "以后别", "以后不要", "不许", "雷点", "底线",
+            "我生日", "我的生日", "生日是", "纪念日",
+        )
+        temporary_tokens = (
+            "今天", "这次", "刚才", "刚刚", "现在", "此刻", "今晚", "明天",
+            "最近", "暂时", "一会儿", "等会儿", "这会儿", "刚睡醒", "刚下课",
+        )
+        playful_endings = ("啦", "嘛", "呀", "哦", "捏", "www", "哈哈", "嘿嘿", "（", "(")
+        memory_patterns = (
+            "喜欢", "讨厌", "不喜欢", "别叫", "不要", "记住", "记得",
+            "生日", "纪念日", "我是", "我叫", "叫我", "我在", "我住",
+            "想要", "希望", "害怕", "雷点", "以后",
+        )
+        score = sum(1 for pattern in memory_patterns if pattern in cleaned or pattern in lowered)
+        if score <= 0:
+            return {"keep": False, "reason": "no_memory_signal"}
+        explicit = any(token in cleaned for token in explicit_tokens)
+        durable_explicit = any(token in cleaned for token in durable_tokens)
+        is_temporary = any(token in cleaned for token in temporary_tokens)
+        kind = "preference"
+        if any(key in cleaned for key in ("不要", "别叫", "讨厌", "不喜欢", "雷点", "不许", "底线")):
+            kind = "boundary"
+        elif any(key in cleaned for key in ("生日", "纪念日", "以后", "记住", "记得")):
+            kind = "important"
+        if is_temporary and not explicit:
+            return {"keep": False, "reason": "temporary_context"}
+        if is_temporary and explicit and not durable_explicit:
+            return {"keep": False, "reason": "temporary_soft_explicit"}
+        if kind == "boundary":
+            boundary_strong = any(token in cleaned for token in ("不要再", "别再", "以后别", "以后不要", "不许", "雷点", "底线", "讨厌", "不喜欢"))
+            soft_boundary = (
+                "别叫" in cleaned
+                and not boundary_strong
+                and any(cleaned.rstrip("。！？!?~～… ").endswith(token) for token in playful_endings)
+            )
+            if soft_boundary and not durable_explicit:
+                return {"keep": False, "reason": "soft_playful_boundary"}
+        if any(token in cleaned for token in ("开玩笑", "不是认真的", "随口", "口嗨")) and not explicit:
+            return {"keep": False, "reason": "joke_or_uncertain"}
+        weight = min(5, 1 + score + (2 if explicit else 0))
+        return {"keep": True, "kind": kind, "weight": weight, "reason": "explicit" if explicit else "rule_match"}
 
     def _update_companion_memory_from_message(self, user: dict[str, Any], text: str) -> None:
         if not self.enable_companion_memory:
@@ -425,27 +543,14 @@ class UserMemoryMixin:
             user["companion_memory"] = memory
         raw_items = memory.get("items")
         items = raw_items if isinstance(raw_items, list) else []
-        lowered = cleaned.lower()
-        patterns = (
-            "喜欢", "讨厌", "不喜欢", "别叫", "不要", "记住", "记得",
-            "生日", "纪念日", "我是", "我叫", "叫我", "我在", "我住",
-            "想要", "希望", "害怕", "雷点", "以后",
-        )
-        score = 0
-        for pattern in patterns:
-            if pattern in cleaned or pattern in lowered:
-                score += 1
-        if score <= 0:
+        candidate = self._classify_companion_memory_candidate(cleaned)
+        if not candidate.get("keep"):
             return
-        kind = "preference"
-        if any(key in cleaned for key in ("不要", "别叫", "讨厌", "不喜欢", "雷点")):
-            kind = "boundary"
-        elif any(key in cleaned for key in ("生日", "纪念日", "以后", "记住", "记得")):
-            kind = "important"
         item = {
             "text": cleaned,
-            "kind": kind,
-            "weight": min(5, 1 + score),
+            "kind": candidate.get("kind") or "preference",
+            "weight": _safe_int(candidate.get("weight"), 1, 1, 5),
+            "reason": candidate.get("reason") or "rule_match",
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "created_ts": _now_ts(),
         }
@@ -461,39 +566,107 @@ class UserMemoryMixin:
 
     def _format_expression_profile_for_prompt(self, user: dict[str, Any]) -> str:
         profile = user.get("expression_profile")
-        if not isinstance(profile, dict) or _safe_int(profile.get("samples"), 0, 0) <= 0:
+        if not isinstance(profile, dict):
             return "暂无足够样本。保持 AstrBot 默认人格的自然表达。"
-        samples = max(1, _safe_int(profile.get("samples"), 1, 1))
-        short_ratio = _safe_int(profile.get("short_count"), 0, 0) / samples
-        punctuation = profile.get("punctuation") if isinstance(profile.get("punctuation"), dict) else {}
-        sorted_marks = sorted(punctuation.items(), key=lambda item: -_safe_int(item[1], 0, 0))[:4]
-        marks = "、".join(str(mark) for mark, count in sorted_marks if _safe_int(count, 0, 0) > 0)
-        endings = profile.get("endings") if isinstance(profile.get("endings"), list) else []
-        phrases = profile.get("recent_phrases") if isinstance(profile.get("recent_phrases"), list) else []
+        raw_samples = profile.get("samples")
+        if isinstance(raw_samples, list):
+            sample_items = [item for item in raw_samples if isinstance(item, dict)]
+        else:
+            sample_count = _safe_int(raw_samples, 0, 0)
+            if sample_count <= 0:
+                return "暂无足够样本。保持 AstrBot 默认人格的自然表达。"
+            sample_items = []
+            short_count = _safe_int(profile.get("short_count"), 0, 0)
+            for idx in range(min(sample_count, self.max_learned_expression_items)):
+                sample_items.append({"length": 12 if idx < short_count else 32, "punctuation": {}})
+        if not sample_items:
+            return "暂无足够样本。保持 AstrBot 默认人格的自然表达。"
+        samples = max(1, len(sample_items))
+        short_ratio = sum(1 for item in sample_items if _safe_int(item.get("length"), 0, 0) <= 18) / samples
+        punctuation: dict[str, int] = {}
+        for item in sample_items:
+            marks = item.get("punctuation")
+            if not isinstance(marks, dict):
+                continue
+            for mark, count in marks.items():
+                punctuation[str(mark)] = punctuation.get(str(mark), 0) + _safe_int(count, 0, 0)
         length_hint = "用户常用短句,回复也可以更短更像即时聊天。" if short_ratio >= 0.55 else "用户能接受稍完整的句子,但仍避免说明书式长段。"
         lines = [length_hint]
-        if marks:
-            lines.append(f"常见标点/语气符号：{marks}。可少量顺着氛围使用,不要机械模仿。")
-        if endings:
-            lines.append("常见句尾味道：" + "、".join(_single_line(item, 12) for item in endings[:5]))
-        if phrases:
-            lines.append("最近短句样本：" + " / ".join(_single_line(item, 24) for item in phrases[:4]))
+        pause_count = sum(_safe_int(punctuation.get(mark), 0, 0) for mark in ("…", "~", "～"))
+        question_count = sum(_safe_int(punctuation.get(mark), 0, 0) for mark in ("？", "?"))
+        exclaim_count = sum(_safe_int(punctuation.get(mark), 0, 0) for mark in ("！", "!"))
+        if pause_count >= max(2, samples // 4):
+            lines.append("语气里留白感偏多,可以偶尔放慢半拍,但不要堆标点。")
+        if question_count >= max(2, samples // 5):
+            lines.append("对方常用短问句推进聊天,回复要直接接住问题,别绕开。")
+        if exclaim_count >= max(2, samples // 4):
+            lines.append("语气可以稍微轻快一点,但不要夸张。")
         return "\n".join(lines)
 
-    def _format_companion_memory_for_prompt(self, user: dict[str, Any]) -> str:
+    def _format_companion_memory_for_prompt(self, user: dict[str, Any], *, style_only: bool = False) -> str:
         memory = user.get("companion_memory")
         lines: list[str] = []
         if not isinstance(memory, dict):
             memory = {}
         llm_profile = memory.get("profile")
         if isinstance(llm_profile, dict):
-            for key, label in (
+            if style_only:
+                hint_text = _single_line(user.get("last_user_message"), 260)
+
+                def _profile_values(key: str, limit: int = 4) -> list[str]:
+                    value = llm_profile.get(key)
+                    if isinstance(value, list):
+                        return [_single_line(item, 60) for item in value[:limit] if _single_line(item, 60)]
+                    text = _single_line(value, 120)
+                    return [text] if text else []
+
+                def _weak_relevant(text: str) -> bool:
+                    if not hint_text:
+                        return False
+                    lowered_hint = hint_text.lower()
+                    tokens = re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}", text)
+                    return any(token and token.lower() in lowered_hint for token in tokens)
+
+                def _with_subject(text: str) -> str:
+                    text = _single_line(text, 80)
+                    if not text:
+                        return ""
+                    if text.startswith(("用户", "对方")):
+                        return text
+                    if text.startswith("别"):
+                        return f"对方说过“{text}”"
+                    if text.startswith(("不", "别", "讨厌", "害怕", "喜欢", "希望", "想要")):
+                        return "对方" + text
+                    return text
+
+                style_lines: list[str] = []
+                for item in _profile_values("strong_memories", 4):
+                    natural = _with_subject(item)
+                    if natural:
+                        style_lines.append(f"记得{natural}")
+                for item in _profile_values("boundaries", 4):
+                    natural = _with_subject(item)
+                    if natural:
+                        style_lines.append(f"别踩这个边界，{natural}")
+                for item in _profile_values("speaking_style", 3):
+                    style_lines.append(f"回复时顺着一点，{item}")
+                weak_candidates = _profile_values("weak_preferences", 4) + _profile_values("interests", 4)
+                for item in weak_candidates:
+                    if _weak_relevant(item):
+                        natural = _with_subject(item)
+                        if natural:
+                            style_lines.append(f"这轮聊到相关内容时记得{natural}")
+                return "\n".join(list(dict.fromkeys(style_lines))) if style_lines else "暂无专门沉淀的用户记忆。"
+            profile_fields = (
+                ("strong_memories", "强记忆"),
+                ("weak_preferences", "弱偏好"),
                 ("user_traits", "用户画像"),
                 ("interests", "兴趣/偏好"),
                 ("boundaries", "边界/雷点"),
                 ("relationship_notes", "关系线索"),
                 ("speaking_style", "说话习惯"),
-            ):
+            )
+            for key, label in profile_fields:
                 value = llm_profile.get(key)
                 if isinstance(value, list):
                     text = "；".join(_single_line(item, 60) for item in value[:5] if _single_line(item, 60))
@@ -501,38 +674,82 @@ class UserMemoryMixin:
                     text = _single_line(value, 180)
                 if text:
                     lines.append(f"{label}：{text}")
-        items = self._companion_memory_relevant_items(user, hint=user.get("last_user_message") or "", limit=8)
-        if isinstance(items, list) and items:
-            facts = []
-            for item in items[:8]:
-                if not isinstance(item, dict):
-                    continue
-                text = _single_line(item.get("text"), 90)
-                if text:
-                    facts.append(text)
-            if facts:
-                lines.append("近期可记住的话：" + " / ".join(facts))
-        habit_text = self._format_user_behavior_habits_for_prompt(user, current_only=False, limit=5)
-        if habit_text:
-            lines.append(habit_text)
-        episode_text = self._format_dialogue_episodes_for_prompt(user)
-        if episode_text:
-            lines.append("近期共同经历：\n" + episode_text)
-        open_loop_text = self._format_open_loops_for_prompt(user)
-        if open_loop_text:
-            lines.append("未完成约定/可续话头：\n" + open_loop_text)
-        consequence_text = self._format_action_consequence_hint(user)
-        if consequence_text:
-            lines.append("最近主动行为闭环：\n" + consequence_text)
+        if not style_only:
+            items = self._companion_memory_relevant_items(user, hint=user.get("last_user_message") or "", limit=8)
+            if isinstance(items, list) and items:
+                facts = []
+                for item in items[:8]:
+                    if not isinstance(item, dict):
+                        continue
+                    text = _single_line(item.get("text"), 90)
+                    if text:
+                        facts.append(text)
+                if facts:
+                    lines.append("近期可记住的话：" + " / ".join(facts))
+        if not style_only:
+            habit_text = self._format_user_behavior_habits_for_prompt(
+                user,
+                current_only=True,
+                limit=1,
+                natural=True,
+                hint=user.get("last_user_message") or "",
+                time_window_minutes=60,
+                require_relevant=True,
+            )
+            if habit_text:
+                lines.append(habit_text)
+        if not style_only:
+            episode_text = self._format_dialogue_episodes_for_prompt(user, hint=user.get("last_user_message") or "")
+            open_loop_text = self._format_open_loops_for_prompt(user, hint=user.get("last_user_message") or "")
+            recent_context_parts = [part for part in (episode_text, open_loop_text) if part]
+            if recent_context_parts:
+                lines.append("近期共同经历：\n" + "\n".join(recent_context_parts))
+            consequence_text = self._format_action_consequence_hint(user)
+            if consequence_text:
+                lines.append("最近主动行为闭环：\n" + consequence_text)
         return "\n".join(lines) if lines else "暂无专门沉淀的用户记忆。"
 
-    def _format_dialogue_episodes_for_prompt(self, user: dict[str, Any]) -> str:
-        episodes = user.get("dialogue_episodes")
-        if not isinstance(episodes, list):
-            return ""
+    def _dialogue_episode_relevance_score(self, item: dict[str, Any], *, hint: str = "") -> float:
+        summary = _single_line(item.get("summary"), 140)
+        if not summary:
+            return 0.0
+        searchable_parts = [
+            summary,
+            _single_line(item.get("emotional_residue"), 100),
+            _single_line(item.get("reusable_topic"), 100),
+        ]
+        for key in ("user_events", "bot_promises", "avoid_next"):
+            value = item.get(key)
+            if isinstance(value, list):
+                searchable_parts.extend(_single_line(part, 80) for part in value if _single_line(part, 80))
+        searchable = " ".join(part for part in searchable_parts if part).lower()
+        score = 0.0
+        created_ts = _safe_float(item.get("created_ts"), 0)
+        if created_ts > 0:
+            age_hours = max(0.0, (_now_ts() - created_ts) / 3600)
+            if age_hours <= 36:
+                score += 2.0
+            elif age_hours <= 168:
+                score += 1.0
+        hint_text = _single_line(hint, 260).lower()
+        if hint_text:
+            tokens = re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}", hint_text)
+            for token in dict.fromkeys(tokens):
+                if token and token in searchable:
+                    score += 2.5
+        return score
+
+    def _select_dialogue_episodes_for_prompt(
+        self,
+        episodes: list[Any],
+        *,
+        hint: str = "",
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        candidates: list[tuple[int, float, dict[str, Any]]] = []
         seen: set[str] = set()
-        lines: list[str] = []
-        for item in episodes[-4:]:
+        total = len(episodes)
+        for index, item in enumerate(episodes):
             if not isinstance(item, dict):
                 continue
             summary = _single_line(item.get("summary"), 120)
@@ -543,17 +760,86 @@ class UserMemoryMixin:
                 continue
             if signature:
                 seen.add(signature)
+            score = self._dialogue_episode_relevance_score(item, hint=hint)
+            if index >= max(0, total - 1):
+                score += 3.0
+            elif index >= max(0, total - 3):
+                score += 1.0
+            candidates.append((index, score, item))
+        if not candidates:
+            return []
+        picked = sorted(candidates, key=lambda part: (part[1], part[0]), reverse=True)[: max(1, limit)]
+        return [item for _, _, item in sorted(picked, key=lambda part: part[0])]
+
+    def _format_dialogue_episodes_for_prompt(self, user: dict[str, Any], *, hint: str = "") -> str:
+        episodes = user.get("dialogue_episodes")
+        if not isinstance(episodes, list):
+            return ""
+        lines: list[str] = []
+        for item in self._select_dialogue_episodes_for_prompt(episodes, hint=hint, limit=3):
+            summary = _single_line(item.get("summary"), 120)
+            if not summary:
+                continue
             mood = _single_line(item.get("emotional_residue"), 60)
             topic = _single_line(item.get("reusable_topic"), 80)
             parts = [summary]
             if mood:
-                parts.append(f"余味：{mood}")
+                parts.append(f"当时留下的感觉是{mood}")
             if topic:
-                parts.append(f"可续：{topic}")
-            lines.append("- " + "｜".join(parts))
+                parts.append(f"可以顺手接回{topic}")
+            lines.append("- " + "；".join(parts))
         return "\n".join(lines)
 
-    def _format_open_loops_for_prompt(self, user: dict[str, Any]) -> str:
+    def _open_loop_relevance_score(self, item: dict[str, Any], *, hint: str = "") -> float:
+        text = _single_line(item.get("text"), 120)
+        if not text:
+            return 0.0
+        score = 0.0
+        created_ts = _safe_float(item.get("created_ts"), 0)
+        if created_ts > 0:
+            age_hours = max(0.0, (_now_ts() - created_ts) / 3600)
+            if age_hours <= 24:
+                score += 2.0
+            elif age_hours <= 168:
+                score += 1.0
+        status = str(item.get("status") or "")
+        if status in {"已完成", "已取消"}:
+            score -= 8.0
+        hint_text = _single_line(hint, 260).lower()
+        if hint_text:
+            searchable = text.lower()
+            tokens = re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}", hint_text)
+            for token in dict.fromkeys(tokens):
+                if token and token in searchable:
+                    score += 3.0
+        return score
+
+    def _select_open_loops_for_prompt(
+        self,
+        loops: list[dict[str, Any]],
+        *,
+        hint: str = "",
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        candidates: list[tuple[int, float, dict[str, Any]]] = []
+        total = len(loops)
+        for index, item in enumerate(loops):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "") in {"已完成", "已取消"}:
+                continue
+            score = self._open_loop_relevance_score(item, hint=hint)
+            if index >= max(0, total - 1):
+                score += 2.0
+            elif index >= max(0, total - 3):
+                score += 1.0
+            candidates.append((index, score, item))
+        if not candidates:
+            return []
+        picked = sorted(candidates, key=lambda part: (part[1], part[0]), reverse=True)[: max(1, limit)]
+        return [item for _, _, item in sorted(picked, key=lambda part: part[0])]
+
+    def _format_open_loops_for_prompt(self, user: dict[str, Any], *, hint: str = "") -> str:
         loops = user.get("open_loops")
         if not isinstance(loops, list):
             return ""
@@ -574,13 +860,88 @@ class UserMemoryMixin:
             kept.append(item)
         if len(kept) != len(loops):
             user["open_loops"] = kept[-12:]
-        for item in kept[-6:]:
-            text = _single_line(item.get("text"), 100)
+        for item in self._select_open_loops_for_prompt(kept, hint=hint, limit=3):
+            text = self._naturalize_open_loop_text(item.get("text"))
             if not text:
                 continue
             status = _single_line(item.get("status"), 30) or "待自然延续"
-            lines.append(f"- {status}：{text}")
+            if status == "待自然延续":
+                lines.append(f"- 之前还留着：{text}")
+            else:
+                lines.append(f"- {status}：{text}")
         return "\n".join(lines)
+
+    def _naturalize_open_loop_text(self, raw: Any) -> str:
+        text = _single_line(raw, 100)
+        if not text:
+            return ""
+        text = re.sub(r"^(?:记得|帮我|提醒我|到时候|以后|明天|今晚|等会儿|一会儿)[，,：:\s]*", "", text)
+        text = re.sub(r"(?:你记一下|你记住|别忘了)[。！？!?,，\s]*$", "", text)
+        return _single_line(text.strip(" ：:，,。"), 90)
+
+    def _extract_explicit_open_loop_from_message(self, text: str) -> str:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return ""
+        if self._is_structured_or_diagnostic_text(cleaned):
+            return ""
+        weak_only = ("到时候", "以后", "明天", "今晚", "等会儿", "一会儿")
+        has_strong_marker = bool(re.search(r"(提醒我|帮我记|帮我提醒|你记一下|你记住|别忘了|记得提醒|记得叫|记得喊|到点叫|到点提醒)", cleaned))
+        if not has_strong_marker:
+            return ""
+        patterns = (
+            r"(?:提醒我|帮我提醒|记得提醒|到点提醒|到点叫|记得叫|记得喊)([^。！？\n]{2,90})",
+            r"(?:帮我记|你记一下|你记住|别忘了|记得)([^。！？\n]{2,90})",
+            r"([^。！？\n]{2,90})(?:你记一下|你记住|别忘了)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, cleaned)
+            if not match:
+                continue
+            candidate = self._naturalize_open_loop_text(match.group(0))
+            if not candidate:
+                continue
+            if candidate in weak_only:
+                continue
+            if len(candidate) < 3:
+                continue
+            return candidate
+        return ""
+
+    def _open_loop_match_score(self, loop_text: str, inbound_text: str) -> float:
+        loop = self._compact_repeat_text(loop_text)
+        inbound = self._compact_repeat_text(inbound_text)
+        if not loop or not inbound:
+            return 0.0
+        if len(loop) >= 4 and loop in inbound:
+            return 1.0
+        if len(inbound) >= 4 and inbound in loop:
+            return 0.9
+        loop_tokens = set(re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}", loop_text))
+        inbound_tokens = set(re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}", inbound_text))
+        if not loop_tokens or not inbound_tokens:
+            return 0.0
+        overlap = len(loop_tokens & inbound_tokens)
+        return overlap / max(1, min(len(loop_tokens), len(inbound_tokens)))
+
+    def _resolve_matching_open_loop(self, loops: list[Any], text: str) -> dict[str, Any] | None:
+        candidates: list[tuple[float, int, dict[str, Any]]] = []
+        for index, item in enumerate(loops):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "") in {"已完成", "已取消"}:
+                continue
+            loop_text = _single_line(item.get("text"), 120)
+            if not loop_text:
+                continue
+            score = self._open_loop_match_score(loop_text, text)
+            candidates.append((score, index, item))
+        if not candidates:
+            return None
+        score, _, item = max(candidates, key=lambda part: (part[0], part[1]))
+        if score >= 0.34:
+            return item
+        return max(candidates, key=lambda part: part[1])[2]
 
     def _update_open_loops_from_message(self, user: dict[str, Any], text: str) -> None:
         if not self.enable_open_loop_tracking:
@@ -595,26 +956,13 @@ class UserMemoryMixin:
 
         completion_markers = ("好了", "搞定", "解决了", "完成了", "不用了", "取消", "算了", "没事了", "不用提醒")
         if loops and any(marker in cleaned for marker in completion_markers):
-            for item in reversed(loops):
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("status") or "") in {"已完成", "已取消"}:
-                    continue
+            item = self._resolve_matching_open_loop(loops, cleaned)
+            if item is not None:
                 item["status"] = "已取消" if any(marker in cleaned for marker in ("不用了", "取消", "算了", "不用提醒")) else "已完成"
                 item["resolved_ts"] = _now_ts()
-                break
 
-        add_patterns = (
-            r"(?:记得|帮我|提醒我|到时候|以后|明天|今晚|等会儿|一会儿)([^。！？\n]{2,80})",
-            r"([^。！？\n]{2,80})(?:你记一下|你记住|别忘了)",
-        )
-        for pattern in add_patterns:
-            match = re.search(pattern, cleaned)
-            if not match:
-                continue
-            loop_text = _single_line(match.group(0), 110)
-            if not loop_text:
-                continue
+        loop_text = self._extract_explicit_open_loop_from_message(cleaned)
+        if loop_text:
             existing = {_single_line(item.get("text"), 120) for item in loops if isinstance(item, dict)}
             if loop_text not in existing:
                 loops.append(
@@ -625,7 +973,6 @@ class UserMemoryMixin:
                         "source": "user_message",
                     }
                 )
-            break
         del loops[:-12]
 
     def _update_action_preferences_from_message(self, user: dict[str, Any], text: str) -> None:
@@ -935,6 +1282,23 @@ class UserMemoryMixin:
         minute = int(max(0, min(1439, round(_safe_float(minute_value, 0)))))
         return f"{minute // 60:02d}:{minute % 60:02d}"
 
+    @staticmethod
+    def _minute_distance(a: float, b: float) -> float:
+        diff = abs(float(a) - float(b)) % 1440
+        return min(diff, 1440 - diff)
+
+    def _user_habit_effective_score(self, item: dict[str, Any], *, now: float | None = None) -> float:
+        now = now or _now_ts()
+        count = _safe_int(item.get("count"), 0, 0)
+        age_days = max(0.0, (now - _safe_float(item.get("last_seen_ts"), now)) / 86400)
+        if age_days <= 7:
+            recency = 1.0
+        elif age_days <= 30:
+            recency = max(0.2, 1.0 - (age_days - 7) / 23 * 0.8)
+        else:
+            recency = 0.0
+        return count * recency
+
     def _qualified_user_behavior_habits(self, user: dict[str, Any]) -> list[dict[str, Any]]:
         habits = user.get("behavior_habits")
         if not isinstance(habits, dict):
@@ -943,27 +1307,107 @@ class UserMemoryMixin:
         if not isinstance(patterns, list):
             return []
         now = _now_ts()
-        kept = [
-            item for item in patterns
-            if isinstance(item, dict)
-            and _safe_int(item.get("count"), 0, 0) >= max(2, self.user_habit_min_count)
-            and now - _safe_float(item.get("last_seen_ts"), now) <= 30 * 86400
-        ]
-        kept.sort(key=lambda item: (_safe_int(item.get("count"), 0, 0), _safe_float(item.get("last_seen_ts"), 0)), reverse=True)
+        min_count = max(2, self.user_habit_min_count)
+        kept = []
+        for item in patterns:
+            if not isinstance(item, dict):
+                continue
+            if now - _safe_float(item.get("last_seen_ts"), now) > 30 * 86400:
+                continue
+            if _safe_int(item.get("count"), 0, 0) < min_count:
+                continue
+            if self._user_habit_effective_score(item, now=now) < max(1.6, min_count * 0.45):
+                continue
+            kept.append(item)
+        kept.sort(
+            key=lambda item: (
+                self._user_habit_effective_score(item, now=now),
+                _safe_float(item.get("last_seen_ts"), 0),
+            ),
+            reverse=True,
+        )
         return kept
 
-    def _format_user_behavior_habits_for_prompt(self, user: dict[str, Any], *, current_only: bool = False, limit: int = 6) -> str:
+    def _user_habit_related_to_text(self, item: dict[str, Any], text: str) -> bool:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return False
+        category = str(item.get("category") or "")
+        topic = _single_line(item.get("topic"), 80)
+        mapping = {
+            "饮食节奏": ("吃", "饭", "早餐", "午饭", "晚饭", "夜宵", "饿", "饱", "零食", "喝"),
+            "作息节奏": ("睡", "醒", "起床", "熬夜", "困", "晚安", "早安", "梦"),
+            "学习工作": ("作业", "上课", "下课", "考试", "题", "学习", "上班", "下班", "工作", "摸鱼"),
+            "娱乐习惯": ("游戏", "视频", "番", "漫画", "小说", "直播", "刷", "看"),
+            "固定提问": ("？", "?", "什么", "多少", "吗", "呢", "怎么", "有没有", "要不要"),
+            "偏好习惯": ("喜欢", "讨厌", "想要", "以后", "每天", "经常", "总是", "习惯"),
+        }
+        if any(token in cleaned for token in mapping.get(category, ())):
+            return True
+        tokens = re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_]{3,24}", topic)
+        return any(token and token in cleaned for token in tokens)
+
+    def _natural_user_habit_line(self, item: dict[str, Any]) -> str:
+        bucket = _single_line(item.get("bucket"), 12)
+        category = _single_line(item.get("category"), 20)
+        topic = _single_line(item.get("topic"), 80)
+        if not topic:
+            return ""
+        if category == "饮食节奏":
+            if "还没吃" in topic or "饭点偏晚" in topic:
+                return f"{bucket}时对方常会提到还没吃饭，聊到吃的可以轻轻接住，不用像提醒。"
+            if "已经吃过" in topic:
+                return f"{bucket}时对方常已经吃过饭，别每次都追问吃没吃。"
+            return f"{bucket}时对方容易聊到吃饭，相关时顺手接住就好。"
+        if category == "作息节奏":
+            if "夜里还没睡" in topic:
+                return f"{bucket}时对方常还醒着，聊到睡觉时少一点催促，多一点顺着接。"
+            if "起床" in topic or "刚醒" in topic:
+                return f"{bucket}时对方常刚醒，语气可以放轻一点。"
+            return f"{bucket}时对方容易聊到睡眠，别把作息说教化。"
+        if category == "学习工作":
+            return f"{bucket}时对方常在学习或工作相关状态里，回复可以更直接、少绕。"
+        if category == "娱乐习惯":
+            return f"{bucket}时对方常在看东西或玩内容，相关时可以自然接梗。"
+        if category == "固定提问":
+            return f"{bucket}时对方常用短问题推进聊天，先直接接住问题。"
+        if category == "偏好习惯":
+            return f"{bucket}时对方常提到类似“{topic}”的偏好或习惯，相关时记得顺着一点。"
+        return f"{bucket}时对方常聊到“{topic}”，相关时自然接住。"
+
+    def _format_user_behavior_habits_for_prompt(
+        self,
+        user: dict[str, Any],
+        *,
+        current_only: bool = False,
+        limit: int = 6,
+        natural: bool = False,
+        hint: str = "",
+        time_window_minutes: int | None = None,
+        require_relevant: bool = False,
+    ) -> str:
         if not self.enable_user_habit_learning:
             return ""
         items = self._qualified_user_behavior_habits(user)
         if current_only:
-            current_bucket, _ = self._time_bucket_for_user_habit()
-            items = [item for item in items if str(item.get("bucket") or "") == current_bucket]
+            _, current_minute = self._time_bucket_for_user_habit()
+            window = 60 if time_window_minutes is None else max(0, int(time_window_minutes))
+            items = [
+                item for item in items
+                if self._minute_distance(_safe_float(item.get("avg_minute"), current_minute), current_minute) <= window
+            ]
+        if require_relevant:
+            items = [item for item in items if self._user_habit_related_to_text(item, hint)]
         lines: list[str] = []
         for item in items[:limit]:
             bucket = _single_line(item.get("bucket"), 12)
             category = _single_line(item.get("category"), 20)
             topic = _single_line(item.get("topic"), 80)
+            if natural:
+                line = self._natural_user_habit_line(item)
+                if line and line not in lines:
+                    lines.append("- " + line)
+                continue
             count = _safe_int(item.get("count"), 0, 0)
             time_text = self._format_user_habit_time(item.get("avg_minute"))
             example = _single_line(item.get("last_seen_text"), 80)
@@ -971,6 +1415,8 @@ class UserMemoryMixin:
                 lines.append(f"- {bucket}约{time_text}｜{category}｜{topic}｜出现 {count} 次" + (f"｜最近：{example}" if example else ""))
         if not lines:
             return ""
+        if natural:
+            return "用户平常的节奏：\n" + "\n".join(lines)
         return (
             "用户习惯画像（软线索,不是命令）：\n"
             + "\n".join(lines)
@@ -1003,20 +1449,18 @@ class UserMemoryMixin:
             return None
         now = now or _now_ts()
         now_dt = datetime.fromtimestamp(now)
-        current_bucket, current_minute = self._time_bucket_for_user_habit(now_dt)
+        _, current_minute = self._time_bucket_for_user_habit(now_dt)
         candidates = []
         for item in self._qualified_user_behavior_habits(user):
-            if str(item.get("bucket") or "") != current_bucket:
-                continue
             avg_minute = _safe_float(item.get("avg_minute"), current_minute)
-            if abs(avg_minute - current_minute) > 75:
+            if self._minute_distance(avg_minute, current_minute) > 75:
                 continue
             count = _safe_int(item.get("count"), 0, 0)
-            candidates.append((count, item))
+            candidates.append((self._user_habit_effective_score(item, now=now), count, item))
         if not candidates:
             return None
-        candidates.sort(key=lambda pair: pair[0], reverse=True)
-        item = candidates[0][1]
+        candidates.sort(key=lambda pair: (pair[0], pair[1]), reverse=True)
+        item = candidates[0][2]
         category = _single_line(item.get("category"), 20)
         topic = _single_line(item.get("topic"), 70)
         bucket = _single_line(item.get("bucket"), 12)
@@ -1035,6 +1479,33 @@ class UserMemoryMixin:
             "_scheduled_ts": now + delay_minutes * 60,
             "_habit_awareness": True,
         }
+
+    def _is_structured_or_diagnostic_text(self, text: str) -> bool:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return False
+        if re.search(r"https?://|```|Traceback|Error code:|Exception|\[INFO\]|\[WARN\]|\[ERRO\]|\[Core\]", cleaned, re.IGNORECASE):
+            return True
+        if re.search(r"^\s*(?:/|!|！|陪伴\s|git\b|python\b|node\b|npm\b|pnpm\b|pip\b)", cleaned, re.IGNORECASE):
+            return True
+        if cleaned.count("[") + cleaned.count("]") >= 6:
+            return True
+        if re.search(r"(日志|堆栈|traceback)", cleaned, re.IGNORECASE):
+            return True
+        return False
+
+    def _intent_target_hint(self, text: str) -> tuple[bool, bool]:
+        cleaned = _single_line(text, 260)
+        target_hint = bool(re.search(r"(你|bot|机器人|插件|星缘|老老老|助手|ai|AI)", cleaned))
+        third_party_hint = bool(re.search(r"(数学|作业|代码|报错|他|她|它|他们|她们|别人|群友|那个人|这个人|用户|豆腐|蛙蛙|小水月)", cleaned))
+        return target_hint, third_party_hint
+
+    def _is_soft_playful_boundary(self, text: str) -> bool:
+        cleaned = _single_line(text, 260)
+        return bool(
+            re.search(r"(别闹|别这样|不要啊|别呀|不要嘛|讨厌啦|烦啦)", cleaned)
+            and re.search(r"(哈|哈哈|hhh|笑死|啦|嘛|呀|哦|捏|~|～|w)", cleaned, re.IGNORECASE)
+        )
 
     def _action_preference_hint(self, user: dict[str, Any] | None = None) -> str:
         if not isinstance(user, dict):
@@ -1064,59 +1535,118 @@ class UserMemoryMixin:
     def _analyze_inbound_intent(self, text: str) -> dict[str, Any]:
         cleaned = _single_line(text, 240)
         if not cleaned:
-            return {"intent": "empty", "emotion": "neutral", "pressure": 0, "reply_style": "short"}
+            return {"intent": "empty", "emotion": "neutral", "pressure": 0, "reply_style": "short", "confidence": 1.0, "source": "empty", "reason": ""}
+        if self._is_structured_or_diagnostic_text(cleaned):
+            return {
+                "intent": "chat",
+                "emotion": "neutral",
+                "pressure": 0,
+                "reply_style": "natural",
+                "confidence": 0.2,
+                "source": "diagnostic_skip",
+                "reason": "结构化/日志/代码类文本不作为情绪依据",
+                "emotion_event": "neutral",
+                "emotion_intensity": 0,
+                "emotion_reason": "",
+                "emotion_target": "none",
+                "emotion_rule": "diagnostic_skip",
+                "emotion_confidence": 0.2,
+                "text": cleaned,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            }
         lower = cleaned.lower()
         intent = "chat"
         emotion = "neutral"
         pressure = 0
         reply_style = "natural"
-        if re.search(r"(怎么|如何|为什么|帮我|能不能|可以.*吗|教程|代码|报错|分析|解释)", cleaned):
-            intent = "help"
-            reply_style = "useful"
-            pressure += 1
-        if re.search(r"(烦|累|难受|崩溃|不想|想哭|emo|压力|焦虑|失眠|疼|委屈)", cleaned, re.IGNORECASE):
-            intent = "comfort"
-            emotion = "low"
-            pressure += 2
-            reply_style = "soft"
-        if re.search(r"(哈哈|笑死|草|绷|乐|hhh|233|好玩|乐了)", lower):
-            intent = "play"
-            emotion = "light"
-            reply_style = "playful"
-        if re.search(r"(抱抱|亲亲|摸摸|陪我|想你|喜欢你|爱你|贴贴)", cleaned):
-            intent = "intimacy"
-            emotion = "close"
-            reply_style = "warm_short"
-        if re.search(r"(别|不要|别再|不许|讨厌|烦你|闭嘴|太吵|打扰)", cleaned):
+        confidence = 0.55
+        source = "default"
+        reason = ""
+        target_hint, third_party_hint = self._intent_target_hint(cleaned)
+        strong_boundary = bool(
+            re.search(r"(别再|不要再|不许|闭嘴|别吵|别烦|别打扰|不要烦|不想理你|离我远点|别靠近|别贴|别撒娇)", cleaned)
+            or re.search(r"(讨厌你|烦你|你.*太吵|你.*打扰)", cleaned)
+        )
+        weak_boundary = bool(re.search(r"(别|不要|讨厌|烦)", cleaned))
+        soft_play_boundary = self._is_soft_playful_boundary(cleaned)
+        if strong_boundary or (weak_boundary and target_hint and not third_party_hint and not soft_play_boundary):
             intent = "boundary"
             emotion = "resistant"
             pressure += 3
             reply_style = "back_off"
+            confidence = 0.9 if strong_boundary else 0.72
+            source = "strong_rule" if strong_boundary else "targeted_boundary_rule"
+            reason = "用户明确对 Bot 表达边界" if target_hint else "用户表达强边界"
+        elif re.search(r"(烦|累|难受|崩溃|不想|想哭|emo|压力|焦虑|失眠|疼|委屈)", cleaned, re.IGNORECASE):
+            intent = "comfort"
+            emotion = "low"
+            pressure += 2
+            reply_style = "soft"
+            confidence = 0.82
+            source = "comfort_rule"
+            reason = "用户表达低落或压力"
+        elif re.search(r"(怎么|如何|为什么|帮我|能不能|可以.*吗|教程|代码|报错|分析|解释)", cleaned):
+            intent = "help"
+            reply_style = "useful"
+            pressure += 1
+            confidence = 0.78
+            source = "help_rule"
+            reason = "用户在请求解释或帮助"
+        elif re.search(r"(抱抱|亲亲|摸摸|陪我|想你|喜欢你|爱你|贴贴)", cleaned):
+            intent = "intimacy"
+            emotion = "close"
+            reply_style = "warm_short"
+            confidence = 0.84
+            source = "intimacy_rule"
+            reason = "用户表达亲近或陪伴需求"
+        elif re.search(r"(哈哈|笑死|草|绷|乐|hhh|233|好玩|乐了)", lower) or soft_play_boundary:
+            intent = "play"
+            emotion = "light"
+            reply_style = "playful"
+            confidence = 0.7 if soft_play_boundary else 0.76
+            source = "soft_boundary_play_rule" if soft_play_boundary else "play_rule"
+            reason = "软边界更像玩笑语气" if soft_play_boundary else "用户在玩梗或轻松表达"
+        elif weak_boundary:
+            confidence = 0.35
+            source = "weak_boundary_ignored"
+            reason = "边界词未明显指向 Bot,不硬判为拒近"
         if len(cleaned) <= 6 and intent == "chat":
             reply_style = "very_short"
-        emotion_event = self._classify_relationship_emotion_event(cleaned)
+            confidence = 0.62
+            source = "short_chat_rule"
+            reason = "短句普通接话"
+        emotion_event = self._classify_relationship_emotion_event(cleaned, intent_context={"confidence": confidence, "source": source})
         return {
             "intent": intent,
             "emotion": emotion,
             "pressure": min(5, pressure),
             "reply_style": reply_style,
+            "confidence": round(float(confidence), 2),
+            "source": source,
+            "reason": reason,
             "emotion_event": emotion_event.get("event", "neutral"),
             "emotion_intensity": emotion_event.get("intensity", 0),
             "emotion_reason": emotion_event.get("reason", ""),
             "emotion_target": emotion_event.get("target", "none"),
             "emotion_rule": emotion_event.get("rule", ""),
+            "emotion_confidence": round(_safe_float(emotion_event.get("confidence"), 0.0), 2),
             "text": cleaned,
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
 
-    def _classify_relationship_emotion_event(self, text: str) -> dict[str, Any]:
+    def _classify_relationship_emotion_event(self, text: str, intent_context: dict[str, Any] | None = None) -> dict[str, Any]:
         cleaned = _single_line(text, 240)
         if not cleaned:
-            return {"event": "neutral", "intensity": 0, "reason": "", "target": "none", "rule": ""}
+            return {"event": "neutral", "intensity": 0, "reason": "", "target": "none", "rule": "", "confidence": 1.0}
+        if self._is_structured_or_diagnostic_text(cleaned):
+            return {"event": "neutral", "intensity": 0, "reason": "结构化/日志/代码类文本不作为情绪依据", "target": "none", "rule": "diagnostic_skip", "confidence": 0.2}
         lower = cleaned.lower()
-        target_hint = bool(re.search(r"(你|bot|机器人|插件|星缘|老老老|助手|ai|AI)", cleaned))
-        third_party_hint = bool(re.search(r"(他|她|它|他们|她们|别人|群友|那个人|这个人|用户|豆腐|蛙蛙|小水月)", cleaned))
+        target_hint, third_party_hint = self._intent_target_hint(cleaned)
         self_low = bool(re.search(r"(我好|我真|我太|我是不是|我就是|我是).{0,12}(废物|垃圾|没用|傻|笨|恶心|讨厌)", cleaned))
+        direct_bot_negative = bool(
+            re.search(r"(讨厌你|烦你|不想理你|你.{0,4}(滚|闭嘴)|你(?:真|也|就是|是|太|真的|这个|怎么这么|为什么这么).{0,8}(恶心|废物|垃圾|没用|太吵|打扰|烦死|吵死))", cleaned)
+            or re.search(r"((bot|机器人|插件|助手|ai|AI).{0,8}(垃圾|废物|恶心|没用)|(垃圾|废物|恶心|没用).{0,8}(bot|机器人|插件|助手|ai|AI))", cleaned)
+        )
         severe_hurt = (
             "滚" in cleaned
             or "闭嘴" in cleaned
@@ -1140,22 +1670,30 @@ class UserMemoryMixin:
         comfort = bool(re.search(r"(摸摸|贴贴|抱抱|亲亲|乖|不哭|别伤心|陪你|抱一下)", cleaned))
         praise = bool(re.search(r"(喜欢你|爱你|可爱|厉害|真好|谢谢你|辛苦|最棒|夸夸)", cleaned))
         if self_low:
-            return {"event": "comfort_need", "intensity": 62, "reason": "用户自我否定或低落", "target": "self", "rule": "self_low"}
-        if third_party_hint and severe_hurt and not target_hint:
-            return {"event": "external_negative", "intensity": 54, "reason": "用户在评价第三方", "target": "other", "rule": "third_party_negative"}
+            return {"event": "comfort_need", "intensity": 62, "reason": "用户自我否定或低落", "target": "self", "rule": "self_low", "confidence": 0.88}
+        if third_party_hint and severe_hurt and not direct_bot_negative:
+            return {"event": "external_negative", "intensity": 54, "reason": "用户在评价第三方", "target": "other", "rule": "third_party_negative", "confidence": 0.78}
         if severe_hurt:
-            return {"event": "hurt", "intensity": 90 if target_hint else 72, "reason": "强否定或驱赶", "target": "bot" if target_hint else "ambiguous", "rule": "severe_hurt"}
+            confidence = 0.9 if direct_bot_negative else (0.72 if target_hint and not third_party_hint else 0.58)
+            return {
+                "event": "hurt",
+                "intensity": 90 if direct_bot_negative else 72,
+                "reason": "强否定或驱赶",
+                "target": "bot" if direct_bot_negative else "ambiguous",
+                "rule": "severe_hurt",
+                "confidence": confidence,
+            }
         if identity_hurt:
-            return {"event": "hurt", "intensity": 72, "reason": "否定情感真实性或人格", "target": "bot", "rule": "identity_hurt"}
+            return {"event": "hurt", "intensity": 72, "reason": "否定情感真实性或人格", "target": "bot", "rule": "identity_hurt", "confidence": 0.84}
         if mild_hurt:
-            return {"event": "hurt", "intensity": 58, "reason": "轻度否定或拒近", "target": "bot", "rule": "mild_hurt"}
+            return {"event": "hurt", "intensity": 58, "reason": "轻度否定或拒近", "target": "bot", "rule": "mild_hurt", "confidence": 0.72}
         if apology:
-            return {"event": "apology", "intensity": 68, "reason": "道歉或修复", "target": "bot", "rule": "apology"}
+            return {"event": "apology", "intensity": 68, "reason": "道歉或修复", "target": "bot", "rule": "apology", "confidence": 0.84}
         if comfort:
-            return {"event": "comfort", "intensity": 46, "reason": "安抚亲密互动", "target": "bot", "rule": "comfort"}
+            return {"event": "comfort", "intensity": 46, "reason": "安抚亲密互动", "target": "bot", "rule": "comfort", "confidence": 0.78}
         if praise:
-            return {"event": "praise", "intensity": 38, "reason": "正向肯定", "target": "bot" if target_hint else "ambiguous", "rule": "praise"}
-        return {"event": "neutral", "intensity": 0, "reason": "", "target": "none", "rule": ""}
+            return {"event": "praise", "intensity": 38, "reason": "正向肯定", "target": "bot" if target_hint else "ambiguous", "rule": "praise", "confidence": 0.78 if target_hint else 0.56}
+        return {"event": "neutral", "intensity": 0, "reason": "", "target": "none", "rule": "", "confidence": _safe_float((intent_context or {}).get("confidence"), 0.5)}
 
     def _decay_relationship_mood_score(self, state: dict[str, Any], *, now: float | None = None) -> int:
         now = now or _now_ts()
@@ -1196,6 +1734,11 @@ class UserMemoryMixin:
         pressure = _safe_int(intent.get("pressure"), 0, 0, 5)
         emotion_event = str(intent.get("emotion_event") or "neutral")
         intensity = _safe_int(intent.get("emotion_intensity"), 0, 0, 100)
+        intent_confidence = _safe_float(intent.get("confidence"), 0.5)
+        emotion_confidence = _safe_float(intent.get("emotion_confidence"), intent_confidence)
+        if emotion_event != "neutral" and emotion_confidence < 0.65:
+            emotion_event = "neutral"
+            intensity = 0
         reason = _single_line(intent.get("emotion_reason"), 80)
         target = _single_line(intent.get("emotion_target"), 24) or "none"
         rule = _single_line(intent.get("emotion_rule"), 40)
@@ -1233,12 +1776,12 @@ class UserMemoryMixin:
         elif emotion_enabled and emotion_event == "external_negative":
             current = "careful"
             state["last_external_negative_reason"] = reason
-        elif relation_enabled and inbound_intent == "boundary":
+        elif relation_enabled and inbound_intent == "boundary" and intent_confidence >= 0.68:
             current = "backoff"
             state["backoff_until"] = now + 6 * 3600
-        elif relation_enabled and pressure >= 2:
+        elif relation_enabled and pressure >= 2 and intent_confidence >= 0.65:
             current = "careful"
-        elif relation_enabled and inbound_intent in {"intimacy", "play"}:
+        elif relation_enabled and inbound_intent in {"intimacy", "play"} and intent_confidence >= 0.68:
             current = "attached" if emotion_enabled and mood_score >= 45 else "warming"
         elif emotion_enabled and _safe_float(state.get("hurt_until"), 0) > now and mood_score <= -hurt_threshold:
             current = "refusing" if abs(mood_score) >= refuse_threshold else "hurt"
@@ -1262,6 +1805,8 @@ class UserMemoryMixin:
         state["last_emotion_reason"] = reason
         state["last_emotion_target"] = target
         state["last_emotion_rule"] = rule
+        state["last_intent_confidence"] = round(float(intent_confidence), 2)
+        state["last_emotion_confidence"] = round(float(emotion_confidence), 2)
         state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         if emotion_event != "neutral" or current in {"hurt", "refusing", "attached"}:
             logger.info(
@@ -1327,18 +1872,36 @@ class UserMemoryMixin:
                     _single_line(fallback, 120),
                 )
                 return fallback or response_text
-        if not self.enable_response_self_review:
-            return response_text
         trimmed = self._trim_abrupt_closing_topic_shift(response_text, inbound_text=inbound_text)
         if trimmed and trimmed != str(response_text or "").strip():
             return trimmed
         flags = self._response_review_flags(response_text, user)
         if not flags:
             return response_text
+        if "repeats_last_bot_message" in flags:
+            fallback = self._fallback_non_repeating_reply(inbound_text)
+            if fallback:
+                logger.info(
+                    "[PrivateCompanion] 回复本地防复读生效: before=%s after=%s",
+                    _single_line(response_text, 120),
+                    _single_line(fallback, 120),
+                )
+                return fallback
+        if not self.enable_response_self_review:
+            return response_text
+        review_mode = str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower()
+        if review_mode not in {"local_only", "severe_only", "full"}:
+            review_mode = "severe_only"
+        if review_mode == "local_only":
+            return response_text
+        severe_flags = self._response_review_severe_flags(flags)
+        if review_mode == "severe_only" and not severe_flags:
+            return response_text
+        effective_flags = severe_flags if review_mode == "severe_only" else flags
         lightweight_checker = getattr(self, "_is_lightweight_private_passive_inbound", None)
         if callable(lightweight_checker) and lightweight_checker(inbound_text):
             critical_flags = {"too_long", "meta_or_assistant", "over_structured", "leaks_internal"}
-            if not any(flag in critical_flags for flag in flags):
+            if not any(flag in critical_flags for flag in effective_flags):
                 return response_text
         intent = user.get("intent_profile") if isinstance(user.get("intent_profile"), dict) else {}
         last_message = _single_line(user.get("last_companion_message"), 300)
@@ -1356,7 +1919,7 @@ class UserMemoryMixin:
 {response_text}
 
 【需要修正的问题】
-{", ".join(flags)}
+{", ".join(effective_flags)}
 
 【当前意图/情绪】
 {intent.get('intent', 'chat')}｜{intent.get('emotion', 'neutral')}｜{intent.get('reply_style', 'natural')}
@@ -1371,11 +1934,18 @@ class UserMemoryMixin:
 - 如果问题是重复上一条 Bot 消息,必须直接承接用户这句话,不要再说上一条里的“吃饱犯困/下午还有事/有什么安排”等同义内容
 - 如果原回复为了表现困、迷糊、半梦半醒或低能量而变得含混,优先改成清楚承接用户；状态只能留在语气里,不能牺牲回答质量
 """.strip()
+        started = time.perf_counter()
         rewritten = await self._llm_call(
             prompt,
             max_tokens=260,
             provider_id=self._task_provider(self.response_review_provider_id, self.mai_style_provider_id),
             task="response_review",
+        )
+        logger.info(
+            "[PrivateCompanion] 被动回复模型自检完成: mode=%s flags=%s elapsed=%dms",
+            review_mode,
+            ",".join(effective_flags),
+            int((time.perf_counter() - started) * 1000),
         )
         cleaned = str(rewritten or "").strip()
         if not cleaned:
@@ -1388,6 +1958,11 @@ class UserMemoryMixin:
             fallback = self._fallback_non_repeating_reply(inbound_text)
             return fallback or response_text
         return cleaned
+
+    @staticmethod
+    def _response_review_severe_flags(flags: list[str]) -> list[str]:
+        severe = {"meta_or_assistant", "leaks_internal", "repeats_last_bot_message"}
+        return [flag for flag in flags if flag in severe]
 
     def _simulation_active(self, user: dict[str, Any]) -> bool:
         raw = user.get("simulation_mode")
@@ -1547,6 +2122,10 @@ class UserMemoryMixin:
 请把最近一段私聊整理成“陪伴型对话片段记忆”。
 目标是让角色以后能自然延续共同经历,而不是复述聊天记录。
 不要编造,不要写隐私外推,不要输出解释。
+只保留会影响后续相处、可自然接回、或用户明确在意的内容。
+普通问答、日志、报错、临时调试、一次性闲聊如果没有情绪余味,不要硬整理成重要经历。
+玩笑、反讽、口嗨和临时抱怨不要写成长期事实；不确定就写得轻一点。
+open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“以后还能聊”的内容放进 reusable_topic。
 
 【AstrBot 默认人格】
 {self._get_default_persona_prompt()}
@@ -1556,13 +2135,13 @@ class UserMemoryMixin:
 
 只输出 JSON：
 {{
-  "summary": "这段对话作为共同经历的一句话摘要",
-  "emotional_residue": "留下的情绪余味,没有就写空字符串",
+  "summary": "一句自然的共同经历摘要,不要写成聊天记录概括",
+  "emotional_residue": "这段互动留下的轻微情绪余味,没有就写空字符串",
   "reusable_topic": "以后可自然接起的小话头,没有就写空字符串",
-  "user_events": ["用户最近发生/在意的事"],
-  "bot_promises": ["Bot 说过要做、要记得、要提醒或要延续的事"],
-  "open_loops": ["尚未完成、之后可自然问起或兑现的约定/话题"],
-  "avoid_next": ["短期内不该反复提的内容"]
+  "user_events": ["用户最近明确发生或在意的事,不确定就少写"],
+  "bot_promises": ["Bot 明确说过要做、要记得、要提醒或要延续的事"],
+  "open_loops": ["尚未完成、之后仍需要回头处理/确认/兑现的约定或话题"],
+  "avoid_next": ["短期内不该反复提的内容,例如已经安抚过/解释过/容易烦的点"]
 }}
 """.strip()
         acquired = await self._try_acquire_user_background_task(
@@ -1640,38 +2219,41 @@ class UserMemoryMixin:
         if not self.enable_mai_style_integration:
             return ""
         profile = self._relationship_profile(user)
-        name = _single_line(user.get("nickname") or self.default_nickname, 24)
+        boundary = "不催、不突然客气。"
+        if profile.get("preference") and profile["preference"] != "普通":
+            boundary = f"{profile['preference']}；{boundary}"
         sections = [
-            "【陪伴风格整合层】",
-            "这不是替代 AstrBot 默认人格,而是在默认人格之上增加拟人聊天的内部决策方式。默认人格、系统人格和当前会话事实优先级更高。",
-            f"对方称呼：{name}",
-            f"关系站位：{profile['level']}；打扰偏好：{profile['preference']}；关系备注：{profile.get('note') or '暂无'}",
+            "【私聊互动策略】",
+            "只决定接话方式,不改写身份。",
+            f"相处分寸：{boundary}",
         ]
+        preference_lines: list[str] = []
         if self.enable_companion_memory:
-            sections.append("【用户记忆】\n" + self._format_companion_memory_for_prompt(user))
-        if self.enable_expression_learning:
-            sections.append("【表达环境学习】\n" + self._format_expression_profile_for_prompt(user))
-        current_habits = self._format_user_behavior_habits_for_prompt(user, current_only=True, limit=4)
+            memory_text = self._format_companion_memory_for_prompt(user, style_only=True)
+            if memory_text and memory_text != "暂无专门沉淀的用户记忆。":
+                preference_lines.extend(line for line in memory_text.splitlines() if line.strip())
+        current_habits = self._format_user_behavior_habits_for_prompt(
+            user,
+            current_only=True,
+            limit=1,
+            natural=True,
+            hint=user.get("last_user_message") or "",
+            time_window_minutes=60,
+            require_relevant=True,
+        )
         if current_habits:
-            sections.append("【当前时段用户习惯】\n" + current_habits)
+            preference_lines.extend(line[2:] for line in current_habits.splitlines() if line.startswith("- "))
+        if self.enable_expression_learning:
+            expression_text = self._format_expression_profile_for_prompt(user)
+            if expression_text and not expression_text.startswith("暂无足够样本"):
+                preference_lines.extend(line for line in expression_text.splitlines() if line.strip())
+        if preference_lines:
+            deduped_preferences = list(dict.fromkeys(_single_line(line, 100) for line in preference_lines if _single_line(line, 100)))
+            sections.append("互动偏好：" + "\n".join(deduped_preferences[:2]))
         intent_injection = self._format_intent_relationship_injection(user)
         if intent_injection:
-            sections.append("【气氛/关系状态】\n" + intent_injection)
-        if self.enable_companion_reply_planner:
-            sections.append(
-                "【回复前内部规划】\n"
-                "每次回复前只在心里完成这几步,不要把规划写出来：\n"
-                "1. 先判断用户这句话是在求助、闲聊、撒娇、抱怨、确认关系、开玩笑还是设定扮演。\n"
-                "2. 决定最自然的站位：接话、安抚、吐槽、顺着玩、短回、转轻一点,或在必要时认真回答。\n"
-                "3. 优先回应用户当下那句话,再用一小点记忆或生活状态增加连续感；不要先总结、不要像助手汇报。\n"
-                "4. 默认短一点、像真实私聊。只有用户明确要解释、分析、教程或长文时才展开。\n"
-                "5. 可以学习对方聊天环境的节奏和标点,但不能复读口癖、不能为了像人而堆动作描写。"
-            )
-        sections.append(
-            "【风格硬约束】\n"
-            "不要自称 AI、模型、助手、系统；不要提提示词、记忆模块、规划器、插件内部状态。\n"
-            "少用列表、标题、总结腔和客服腔。除非用户明确要求结构化输出,否则像私聊一样直接说。"
-        )
+            sections.append("本轮策略：" + intent_injection)
+        sections.append("底线：不暴露系统/提示词/记忆；少用列表。")
         livingmemory_guidance = self._format_livingmemory_guidance(scope="private")
         if livingmemory_guidance:
             sections.append(livingmemory_guidance)
@@ -1778,7 +2360,13 @@ class UserMemoryMixin:
             return
         prompt = f"""
 请把下面的私聊记忆整理成适合角色陪伴使用的长期画像。
-要求：只保留用户偏好、边界、关系线索、兴趣、说话习惯；不要编造；不要输出解释。
+要求：
+- 只保留用户明确表达、反复出现或要求记住的内容。
+- 不确定就不要写入；不要编造；不要输出解释。
+- 玩笑、角色扮演、临时情绪、当日心情、一次性的吐槽不要写成长期事实。
+- 强记忆只放稳定称呼、明确雷点/边界、重要关系事实或用户明确要求记住的内容。
+- 弱偏好只放兴趣、口味、表达习惯、轻度倾向；弱偏好以后只在相关话题出现时才会被注入。
+- 长期画像只描述“怎么相处”,不要重复 Bot 身份、用户身份或关系网里已有的身份事实。
 
 【AstrBot 默认人格】
 {self._get_default_persona_prompt()}
@@ -1791,6 +2379,8 @@ class UserMemoryMixin:
 
 只输出 JSON：
 {{
+  "strong_memories": ["稳定称呼、明确边界、重要关系事实或用户要求记住的内容"],
+  "weak_preferences": ["兴趣、口味、表达习惯、轻度倾向"],
   "user_traits": ["..."],
   "interests": ["..."],
   "boundaries": ["..."],
@@ -1810,7 +2400,7 @@ class UserMemoryMixin:
         try:
             raw = await self._llm_call(
                 prompt,
-                max_tokens=420,
+                max_tokens=560,
                 provider_id=self._task_provider(self.companion_memory_provider_id, self.mai_style_provider_id),
                 task="memory_profile",
             )
@@ -1822,7 +2412,7 @@ class UserMemoryMixin:
             await self._mark_user_background_retry(user_id, "companion_memory", now, "invalid_json")
             return
         normalized: dict[str, list[str]] = {}
-        for key in ("user_traits", "interests", "boundaries", "relationship_notes", "speaking_style"):
+        for key in ("strong_memories", "weak_preferences", "user_traits", "interests", "boundaries", "relationship_notes", "speaking_style"):
             value = payload.get(key)
             if isinstance(value, list):
                 normalized[key] = [_single_line(item, 80) for item in value[:8] if _single_line(item, 80)]
@@ -1900,42 +2490,44 @@ class UserMemoryMixin:
             and isinstance(intent, dict)
             and intent.get("intent")
         ):
-            lines.append(
-                "最近用户意图："
-                f"{intent.get('intent')}｜情绪 {intent.get('emotion', 'neutral')}｜"
-                f"建议回复姿态 {intent.get('reply_style', 'natural')}"
-            )
+            intent_name = str(intent.get("intent") or "chat")
+            emotion = str(intent.get("emotion") or "neutral")
+            reply_style = str(intent.get("reply_style") or "natural")
+            confidence = _safe_float(intent.get("confidence"), 0.5)
+            if confidence >= 0.65 and not (intent_name == "chat" and emotion == "neutral" and reply_style == "natural"):
+                intent_hint = {
+                    "empty": "",
+                    "help": "用户在要具体帮助,先给能用的答案,别绕。",
+                    "comfort": "用户像是需要被接住,先软一点安抚,少讲道理。",
+                    "play": "用户在玩梗或逗你,可以轻轻接梗。",
+                    "intimacy": "用户在靠近,自然回应亲近,别过度表演。",
+                    "boundary": "用户在表达边界,短句低压,别追问。",
+                    "chat": "用户只是短句接话,轻轻回应即可。",
+                }.get(intent_name, "")
+                if not intent_hint:
+                    style_hint = {
+                        "very_short": "用户只是短句接话,短短回应即可。",
+                        "short": "短短接住即可。",
+                        "soft": "先软一点接住情绪。",
+                        "playful": "可以轻轻接梗。",
+                        "warm_short": "自然回应亲近,不用展开。",
+                        "back_off": "短句低压,不要追问。",
+                        "useful": "先给具体可用的答案。",
+                    }.get(reply_style, "")
+                    intent_hint = style_hint
+                if intent_hint:
+                    lines.append(intent_hint)
         if isinstance(state, dict) and state.get("mode"):
             mode = str(state.get("mode") or "normal")
-            emotion_enabled = bool(getattr(self, "enable_emotion_simulation", True))
             relation_enabled = bool(getattr(self, "enable_relationship_state_machine", True))
-            if mode in {"hurt", "refusing", "attached"} and not emotion_enabled:
-                mode = "normal"
-            if mode in {"backoff", "careful", "warming"} and not relation_enabled:
-                mode = "normal"
-            if not (mode == "normal" and not (emotion_enabled or relation_enabled)):
-                if emotion_enabled:
-                    self._decay_relationship_mood_score(state)
-                mood_score = _safe_int(state.get("mood_score"), 0, -100, 100)
-                silence_turns = _safe_int(state.get("silence_turns"), 0, 0, 5)
-                hurt_reason = _single_line(state.get("last_hurt_reason"), 80)
+            if relation_enabled and mode in {"backoff", "careful", "warming"}:
                 mode_hint = {
-                    "backoff": "用户可能在表达边界或不想被打扰,回复要短、低压,不要撒娇追问。",
-                    "careful": "用户可能有压力或负面情绪,只保留低压关心：先接住一句,少讲道理,不追问,不强行亲密。",
-                    "hurt": "Bot 当前有被伤到的余波。用短句、轻微沉默、少热情来表现,绕开贴贴/抱抱等亲密动作；不要直白反复说“我受伤了”。",
-                    "refusing": "Bot 当前明显受伤并处于拒近状态。可以克制地拒绝继续被这样说,句子更短,不撒娇、不求哄、不主动贴近。",
-                    "attached": "互动状态正向亲近,可以自然软一点、接住亲近,也可更容易轻分享；但不要无节制主动或越过用户边界。",
-                    "warming": "互动有升温或玩笑感,可以更自然亲近一点,但别过度表演。",
-                    "normal": "关系状态平稳,正常接话即可。",
-                }.get(mode, "正常接话即可。")
-                extra = []
-                if emotion_enabled and mood_score:
-                    extra.append(f"情绪分 {mood_score}")
-                if emotion_enabled and silence_turns:
-                    extra.append(f"收敛轮数 {silence_turns}")
-                if emotion_enabled and hurt_reason and mode in {"hurt", "refusing"}:
-                    extra.append(f"触发原因 {hurt_reason}")
-                lines.append(f"关系状态机：{mode}{'｜' + '｜'.join(extra) if extra else ''}。{mode_hint}")
+                    "backoff": "边界感偏强：短一点、低压、不追问。",
+                    "careful": "相处要放轻：先接住,不追问,不讲大道理。",
+                    "warming": "气氛略近：可以自然一点,别过度黏。",
+                }.get(mode, "")
+                if mode_hint:
+                    lines.append(mode_hint)
         recent = self._format_recent_passive_topics_hint(user)
         if recent:
             lines.append("最近普通回复里已经用过的切口：\n" + recent)
@@ -2259,7 +2851,7 @@ Bot 主动后用户回复次数：{reply_count}
             f"关系分：{profile['score']}\n"
             f"人格判断：{profile.get('note') or '暂无'}\n"
             f"陪伴记忆：{_single_line(self._format_companion_memory_for_prompt(user), 180)}\n"
-            f"表达学习：{_single_line(self._format_expression_profile_for_prompt(user), 180)}\n"
+            f"表达节奏学习：{_single_line(self._format_expression_profile_for_prompt(user), 180)}\n"
             f"气氛状态：{_single_line(self._format_intent_relationship_injection(user), 180) or '暂无'}\n"
             f"媒介偏好：{_single_line(self._action_preference_hint(user), 180) or '暂无'}"
         )

@@ -192,7 +192,7 @@
     "invisible": true
   },
   "MAI_STYLE_PROVIDER_ID": {
-    "description": "陪伴风格通用模型（留空跟随主模型）",
+    "description": "私聊互动策略通用模型（留空跟随主模型）",
     "type": "string",
     "hint": "作为新增陪伴能力的通用兜底模型。下方单项模型留空时会先回退到这里，再回退到 LLM_PROVIDER_ID/AstrBot 默认模型。",
     "default": "",
@@ -255,16 +255,16 @@
     "_special": "select_provider"
   },
   "RESPONSE_REVIEW_PROVIDER_ID": {
-    "description": "回复自检改写模型（留空用默认）",
+    "description": "主动消息润色模型（留空用默认）",
     "type": "string",
-    "hint": "只用于少数不自然回复的二次改写。留空会回退到 MAI_STYLE_PROVIDER_ID，再回退到主模型。建议选择便宜、短文本能力稳定的模型。",
+    "hint": "主要用于主动消息发送前轻改写，避免把历史消息当成用户刚发来的话来回复。留空会回退到 MAI_STYLE_PROVIDER_ID，再回退到主模型。建议选择便宜、短文本改写稳定的模型。",
     "default": "",
     "_special": "select_provider"
   },
   "TROUBLESHOOTING_PROVIDER_ID": {
-    "description": "排障检查模型（留空跟随回复自检）",
+    "description": "排障检查模型（留空跟随主动消息润色）",
     "type": "string",
-    "hint": "用于扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。建议选择便宜、指令遵循稳定、分类判断保守的小模型；留空会先回退到回复自检改写模型，再回退到陪伴通用/主模型。",
+    "hint": "用于扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。建议选择便宜、指令遵循稳定、分类判断保守的小模型；留空会先回退到主动消息润色模型，再回退到陪伴通用/主模型。",
     "default": "",
     "_special": "select_provider"
   },
@@ -707,6 +707,39 @@
     },
     "default": 120
   },
+  "proactive_unanswered_slowdown_start": {
+    "description": "未回应几次后开始降频",
+    "type": "int",
+    "hint": "同一用户连续不接 Bot 主动消息达到该次数后，开始拉长主动间隔。默认 1 表示第一次未回应后就开始放轻。",
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    },
+    "default": 1
+  },
+  "proactive_unanswered_max_interval_multiplier": {
+    "description": "未回应最大间隔倍率",
+    "type": "float",
+    "hint": "连续未回应时，同一用户最小主动间隔最多放大到多少倍。默认 2.2，与旧版硬编码一致。",
+    "slider": {
+      "min": 1,
+      "max": 8,
+      "step": 0.1
+    },
+    "default": 2.2
+  },
+  "friend_unanswered_max_cooldown_hours": {
+    "description": "朋友未回应最长冷却（小时）",
+    "type": "float",
+    "hint": "朋友用户持续不回应时，主动消息随机延后窗口的最长上限。默认 60 小时，与旧版硬编码一致。",
+    "slider": {
+      "min": 1,
+      "max": 168,
+      "step": 1
+    },
+    "default": 60
+  },
   "timer_pre_silence_minutes": {
     "description": "预约前静默窗口（分钟）",
     "type": "int",
@@ -1002,14 +1035,14 @@
     }
   },
   "_section_03_mai": {
-    "description": "=== 03 陪伴风格 / 记忆 / 回复质感 ===",
+    "description": "=== 03 私聊互动 / 记忆 / 回复质感 ===",
     "type": "text",
     "invisible": true
   },
   "enable_mai_style_integration": {
-    "description": "启用陪伴风格整合层",
+    "description": "启用私聊互动策略",
     "type": "bool",
-    "hint": "开启后，被动私聊回复会在 AstrBot 默认人格之上注入关系站位、用户记忆、表达学习和回复前内部规划。不会替换 AstrBot 人格。",
+    "hint": "开启后，被动私聊回复会在 AstrBot 默认人格之上注入互动边界、偏好/表达习惯和简短接话策略。本层不写身份事实，不替换 AstrBot 人格。",
     "default": true
   },
   "enable_companion_memory": {
@@ -1050,18 +1083,18 @@
     }
   },
   "enable_expression_learning": {
-    "description": "启用表达环境学习",
+    "description": "启用表达节奏学习",
     "type": "bool",
-    "hint": "学习用户常用短句长度、标点和句尾味道，只作为回复节奏参考，不会机械复读。",
+    "hint": "只统计用户私聊里的句长、常用标点、句尾味道和短句样本，用来调整回复节奏。不会学习稳定称呼、身份事实或长期偏好，也不会机械复读用户原话。",
     "default": true,
     "condition": {
       "enable_mai_style_integration": true
     }
   },
   "max_learned_expression_items": {
-    "description": "最多保留表达样本数",
+    "description": "表达节奏样本上限",
     "type": "int",
-    "hint": "保留的短句、句尾和表达样本上限。",
+    "hint": "保留的短句、句尾和标点统计样本上限；只影响语气节奏，不作为长期记忆事实。",
     "slider": {
       "min": 4,
       "max": 60,
@@ -1075,7 +1108,7 @@
   "enable_user_habit_learning": {
     "description": "启用用户习惯画像",
     "type": "bool",
-    "hint": "记录用户常在什么时段做什么、问什么，并作为软线索影响日程细化和主动理解。不会把统计过程暴露给用户，也不会硬编码固定回答。",
+    "hint": "记录用户常在什么时段做什么、问什么；普通回复只在当前前后约 1 小时且本轮话题相关时少量注入，主动消息可用于到点关心。旧习惯会随时间变弱。",
     "default": true,
     "condition": {
       "enable_mai_style_integration": true
@@ -1084,7 +1117,7 @@
   "user_habit_min_count": {
     "description": "习惯成型次数",
     "type": "int",
-    "hint": "同一时段同类行为至少出现多少次，才会作为用户习惯注入提示词。",
+    "hint": "同一时段同类行为至少出现多少次，才会作为用户习惯线索。旧习惯会衰减，普通回复还要求当前时段和本轮话题相关。",
     "slider": {
       "min": 2,
       "max": 20,
@@ -1109,28 +1142,19 @@
       "enable_user_habit_learning": true
     }
   },
-  "enable_companion_reply_planner": {
-    "description": "启用被动回复规划器",
-    "type": "bool",
-    "hint": "让模型在回复前内部判断用户意图、关系姿态和回复长度，减少助手腔、总结腔和过度解释。",
-    "default": true,
-    "condition": {
-      "enable_mai_style_integration": true
-    }
-  },
   "enable_intent_emotion_analysis": {
-    "description": "启用用户意图/情绪识别",
+    "description": "启用本地意图/情绪快判",
     "type": "bool",
-    "hint": "私聊消息进入时先轻量判断求助、安慰、玩笑、亲近、边界等气氛，再影响下一次回复姿态。",
+    "hint": "私聊消息进入时用本地规则快判求助、低落、玩笑、亲近和边界，并带置信度影响本轮策略。低置信度结果只记录不注入，避免关键词误伤。",
     "default": true,
     "condition": {
       "enable_mai_style_integration": true
     }
   },
   "enable_relationship_state_machine": {
-    "description": "启用关系状态机",
+    "description": "启用关系距离感",
     "type": "bool",
-    "hint": "根据用户的边界、亲近、低落、玩笑等消息，在 normal/careful/warming/backoff 状态间切换，影响主动和被动语气。Bot 自身受伤/拒近等情绪余波由“情绪模拟”单独控制。",
+    "hint": "根据用户的边界、亲近、冷淡、玩笑、长期互动和是否回应主动消息，调整 Bot 的距离感、主动频率和相处分寸。Bot 自身受伤/拒近等情绪余波由“情绪模拟”单独控制。",
     "default": true,
     "condition": {
       "enable_mai_style_integration": true
@@ -1253,18 +1277,32 @@
     }
   },
   "enable_response_self_review": {
-    "description": "启用回复后自检改写",
+    "description": "启用主动消息润色",
     "type": "bool",
-    "hint": "模型回复生成后，若检测到助手腔、过长、过度结构化、内部信息泄露或重复切口，会调用 LLM 改写成更自然的私聊回复。",
+    "hint": "主要用于主动消息发送前复核，避免把历史消息当成用户刚发来的话来回复。普通被动回复只保留本地防漏、防复读等轻量保护。",
     "default": true,
     "condition": {
       "enable_mai_style_integration": true
     }
   },
+  "response_review_mode": {
+    "description": "主动消息润色模式",
+    "type": "string",
+    "hint": "local_only 只做本地识别，命中回复空气风险就丢弃主动；severe_only 默认会尝试用模型重写高风险主动消息；full 同时让普通被动回复恢复较积极的模型改写，可能明显增加延迟。",
+    "default": "severe_only",
+    "options": [
+      "local_only",
+      "severe_only",
+      "full"
+    ],
+    "condition": {
+      "enable_response_self_review": true
+    }
+  },
   "response_review_max_chars": {
-    "description": "普通私聊回复自检长度阈值",
+    "description": "被动 full 模式长度阈值",
     "type": "int",
-    "hint": "超过该长度的普通私聊回复更容易触发自检改写。求助类仍会尽量保留必要信息。",
+    "hint": "仅在主动消息润色模式为 full 时，普通被动回复才会因偏长参与模型改写；默认模式不会因普通偏长而额外调用模型。",
     "slider": {
       "min": 80,
       "max": 900,
@@ -1301,7 +1339,7 @@
   "enable_dialogue_episode_memory": {
     "description": "启用对话片段记忆",
     "type": "bool",
-    "hint": "定期从 AstrBot 当前私聊会话中总结共同经历、情绪余味和可续话头，让后续回复更有连续感。",
+    "hint": "定期从 AstrBot 当前私聊会话中总结共同经历、情绪余味和可续话头；后续只择要注入最近或相关片段，让回复更有连续感但不堆提示词。",
     "default": true,
     "condition": {
       "enable_mai_style_integration": true
@@ -1338,7 +1376,7 @@
   "max_dialogue_episodes": {
     "description": "最多保留对话片段数量",
     "type": "int",
-    "hint": "保留最近多少段共同经历摘要。",
+    "hint": "每个私聊对象最多保留多少段共同经历摘要；实际回复时只会择要使用少量片段。",
     "slider": {
       "min": 3,
       "max": 40,
@@ -1352,7 +1390,7 @@
   "enable_open_loop_tracking": {
     "description": "启用未完成约定追踪",
     "type": "bool",
-    "hint": "从对话片段里提取尚未完成的约定、提醒或可自然延续的话头，注入后续回复背景。",
+    "hint": "主要从对话片段整理中提取那些还留着、之后可能会回头接的事；规则只即时记录明确提醒/记住类表达，普通回复里会并入近期共同经历。",
     "default": true,
     "condition": {
       "enable_mai_style_integration": true
