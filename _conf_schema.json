@@ -2834,15 +2834,6 @@
       "enable_atrelay_tools": true
     }
   },
-  "enable_atrelay_llm_rewrite": {
-    "description": "使用模型转述正文",
-    "type": "bool",
-    "hint": "开启后，普通转述会先让模型把用户原句改成 Bot 自然会说的话，再发送给目标；关闭后直接发送解析出的正文，延迟更低。用户明确要求原话时始终不改写。",
-    "default": true,
-    "condition": {
-      "enable_atrelay_tools": true
-    }
-  },
   "atrelay_default_relay_style": {
     "description": "默认转述方式",
     "type": "string",
