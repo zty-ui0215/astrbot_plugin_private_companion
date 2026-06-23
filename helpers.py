@@ -75,3 +75,72 @@ def _strip_outbound_control_blocks(text: Any, *, preserve_private_tts_tokens: bo
     normalized = re.sub(r"<timer\b[^>]*>.*?</timer>", "", normalized, flags=re.IGNORECASE | re.DOTALL)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# 兼容 schema 中 type:"object" / items 嵌套结构的配置读写
+# ---------------------------------------------------------------------------
+
+_MISSING = object()
+
+
+def _flat_get(config: Any, key: str, default: Any = None) -> Any:
+    """
+    兼容扁平 / 任意深度 object-items 嵌套两种 schema 结构读取。
+
+    优先直接命中顶层 key；找不到时递归搜索所有嵌套 dict，
+    返回第一个命中的叶子值。适配 AstrBot 不展平 object.items 的情况。
+    """
+    if isinstance(config, dict):
+        # 优先顶层直接命中（最快路径）
+        if key in config:
+            return config[key]
+        # 递归搜索所有嵌套 dict
+        for value in config.values():
+            if isinstance(value, dict):
+                found = _flat_get(value, key, _MISSING)
+                if found is not _MISSING:
+                    return found
+    # AstrBotConfig 等 dict-like 对象（非纯 dict）
+    getter = getattr(config, "get", None)
+    if callable(getter):
+        try:
+            val = getter(key, None)
+            if val is not None:
+                return val
+        except Exception:
+            pass
+    return default
+
+
+def _set_into_config(config: Any, key: str, value: Any, _wrapper_key: Any = None) -> None:
+    """
+    兼容扁平 / 任意深度 object-items 嵌套两种 schema 结构写入。
+
+    始终只写顶层 key——与 AstrBot 原始 config[key] = value 行为一致。
+    AstrBot 保存时会根据 schema 自动把顶层值序列化到正确的嵌套路径，
+    因此这里不应该直接写嵌套层，否则可能触发 AstrBot 的类型校验错误
+    （PageUI 传来的值可能是 str 类型的 "true"/"false"，嵌套层期望 bool）。
+    """
+    try:
+        config[key] = value
+        return
+    except Exception:
+        pass
+    setter = getattr(config, "set", None)
+    if callable(setter):
+        try:
+            setter(key, value)
+        except Exception:
+            pass
+
+
+def _detect_wrapper_key(config: Any) -> str | None:
+    """保留向后兼容：如果顶层只有一个 dict 值，返回那个 key；否则 None。"""
+    if not isinstance(config, dict) or len(config) != 1:
+        return None
+    only_key = next(iter(config))
+    inner = config[only_key]
+    if isinstance(inner, dict):
+        return only_key
+    return None

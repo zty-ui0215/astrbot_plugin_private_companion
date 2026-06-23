@@ -20,7 +20,7 @@ from astrbot.api import logger
 from quart import request, send_file
 
 from .constants import _REASON_TEXT
-from .helpers import _safe_int, _strip_internal_message_blocks, _today_key
+from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _today_key
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
@@ -5602,30 +5602,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         config = getattr(self.plugin, "config", None)
         if config is None:
             return
-        try:
-            config[key] = value
-            return
-        except Exception:
-            pass
-        setter = getattr(config, "set", None)
-        if callable(setter):
-            try:
-                setter(key, value)
+        _set_into_config(config, key, value)
+        # 额外兜底：非 dict 对象
+        if not isinstance(config, dict):
+            data = getattr(config, "data", None)
+            if isinstance(data, dict):
+                data[key] = value
                 return
+            raw = getattr(config, "config", None)
+            if isinstance(raw, dict):
+                raw[key] = value
+                return
+            try:
+                setattr(config, key, value)
             except Exception:
-                pass
-        data = getattr(config, "data", None)
-        if isinstance(data, dict):
-            data[key] = value
-            return
-        raw = getattr(config, "config", None)
-        if isinstance(raw, dict):
-            raw[key] = value
-            return
-        try:
-            setattr(config, key, value)
-        except Exception:
-            logger.debug("[PrivateCompanionPage] 配置字段写入失败: %s", key)
+                logger.debug("[PrivateCompanionPage] 配置字段写入失败: %s", key)
 
     def _config_overlay(self, overrides: dict[str, Any]) -> Any:
         base = getattr(self.plugin, "config", {}) or {}
@@ -5648,14 +5639,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
     def _config_get(self, key: str) -> str:
         config = getattr(self.plugin, "config", None)
-        if isinstance(config, dict):
-            return str(config.get(key, "") or "")
-        getter = getattr(config, "get", None)
-        if callable(getter):
-            try:
-                return str(getter(key, "") or "")
-            except Exception:
-                pass
+        # 优先用 _flat_get（兼容 wrapper 结构）
+        val = _flat_get(config, key, None)
+        if val is not None:
+            return str(val or "")
+        # 非 dict 对象兜底
         data = getattr(config, "data", None)
         if isinstance(data, dict):
             return str(data.get(key, "") or "")

@@ -102,9 +102,11 @@ from .dreaming import (
 )
 from .helpers import (
     _date_key,
+    _flat_get,
     _now_ts,
     _safe_float,
     _safe_int,
+    _set_into_config,
     _set_today_key_timezone,
     _single_line,
     _strip_internal_message_blocks,
@@ -413,7 +415,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
     def _cfg_bool(config: AstrBotConfig, key: str, default: bool = True) -> bool:
-        value = config.get(key, default)
+        value = _flat_get(config, key, default)
         if isinstance(value, str):
             text = value.strip().lower()
             parsed: bool | None = None
@@ -422,29 +424,21 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             elif text in {"false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", ""}:
                 parsed = False
             if parsed is not None:
-                try:
-                    config[key] = parsed
-                except Exception:
-                    setter = getattr(config, "set", None)
-                    if callable(setter):
-                        try:
-                            setter(key, parsed)
-                        except Exception:
-                            pass
+                _set_into_config(config, key, parsed)
                 return parsed
         return bool(value)
 
     @staticmethod
     def _cfg_str(config: AstrBotConfig, key: str, default: str = "", fallback: str = "") -> str:
-        return str(config.get(key, default)).strip() or fallback
+        return str(_flat_get(config, key, default)).strip() or fallback
 
     @staticmethod
     def _cfg_int(config: AstrBotConfig, key: str, default: int, minimum: int = 0, maximum: int | None = None) -> int:
-        return _safe_int(config.get(key, default), default, minimum, maximum)
+        return _safe_int(_flat_get(config, key, default), default, minimum, maximum)
 
     @staticmethod
     def _cfg_float(config: AstrBotConfig, key: str, default: float, minimum: float = 0.0) -> float:
-        return _safe_float(config.get(key, default), default, minimum)
+        return _safe_float(_flat_get(config, key, default), default, minimum)
 
     def _user_rest_silence_until(self, user: dict[str, Any], *, now: float | None = None) -> float:
         check_now = _now_ts() if now is None else now

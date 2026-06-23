@@ -105,7 +105,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _set_into_config, _single_line, _strip_internal_message_blocks, _today_key
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -254,15 +254,7 @@ class CoreStoreMixin:
 
     def _set_runtime_bool_config(self, key: str, value: bool) -> None:
         setattr(self, key, bool(value))
-        try:
-            self.config[key] = bool(value)
-        except Exception:
-            setter = getattr(self.config, "set", None)
-            if callable(setter):
-                try:
-                    setter(key, bool(value))
-                except Exception:
-                    pass
+        _set_into_config(self.config, key, bool(value))
 
     async def _startup_prepare_today(self):
         try:
