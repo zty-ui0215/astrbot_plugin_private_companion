@@ -117,11 +117,46 @@ def _set_into_config(config: Any, key: str, value: Any, _wrapper_key: Any = None
     """
     兼容扁平 / 任意深度 object-items 嵌套两种 schema 结构写入。
 
-    始终只写顶层 key——与 AstrBot 原始 config[key] = value 行为一致。
-    AstrBot 保存时会根据 schema 自动把顶层值序列化到正确的嵌套路径，
-    因此这里不应该直接写嵌套层，否则可能触发 AstrBot 的类型校验错误
-    （PageUI 传来的值可能是 str 类型的 "true"/"false"，嵌套层期望 bool）。
+    优先写入 key 已存在的位置（可能在嵌套层），并根据已有值的类型
+    自动转换传入值（如 str "true"/"false" → bool），避免 AstrBot 类型校验错误。
+    找不到 key 时回退到顶层写入。
     """
+    def _convert_value(existing: Any, new_value: Any) -> Any:
+        """根据已有值的类型转换新值"""
+        if isinstance(existing, bool) and isinstance(new_value, str):
+            text = new_value.strip().lower()
+            if text in {"true", "1", "yes", "y", "on", "enable", "enabled", "启用", "开启", "开", "是"}:
+                return True
+            if text in {"false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", ""}:
+                return False
+            return bool(new_value)
+        if isinstance(existing, int) and not isinstance(existing, bool) and isinstance(new_value, str):
+            try:
+                return int(new_value)
+            except (ValueError, TypeError):
+                return new_value
+        if isinstance(existing, float) and isinstance(new_value, str):
+            try:
+                return float(new_value)
+            except (ValueError, TypeError):
+                return new_value
+        return new_value
+
+    def _find_and_set(d: dict, target_key: str, target_value: Any) -> bool:
+        """递归查找 key 并写入，返回是否找到"""
+        if target_key in d:
+            d[target_key] = _convert_value(d[target_key], target_value)
+            return True
+        for v in d.values():
+            if isinstance(v, dict) and _find_and_set(v, target_key, target_value):
+                return True
+        return False
+
+    if isinstance(config, dict):
+        if _find_and_set(config, key, value):
+            return
+
+    # 兜底：找不到 key 时写顶层
     try:
         config[key] = value
         return
