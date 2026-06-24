@@ -4160,6 +4160,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                             group_context_text = passive_group_formatter(group, sender_id, str(event.message_str or ""))
                         else:
                             group_context_text = self._format_group_context_for_prompt(group, sender_id, str(event.message_str or ""))
+                        recent_atrelay_context = self._format_recent_atrelay_context_for_prompt(
+                            kind="group",
+                            target=group_id,
+                            sender_id=sender_id,
+                            current_text=str(event.message_str or ""),
+                            limit=2,
+                        )
+                        if recent_atrelay_context:
+                            group_context_text = f"{group_context_text}\n\n{recent_atrelay_context}".strip()
                         group_context_text = f"{group_context_text}{wakeup_state_text}{extra}"
                         placement = "prompt" if self._append_turn_prompt_fragment_by_position(
                             req,
@@ -4273,6 +4282,15 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         identity_anchor = self._format_private_identity_anchor_for_prompt(user_id, current_user, event)
         if identity_anchor:
             prompt_surface.add("identity.anchor", identity_anchor, priority=10, source="identity")
+        recent_atrelay_context = self._format_recent_atrelay_context_for_prompt(
+            kind="private",
+            target=user_id,
+            sender_id=user_id,
+            current_text=inbound_text,
+            limit=2,
+        )
+        if recent_atrelay_context:
+            prompt_surface.add("atrelay.recent", recent_atrelay_context, priority=26, source="tools")
         if not self._format_atrelay_target_summary_for_prompt(inbound_text):
             mentioned_worldbook = self._format_worldbook_private_mentions_for_prompt(inbound_text, limit=4)
             if mentioned_worldbook:
