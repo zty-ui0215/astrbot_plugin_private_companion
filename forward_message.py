@@ -832,7 +832,7 @@ class ForwardMessageMixin:
                     "[PrivateCompanion] 已注入合并消息转述: messages=%s images=%s provider=%s",
                     len(rows),
                     len(image_urls),
-                    self._task_provider(self.forward_message_provider_id, self.mai_style_provider_id) or "(default)",
+                    self._task_provider(self.aux_provider_id, self.llm_provider_id) or "(default)",
                 )
                 return context
         lines = [
@@ -1259,7 +1259,7 @@ class ForwardMessageMixin:
         *,
         image_vision_text: str = "",
     ) -> str:
-        provider_id = self._task_provider(self.forward_message_provider_id, self.mai_style_provider_id)
+        provider_id = self._task_provider(self.aux_provider_id, self.llm_provider_id)
         raw_lines: list[str] = []
         used = 0
         for index, row in enumerate(rows, 1):

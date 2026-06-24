@@ -521,7 +521,7 @@ class QzoneMixin(QzoneMediaMixin):
         text = await self._llm_call(
             prompt,
             max_tokens=80,
-            provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="qzone_comment",
         )
         return _single_line(text, 80)
@@ -633,7 +633,7 @@ class QzoneMixin(QzoneMediaMixin):
             rewritten = await self._llm_call(
                 rewrite_prompt,
                 max_tokens=160,
-                provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
+                provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                 task="qzone_publish_sanitize",
             )
             rewritten = _single_line(rewritten, 180)
@@ -693,7 +693,7 @@ class QzoneMixin(QzoneMediaMixin):
             draft = await self._llm_call(
                 prompt,
                 max_tokens=180,
-                provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
+                provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                 task="qzone_publish_test",
             )
             draft = await self._sanitize_qzone_life_post_text(draft, prompt=prompt)
@@ -888,7 +888,7 @@ class QzoneMixin(QzoneMediaMixin):
             text = await self._llm_call(
                 prompt,
                 max_tokens=260,
-                provider_id=self._task_provider(self.photo_prompt_provider_id, self.mai_style_provider_id),
+                provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                 task=f"qzone_{reason}_photo_prompt",
             )
             payload = self._extract_json_payload(text or "")
@@ -1010,7 +1010,7 @@ class QzoneMixin(QzoneMediaMixin):
             text = await self._llm_call(
                 prompt,
                 max_tokens=180,
-                provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
+                provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                 task="qzone_publish",
             )
             text = await self._sanitize_qzone_life_post_text(text, prompt=prompt)
@@ -1139,7 +1139,7 @@ class QzoneMixin(QzoneMediaMixin):
                 text = await self._llm_call(
                     prompt,
                     max_tokens=140,
-                    provider_id=self._task_provider(self.mai_style_provider_id, self.llm_provider_id),
+                    provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                     task="qzone_emotional_vent",
                 )
                 text = await self._sanitize_qzone_life_post_text(text, prompt=prompt)

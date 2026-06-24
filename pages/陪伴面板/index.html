@@ -32,7 +32,6 @@
         <button class="tab" data-tab="troubleshooting">排障</button>
         <button class="tab" data-tab="modules">模块</button>
         <button class="tab" data-tab="config">配置</button>
-        <button class="tab" data-tab="models">模型</button>
       </nav>
 
       <section class="panel is-active" id="panel-dashboard">
@@ -808,7 +807,7 @@ QQ空间 = 公开札记
                 <h3>外部主动能力</h3>
                 <p>第三方插件注册的主动能力在这里管理；它们不是普通配置项，而是可加入候选池的能力卡。</p>
               </div>
-              <button type="button" data-jump-tab="models">查看相关模型</button>
+              <button type="button" data-jump-tab="config">查看相关配置</button>
             </header>
             <div id="externalAbilityList" class="external-ability-grid"></div>
           </article>
@@ -1147,7 +1146,6 @@ QQ空间 = 公开札记
               <label><input type="checkbox" data-export-section="basic" checked /> 基础配置</label>
               <label><input type="checkbox" data-export-section="relations" checked /> 关系/群资料</label>
               <label><input type="checkbox" data-export-section="food_skills" checked /> 候选菜单/技能</label>
-              <label><input type="checkbox" data-export-section="providers" /> 模型配置</label>
               <label><input type="checkbox" data-export-section="sensitive" /> 敏感配置</label>
             </div>
             <div class="migration-flow">
@@ -1236,30 +1234,6 @@ QQ空间 = 公开札记
         </div>
       </section>
 
-      <section class="panel" id="panel-models">
-        <div class="section-head">
-          <h2>分项能力模型</h2>
-          <span class="muted">模型分流</span>
-        </div>
-        <div id="providerSummary" class="provider-summary"></div>
-        <div id="providerFlow" class="provider-flow"></div>
-        <div class="provider-toolbar">
-          <input id="providerFilter" type="search" placeholder="筛选模型名称 / 配置键 / 用途 / 低延迟 / 效果" />
-          <div class="provider-mode-switch" aria-label="模型配置筛选">
-            <button type="button" data-provider-mode="all" class="active">全部</button>
-            <button type="button" data-provider-mode="configured">已配置</button>
-            <button type="button" data-provider-mode="inherited">自动回退</button>
-            <button type="button" data-provider-mode="speed">低延迟优先</button>
-            <button type="button" data-provider-mode="quality">效果优先</button>
-            <button type="button" data-provider-mode="vision">视觉/外部</button>
-          </div>
-          <div class="provider-toolbar-actions">
-            <button id="testAllProvidersBtn" type="button">测试全部模型</button>
-            <button id="saveProvidersBtn" type="button">保存模型配置</button>
-          </div>
-        </div>
-        <form id="providerForm" class="provider-groups"></form>
-      </section>
     </section>
   </main>
 

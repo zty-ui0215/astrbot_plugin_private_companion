@@ -1096,17 +1096,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 provider_selector = getattr(self.plugin, "_task_provider", None)
                 if callable(provider_selector):
                     provider_id = provider_selector(
-                        getattr(self.plugin, "troubleshooting_provider_id", ""),
-                        getattr(self.plugin, "response_review_provider_id", ""),
-                        getattr(self.plugin, "mai_style_provider_id", ""),
                         getattr(self.plugin, "llm_provider_id", ""),
                     )
                 else:
                     provider_id = str(
-                        getattr(self.plugin, "troubleshooting_provider_id", "")
-                        or getattr(self.plugin, "response_review_provider_id", "")
-                        or getattr(self.plugin, "mai_style_provider_id", "")
-                        or getattr(self.plugin, "llm_provider_id", "")
+                        getattr(self.plugin, "llm_provider_id", "")
                         or ""
                     )
                 prompt = self._model_diagnostics_review_prompt(
@@ -4643,45 +4637,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _provider_settings(self) -> dict[str, str]:
         keys = [
             "LLM_PROVIDER_ID",
-            "MAI_STYLE_PROVIDER_ID",
-            "DAILY_PLAN_PROVIDER_ID",
-            "DETAIL_ENHANCEMENT_PROVIDER_ID",
-            "DREAM_DIARY_PROVIDER_ID",
-            "CREATIVE_PROVIDER_ID",
-            "VOICE_PROMPT_PROVIDER_ID",
             "tts_conversion_provider_id",
-            "PHOTO_PROMPT_PROVIDER_ID",
-            "NARRATION_PROVIDER_ID",
-            "HISTORY_SUMMARY_PROVIDER_ID",
-            "RESPONSE_REVIEW_PROVIDER_ID",
-            "TROUBLESHOOTING_PROVIDER_ID",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
-            "REST_WAKEUP_PROVIDER_ID",
-            "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
-            "EMOTION_JUDGEMENT_PROVIDER_ID",
-            "COMPANION_MEMORY_PROVIDER_ID",
-            "DIALOGUE_EPISODE_PROVIDER_ID",
-            "GROUP_INTERJECT_PROVIDER_ID",
-            "GROUP_EPISODE_PROVIDER_ID",
-            "GROUP_SLANG_PROVIDER_ID",
-            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
-            "FORWARD_MESSAGE_PROVIDER_ID",
-            "PLUGIN_VISION_PROVIDER_ID",
-            "PRIVATE_READING_VISION_PROVIDER_ID",
-            "NEWS_PROVIDER_ID",
-            "WEB_EXPLORATION_PROVIDER_ID",
         ]
         values = {key: self._config_get(key) for key in keys}
-        if not values.get("PLUGIN_VISION_PROVIDER_ID"):
-            values["PLUGIN_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "plugin_vision_provider_id", "") or "")
-        if not values.get("PRIVATE_READING_VISION_PROVIDER_ID"):
-            values["PRIVATE_READING_VISION_PROVIDER_ID"] = str(getattr(self.plugin, "jm_cosmos_vision_provider_id", "") or "")
-        if not values.get("DREAM_DIARY_PROVIDER_ID"):
-            values["DREAM_DIARY_PROVIDER_ID"] = str(getattr(self.plugin, "dream_diary_provider_id", "") or "")
         if not values.get("SMART_MESSAGE_DEBOUNCE_PROVIDER_ID"):
             values["SMART_MESSAGE_DEBOUNCE_PROVIDER_ID"] = str(getattr(self.plugin, "smart_message_debounce_provider_id", "") or "")
-        if not values.get("REST_WAKEUP_PROVIDER_ID"):
-            values["REST_WAKEUP_PROVIDER_ID"] = str(getattr(self.plugin, "rest_wakeup_provider_id", "") or "")
         if not values.get("tts_conversion_provider_id"):
             values["tts_conversion_provider_id"] = str(getattr(self.plugin, "tts_conversion_provider_id", "") or "")
         return values
@@ -4882,8 +4843,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         if text == "QZONE_COOKIE":
             return "sensitive"
         if text.startswith("private_reading_") or text.startswith("enable_private_reading_"):
-            return "sensitive"
-        if text in {"PRIVATE_READING_VISION_PROVIDER_ID"}:
             return "sensitive"
         if text.endswith("_PROVIDER_ID") or text in {"LLM_PROVIDER_ID", "tts_conversion_provider_id"}:
             return "providers"
@@ -5458,7 +5417,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "rest_reply_llm_threshold",
             "enable_rest_backlog_reply",
             "rest_backlog_max_messages",
-            "REST_WAKEUP_PROVIDER_ID",
             "check_interval_seconds",
             "idle_minutes",
             "min_interval_minutes",
@@ -5785,7 +5743,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             add(
                 "info",
                 "TTS 强化未开启",
-                "VOICE_PROMPT_PROVIDER_ID / TTS文本转换模型都是文本模型；语音合成模型请在 AstrBot TTS provider 中配置",
+                "TTS文本转换模型都是文本模型；语音合成模型请在 AstrBot TTS provider 中配置",
             )
 
         if enabled_users:
@@ -6132,39 +6090,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         self._set_config_value(key, value)
         attr_map = {
             "LLM_PROVIDER_ID": "llm_provider_id",
-            "MAI_STYLE_PROVIDER_ID": "mai_style_provider_id",
-            "DAILY_PLAN_PROVIDER_ID": "daily_plan_provider_id",
-            "DETAIL_ENHANCEMENT_PROVIDER_ID": "detail_enhancement_provider_id",
-            "DREAM_DIARY_PROVIDER_ID": "dream_diary_provider_id",
-            "CREATIVE_PROVIDER_ID": "creative_provider_id",
-            "VOICE_PROMPT_PROVIDER_ID": "voice_prompt_provider_id",
-            "PHOTO_PROMPT_PROVIDER_ID": "photo_prompt_provider_id",
-            "NARRATION_PROVIDER_ID": "narration_provider_id",
-            "HISTORY_SUMMARY_PROVIDER_ID": "history_summary_provider_id",
-            "RESPONSE_REVIEW_PROVIDER_ID": "response_review_provider_id",
-            "TROUBLESHOOTING_PROVIDER_ID": "troubleshooting_provider_id",
-            "RELATIONSHIP_ANALYSIS_PROVIDER_ID": "relationship_analysis_provider_id",
-            "EMOTION_JUDGEMENT_PROVIDER_ID": "emotion_judgement_provider_id",
-            "COMPANION_MEMORY_PROVIDER_ID": "companion_memory_provider_id",
-            "DIALOGUE_EPISODE_PROVIDER_ID": "dialogue_episode_provider_id",
-            "GROUP_INTERJECT_PROVIDER_ID": "group_interject_provider_id",
-            "GROUP_EPISODE_PROVIDER_ID": "group_episode_provider_id",
-            "GROUP_SLANG_PROVIDER_ID": "group_slang_provider_id",
-            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": "group_followup_judge_provider_id",
-            "FORWARD_MESSAGE_PROVIDER_ID": "forward_message_provider_id",
-            "PLUGIN_VISION_PROVIDER_ID": "plugin_vision_provider_id",
-            "PRIVATE_READING_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",
-            "NEWS_PROVIDER_ID": "news_provider_id",
-            "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": "smart_message_debounce_provider_id",
-            "REST_WAKEUP_PROVIDER_ID": "rest_wakeup_provider_id",
         }
         if key in attr_map:
             setattr(self.plugin, attr_map[key], str(value or "").strip())
-            if key == "DREAM_DIARY_PROVIDER_ID":
-                shared = str(value or "").strip()
-                self.plugin.dream_provider_id = shared
-                self.plugin.diary_provider_id = shared
             return
         if key == "group_access_mode":
             self.plugin.group_access_mode = str(value or "whitelist").lower()
@@ -6442,33 +6371,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _allowed_provider_keys() -> set[str]:
         return {
             "LLM_PROVIDER_ID",
-            "MAI_STYLE_PROVIDER_ID",
-            "DAILY_PLAN_PROVIDER_ID",
-            "DETAIL_ENHANCEMENT_PROVIDER_ID",
-            "DREAM_DIARY_PROVIDER_ID",
-            "CREATIVE_PROVIDER_ID",
-            "VOICE_PROMPT_PROVIDER_ID",
+            "AUX_PROVIDER_ID",
             "tts_conversion_provider_id",
-            "PHOTO_PROMPT_PROVIDER_ID",
-            "NARRATION_PROVIDER_ID",
-            "HISTORY_SUMMARY_PROVIDER_ID",
-            "RESPONSE_REVIEW_PROVIDER_ID",
-            "TROUBLESHOOTING_PROVIDER_ID",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
-            "REST_WAKEUP_PROVIDER_ID",
-            "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
-            "COMPANION_MEMORY_PROVIDER_ID",
-            "DIALOGUE_EPISODE_PROVIDER_ID",
-            "GROUP_INTERJECT_PROVIDER_ID",
-            "GROUP_EPISODE_PROVIDER_ID",
-            "GROUP_SLANG_PROVIDER_ID",
-            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
-            "FORWARD_MESSAGE_PROVIDER_ID",
-            "PLUGIN_VISION_PROVIDER_ID",
-            "PRIVATE_READING_VISION_PROVIDER_ID",
-            "NEWS_PROVIDER_ID",
-            "WEB_EXPLORATION_PROVIDER_ID",
-            "EMOTION_JUDGEMENT_PROVIDER_ID",
         }
 
     @staticmethod
@@ -6535,7 +6440,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "rest_reply_llm_threshold",
             "enable_rest_backlog_reply",
             "rest_backlog_max_messages",
-            "REST_WAKEUP_PROVIDER_ID",
             "check_interval_seconds",
             "idle_minutes",
             "min_interval_minutes",
@@ -6827,8 +6731,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             }
             mode = aliases.get(mode, mode)
             return mode if mode in {"probability", "llm"} else "probability"
-        if key == "REST_WAKEUP_PROVIDER_ID":
-            return str(value or "").strip()[:160]
         if key == "tts_generation_mode":
             mode = str(value or "fast_tag").strip().lower()
             aliases = {

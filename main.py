@@ -663,7 +663,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.daily_token_soft_limit = self._cfg_int(c, "daily_token_soft_limit", legacy_soft_limit, 0)
         self.enable_maintenance_token_saver = self.enable_daily_token_soft_limit
         self.maintenance_token_soft_limit = self.daily_token_soft_limit
-        self.daily_plan_provider_id = self._cfg_str(c, "DAILY_PLAN_PROVIDER_ID", "")
         self.enable_daily_plan = self._cfg_bool(c, "enable_daily_plan", True)
         self.daily_plan_time = self._cfg_str(c, "daily_plan_time", "07:30")
         self.bot_name = self._cfg_str(c, "bot_name", "小星", "小星")
@@ -691,15 +690,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.rest_reply_llm_threshold = self._cfg_int(c, "rest_reply_llm_threshold", 65, 0, 100)
         self.enable_rest_backlog_reply = self._cfg_bool(c, "enable_rest_backlog_reply", True)
         self.rest_backlog_max_messages = self._cfg_int(c, "rest_backlog_max_messages", 4, 1, 12)
-        self.rest_wakeup_provider_id = self._cfg_str(c, "REST_WAKEUP_PROVIDER_ID", "")
         self.enable_enhanced_dreams = self._cfg_bool(c, "enable_enhanced_dreams", False)
-        self.dream_diary_provider_id = self._cfg_str(
-            c,
-            "DREAM_DIARY_PROVIDER_ID",
-            self._cfg_str(c, "DREAM_PROVIDER_ID", self._cfg_str(c, "DIARY_PROVIDER_ID", "")),
-        )
-        self.dream_provider_id = self.dream_diary_provider_id
-        self.diary_provider_id = self.dream_diary_provider_id
         self.dream_afterglow_mode = self._cfg_str(c, "dream_afterglow_mode", "auto", "auto")
         if self.dream_afterglow_mode not in {"auto", "轻", "标准", "明显"}:
             self.dream_afterglow_mode = "auto"
@@ -733,9 +724,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.creative_base_chars_per_hour = self.creative_chars_per_session
         self.creative_max_active_projects = self._cfg_int(c, "creative_max_active_projects", 2, 1, 5)
         self.creative_hidden_mode = self._cfg_bool(c, "creative_hidden_mode", True)
-        self.creative_provider_id = self._cfg_str(c, "CREATIVE_PROVIDER_ID", "")
-        self.voice_prompt_provider_id = self._cfg_str(c, "VOICE_PROMPT_PROVIDER_ID", "")
-        self.history_summary_provider_id = self._cfg_str(c, "HISTORY_SUMMARY_PROVIDER_ID", "")
         self.enable_llm_proactive_message = self._cfg_bool(c, "enable_llm_proactive_message", True)
         self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", False)
         self.enable_proactive_decorating_hooks = self._cfg_bool(c, "enable_proactive_decorating_hooks", True)
@@ -792,9 +780,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self._recent_inbound_message_debounce: dict[str, float] = {}
         self._semantic_message_buffers: dict[str, dict[str, Any]] = {}
         self.enable_detail_enhancement = self._cfg_bool(c, "enable_detail_enhancement", False)
-        self.detail_enhancement_provider_id = self._cfg_str(c, "DETAIL_ENHANCEMENT_PROVIDER_ID", "")
-        self.narration_provider_id = self._cfg_str(c, "NARRATION_PROVIDER_ID", "")
-        self.photo_prompt_provider_id = self._cfg_str(c, "PHOTO_PROMPT_PROVIDER_ID", "")
         self.comfyui_photo_workflow_name = self._cfg_str(c, "COMFYUI_PHOTO_WORKFLOW_NAME", "")
         self.comfyui_text2img_workflow_name = self._cfg_str(c, "COMFYUI_TEXT2IMG_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
         self.comfyui_selfie_workflow_name = self._cfg_str(c, "COMFYUI_SELFIE_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
@@ -889,13 +874,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.memory_refresh_interval_minutes = self._cfg_int(c, "memory_refresh_interval_minutes", 360, 30, 4320)
         self.max_companion_memory_items = self._cfg_int(c, "max_companion_memory_items", 36, 8, 120)
         self.max_learned_expression_items = self._cfg_int(c, "max_learned_expression_items", 18, 4, 60)
-        self.mai_style_provider_id = self._cfg_str(c, "MAI_STYLE_PROVIDER_ID", "")
-        self.companion_memory_provider_id = self._cfg_str(c, "COMPANION_MEMORY_PROVIDER_ID", "")
-        self.dialogue_episode_provider_id = self._cfg_str(c, "DIALOGUE_EPISODE_PROVIDER_ID", "")
-        self.relationship_analysis_provider_id = self._cfg_str(c, "RELATIONSHIP_ANALYSIS_PROVIDER_ID", "")
-        self.response_review_provider_id = self._cfg_str(c, "RESPONSE_REVIEW_PROVIDER_ID", "")
-        self.troubleshooting_provider_id = self._cfg_str(c, "TROUBLESHOOTING_PROVIDER_ID", "")
-        self.emotion_judgement_provider_id = self._cfg_str(c, "EMOTION_JUDGEMENT_PROVIDER_ID", "")
+        self.aux_provider_id = self._cfg_str(c, "AUX_PROVIDER_ID", "")
         self.response_review_max_chars = self._cfg_int(c, "response_review_max_chars", 260, 80, 900)
         self.passive_topic_memory_hours = self._cfg_int(c, "passive_topic_memory_hours", 8, 1, 72)
         self.episode_memory_refresh_messages = self._cfg_int(c, "episode_memory_refresh_messages", 8, 3, 40)
@@ -921,7 +900,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             self.forward_message_mode = "transcribe"
         elif self.forward_message_mode not in {"inject", "transcribe"}:
             self.forward_message_mode = "inject"
-        self.forward_message_provider_id = self._cfg_str(c, "FORWARD_MESSAGE_PROVIDER_ID", "")
         self.forward_message_max_messages = self._cfg_int(c, "forward_message_max_messages", 80, 5, 300)
         self.forward_message_max_chars = self._cfg_int(c, "forward_message_max_chars", 5000, 800, 20000)
         self.forward_message_parse_nested = self._cfg_bool(c, "forward_message_parse_nested", True)
@@ -1002,10 +980,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.worldbook_auto_pending_observations = self._cfg_bool(c, "worldbook_auto_pending_observations", True)
         self.worldbook_member_inject_limit = self._cfg_int(c, "worldbook_member_inject_limit", 6, 1, 20)
         self.worldbook_config_paths = self._cfg_str(c, "worldbook_config_paths", "")
-        self.group_interject_provider_id = self._cfg_str(c, "GROUP_INTERJECT_PROVIDER_ID", "")
-        self.group_episode_provider_id = self._cfg_str(c, "GROUP_EPISODE_PROVIDER_ID", "")
-        self.group_slang_provider_id = self._cfg_str(c, "GROUP_SLANG_PROVIDER_ID", "")
-        self.group_followup_judge_provider_id = self._cfg_str(c, "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID", "")
         self.enable_livingmemory_integration = self._cfg_bool(c, "enable_livingmemory_integration", True)
         self.livingmemory_tool_name = self._cfg_str(c, "livingmemory_tool_name", "recall_long_term_memory", "recall_long_term_memory")
         self.enable_bilibili_integration = self._cfg_bool(c, "enable_bilibili_integration", True)
@@ -1034,7 +1008,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         )
         if str(self.news_sources or "").strip() in {LEGACY_DEFAULT_NEWS_SOURCES, PREVIOUS_TECH_DEFAULT_NEWS_SOURCES}:
             self.news_sources = DEFAULT_NEWS_SOURCES
-        self.news_provider_id = self._cfg_str(c, "NEWS_PROVIDER_ID", "")
         self.enable_web_exploration = self._cfg_bool(c, "enable_web_exploration", False)
         self.enable_web_exploration_boredom_search = self._cfg_bool(c, "enable_web_exploration_boredom_search", True)
         self.web_exploration_min_interval_hours = self._cfg_int(c, "web_exploration_min_interval_hours", 8, 1, 168)
@@ -1045,7 +1018,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             "web_exploration_interests",
             "按 Bot 人格自行决定；可偏向最近聊天、日程、人设兴趣、作品、技术、生活小知识、流行梗、时讯、新鲜事物。",
         )
-        self.web_exploration_provider_id = self._cfg_str(c, "WEB_EXPLORATION_PROVIDER_ID", "")
         self.enable_qzone_integration = self._cfg_bool(c, "enable_qzone_integration", True)
         self.qzone_cookie = self._cfg_str(c, "QZONE_COOKIE", "")
         self.enable_qzone_life_publish = self._cfg_bool(c, "enable_qzone_life_publish", False)
@@ -1128,12 +1100,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             "private_reading_blocked_tags",
             self._cfg_str(c, "jm_cosmos_blocked_tags", "連載中,長篇,青年漫"),
         )
-        self.plugin_vision_provider_id = self._cfg_str(c, "PLUGIN_VISION_PROVIDER_ID", "")
-        self.jm_cosmos_vision_provider_id = self._cfg_str(
-            c,
-            "PRIVATE_READING_VISION_PROVIDER_ID",
-            self._cfg_str(c, "JM_COSMOS_VISION_PROVIDER_ID", ""),
-        )
         if isinstance(c, dict):
             legacy_private_reading_keys = {
                 "enable_jm_cosmos_integration": "enable_private_reading_integration",
@@ -1143,7 +1109,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 "jm_cosmos_share_probability": "private_reading_share_probability",
                 "jm_cosmos_default_keywords": "private_reading_default_keywords",
                 "jm_cosmos_blocked_tags": "private_reading_blocked_tags",
-                "JM_COSMOS_VISION_PROVIDER_ID": "PRIVATE_READING_VISION_PROVIDER_ID",
             }
             for old_key, new_key in legacy_private_reading_keys.items():
                 if old_key in c:
@@ -3587,7 +3552,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         raw = await self._llm_call(
             prompt,
             max_tokens=180,
-            provider_id=self._task_provider(self.rest_wakeup_provider_id, self.response_review_provider_id, self.llm_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="rest_wakeup_judge",
         )
         payload = self._extract_json_payload(raw or "")

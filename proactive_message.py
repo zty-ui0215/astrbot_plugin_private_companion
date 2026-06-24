@@ -663,7 +663,7 @@ class ProactiveMessageMixin:
         return "\n".join(part for part in parts if part)
 
     async def _narrate_action_context(self, action: str, action_context: str) -> str:
-        if not self.narration_provider_id:
+        if not self.aux_provider_id:
             return self._sanitize_action_context_text(action, action_context)
         if action in {"message", "photo_text", "poke", "voice"} or "photo_text" in action or "voice" in action or "poke" in action or not action_context:
             return self._sanitize_action_context_text(action, action_context)
@@ -687,7 +687,7 @@ class ProactiveMessageMixin:
         text = await self._llm_call(
             prompt,
             max_tokens=80,
-            provider_id=self.narration_provider_id,
+            provider_id=self.aux_provider_id,
             task="screen_narration",
         )
         return _single_line(text, 120) if text else cleaned_context
@@ -1873,7 +1873,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         raw = await self._llm_call(
             prompt,
             max_tokens=220,
-            provider_id=self._task_provider(self.response_review_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="proactive_send_review",
         )
         payload = self._parse_json_object(raw)
@@ -2165,7 +2165,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         rewritten = await self._llm_call(
             prompt,
             max_tokens=180,
-            provider_id=self._task_provider(self.response_review_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="response_review",
         )
         candidate = self._sanitize_proactive_text(str(rewritten or "").strip())
@@ -3470,7 +3470,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 repaired = await self._llm_call(
                     repair_prompt,
                     max_tokens=140,
-                    provider_id=self._task_provider(self.voice_prompt_provider_id, self.mai_style_provider_id),
+                    provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                     task="voice_repair",
                 )
                 if repaired:
@@ -3527,7 +3527,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         text = await self._llm_call(
             prompt,
             max_tokens=120,
-            provider_id=self._task_provider(self.voice_prompt_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="voice",
         )
         spoken = str(text or "").strip()
@@ -3545,7 +3545,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             repaired = await self._llm_call(
                 repair_prompt,
                 max_tokens=140,
-                provider_id=self._task_provider(self.voice_prompt_provider_id, self.mai_style_provider_id),
+                provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                 task="voice_repair",
             )
             if repaired:
@@ -3976,7 +3976,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         text = await self._llm_call(
             prompt,
             max_tokens=260,
-            provider_id=self._task_provider(self.photo_prompt_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="photo_prompt",
         )
         payload = self._extract_json_payload(text or "")

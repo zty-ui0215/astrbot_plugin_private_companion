@@ -1727,9 +1727,8 @@ class ProactiveEngineMixin:
                 prompt,
                 max_tokens=1000,
                 provider_id=self._task_provider(
-                    self.detail_enhancement_provider_id,
-                    self.daily_plan_provider_id,
-                    self.mai_style_provider_id,
+                    self.aux_provider_id,
+                    self.llm_provider_id,
                 ),
                 task="full_test_detail",
             )

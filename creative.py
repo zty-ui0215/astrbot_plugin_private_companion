@@ -445,7 +445,7 @@ class CreativeMixin:
         text = await self._llm_call(
             prompt,
             max_tokens=500,
-            provider_id=self._task_provider(self.creative_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="creative_project",
         )
         payload = self._extract_json_payload(text or "")
@@ -515,7 +515,7 @@ class CreativeMixin:
         text = await self._llm_call(
             prompt,
             max_tokens=max(220, budget + 160),
-            provider_id=self._task_provider(self.creative_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="creative_writing",
         )
         cleaned = str(text or "").strip()

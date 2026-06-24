@@ -37,9 +37,8 @@ async def generate_detail_enhancement(
     await plugin._ensure_weather_context()
     prompt = plugin._build_detail_enhancement_prompt(segment, plan, state)
     detail_provider = plugin._task_provider(
-        getattr(plugin, "detail_enhancement_provider_id", ""),
-        getattr(plugin, "daily_plan_provider_id", ""),
-        getattr(plugin, "mai_style_provider_id", ""),
+        getattr(plugin, "aux_provider_id", ""),
+        getattr(plugin, "llm_provider_id", ""),
     )
     raw_text = await plugin._llm_call(
         prompt,
@@ -391,8 +390,8 @@ async def generate_daily_plan(plugin) -> dict[str, Any]:
     await plugin._ensure_weather_context()
     prompt = plugin._build_daily_plan_prompt(now)
     plan_provider = plugin._task_provider(
-        getattr(plugin, "daily_plan_provider_id", ""),
-        getattr(plugin, "mai_style_provider_id", ""),
+        getattr(plugin, "aux_provider_id", ""),
+        getattr(plugin, "llm_provider_id", ""),
     )
     raw_text = await plugin._llm_call(prompt, max_tokens=900, provider_id=plan_provider)
     items = plugin._parse_plan_items(raw_text or "")

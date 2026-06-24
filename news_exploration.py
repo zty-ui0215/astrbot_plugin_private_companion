@@ -2057,7 +2057,7 @@ class NewsExplorationMixin:
     async def _summarize_news_items(self, items: list[dict[str, Any]]) -> dict[str, Any]:
         if not items:
             return {}
-        provider_id = self._task_provider(self.news_provider_id, self.narration_provider_id, self.llm_provider_id)
+        provider_id = self._task_provider(self.aux_provider_id, self.llm_provider_id)
         if not provider_id:
             return self._news_fallback_digest(items)
         lines = []
@@ -2122,7 +2122,7 @@ class NewsExplorationMixin:
         }
 
     def _external_event_self_link_provider_id(self) -> str:
-        return self._task_provider(self.news_provider_id, self.web_exploration_provider_id, self.narration_provider_id, self.llm_provider_id)
+        return self._task_provider(self.aux_provider_id, self.llm_provider_id)
 
     def _format_external_event_self_context(self) -> str:
         state = self.data.get("daily_state", {}) if isinstance(self.data.get("daily_state"), dict) else {}
@@ -2134,10 +2134,6 @@ class NewsExplorationMixin:
         plugin_main = self._task_provider(self.llm_provider_id)
         if plugin_main:
             model_lines.append(f"插件主模型：{self._provider_identity_label(plugin_main)}")
-        if self.news_provider_id:
-            model_lines.append(f"新闻整理模型：{self._provider_identity_label(self.news_provider_id)}")
-        if self.web_exploration_provider_id:
-            model_lines.append(f"主动搜索整理模型：{self._provider_identity_label(self.web_exploration_provider_id)}")
         return "\n".join(
             part
             for part in (
@@ -3169,7 +3165,7 @@ class NewsExplorationMixin:
         return "\n".join(lines)
 
     async def _choose_web_exploration_query(self, hot_items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        provider_id = self._task_provider(self.web_exploration_provider_id, self.news_provider_id, self.llm_provider_id)
+        provider_id = self._task_provider(self.aux_provider_id, self.llm_provider_id)
         fallback_topics = [
             "今天有什么有趣的新鲜事",
             "最近流行的网络梗",
@@ -3252,7 +3248,7 @@ class NewsExplorationMixin:
                     parts.append(snippet)
             return _single_line("；".join(parts), 360)
 
-        provider_id = self._task_provider(self.web_exploration_provider_id, self.news_provider_id, self.llm_provider_id)
+        provider_id = self._task_provider(self.aux_provider_id, self.llm_provider_id)
         if not provider_id:
             first = results[0]
             return {

@@ -2631,7 +2631,7 @@ class EventDispatchMixin:
         active: dict[str, Any],
         scene: dict[str, Any],
     ) -> bool | None:
-        provider_id = self._task_provider(self.group_followup_judge_provider_id)
+        provider_id = self._task_provider(self.aux_provider_id, self.llm_provider_id)
         if not provider_id:
             return None
         recent = group.get("recent_messages") if isinstance(group.get("recent_messages"), list) else []

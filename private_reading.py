@@ -903,8 +903,7 @@ class PrivateReadingMixin:
             prompt,
             max_tokens=40,
             provider_id=self._task_provider(
-                self.dream_diary_provider_id,
-                self.mai_style_provider_id,
+                self.aux_provider_id,
                 self.llm_provider_id,
             ),
         )

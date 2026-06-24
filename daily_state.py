@@ -4365,7 +4365,7 @@ class DailyStateMixin:
         raw = await self._llm_call(
             prompt,
             max_tokens=650,
-            provider_id=self._task_provider(self.history_summary_provider_id, self.daily_plan_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="yesterday_summary",
         )
         payload = self._extract_json_payload(raw or "")

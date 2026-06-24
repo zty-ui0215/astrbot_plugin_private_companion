@@ -2520,7 +2520,7 @@ function renderAll() {
   renderTokens();
   renderModuleSettings();
   renderConfig();
-  renderProviders();
+  // renderProviders() removed — models/provider tab UI has been removed from HTML
 }
 
 function renderStats() {
@@ -2644,7 +2644,6 @@ function renderDashboardPulse() {
     ["troubleshooting", "排障中心", `${(state.diagnostics || []).filter((item) => ["warn", "error"].includes(item.level)).length} 个诊断项`],
     ["image-cache", "图片缓存", `${overview.cache?.private_image_vision?.items || 0}/${overview.cache?.private_image_vision?.max_items || "不限"} 条`],
     ["modules", "模块工作台", moduleShortcutNote(overview)],
-    ["models", "模型分流", providerShortcutNote(overview.providers || {})],
     ["config", "名单与开关", `${overview.group?.access_mode || "whitelist"} · 白 ${overview.group?.whitelist?.length || 0} / 黑 ${overview.group?.blacklist?.length || 0}`],
   ];
   $("#dashboardShortcuts").innerHTML = shortcuts.map(([tab, label, note]) => `
@@ -7761,7 +7760,6 @@ function renderModuleWorkbench(settings) {
       ],
       actions: [
         ["image-cache", "管理图片缓存"],
-        ["models", "看视觉模型"],
       ],
     },
     {
@@ -7793,7 +7791,6 @@ function renderModuleWorkbench(settings) {
       </div>
       <div class="module-workbench-actions">
         <button type="button" data-jump-tab="config">配置页</button>
-        <button type="button" data-jump-tab="models">模型页</button>
       </div>
     </section>
     <div class="module-workbench-grid">
@@ -10700,6 +10697,8 @@ function bindProactiveOnlyTempUnlockActions(root = document) {
 }
 
 function renderProviders() {
+  // Guard: the models/provider panel has been removed from the HTML
+  if (!document.getElementById("providerForm")) return;
   const providers = providerValuesForRender();
   renderProviderSummary(providers);
   renderProviderFlow(providers);
@@ -12067,7 +12066,10 @@ document.addEventListener("change", (event) => {
 });
 
 bindRoleplayModeSwitch();
-bindProviderToolbar();
+// Guard: bindProviderToolbar only runs when the provider toolbar elements exist in the DOM
+if (document.getElementById("providerFilter") || document.querySelector("[data-provider-mode]")) {
+  bindProviderToolbar();
+}
 
 ["roleplayProfileForm", "privateAliasForm", "quickModuleForm", "environmentModuleForm", "privateModuleForm", "groupModuleForm", "worldbookModuleForm", "memoryModuleForm", "longTermModuleForm"].forEach((formId) => {
   const form = document.getElementById(formId);
@@ -12248,21 +12250,26 @@ $("#enableSafeFeaturesBtn").addEventListener("click", () => {
   renderFeatureSwitches();
 });
 
-$("#saveProvidersBtn").addEventListener("click", async () => {
-  const values = currentProviderValues();
-  const providers = {};
-  Object.keys(providerLabels).forEach((key) => {
-    if (visibleConfigKey(key)) providers[key] = values[key] || "";
+// Guard: saveProvidersBtn and testAllProvidersBtn have been removed from the HTML
+if (document.getElementById("saveProvidersBtn")) {
+  $("#saveProvidersBtn").addEventListener("click", async () => {
+    const values = currentProviderValues();
+    const providers = {};
+    Object.keys(providerLabels).forEach((key) => {
+      if (visibleConfigKey(key)) providers[key] = values[key] || "";
+    });
+    await runAction(() => postJson("/settings/update", { providers }), "已保存模型配置", $("#saveProvidersBtn"));
+    state.providerDraft = { ...state.providerDraft, ...providers };
+    renderProviders();
   });
-  await runAction(() => postJson("/settings/update", { providers }), "已保存模型配置", $("#saveProvidersBtn"));
-  state.providerDraft = { ...state.providerDraft, ...providers };
-  renderProviders();
-});
+}
 
-$("#testAllProvidersBtn").addEventListener("click", async () => {
-  for (const key of Object.keys(providerLabels).filter(visibleConfigKey)) {
-    await testProvider(key);
-  }
-});
+if (document.getElementById("testAllProvidersBtn")) {
+  $("#testAllProvidersBtn").addEventListener("click", async () => {
+    for (const key of Object.keys(providerLabels).filter(visibleConfigKey)) {
+      await testProvider(key);
+    }
+  });
+}
 
 loadAll();
