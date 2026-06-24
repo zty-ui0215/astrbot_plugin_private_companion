@@ -8,7 +8,7 @@
   "basic_config": {
     "description": "基础配置",
     "type": "object",
-    "hint": "插件总开关与基本身份设置",
+    "hint": "插件的基础设置，在启用前请确认这些项",
     "items": {
       "enable_proactive_only_mode": {
         "description": "主动消息专用模式",
@@ -51,7 +51,7 @@
       "target_platform": {
         "description": "私聊目标平台名",
         "type": "string",
-        "hint": "用于拼接未见过用户的 unified_msg_origin，QQ/OneBot 通常是 aiocqhttp。若用户私聊过 Bot，会自动替换成真实会话来源。",
+        "hint": "用于拼接未见过用户的 unified_msg_origin，QQ/OneBot 通常是 aiocqhttp，如果您使用的是qq，不需要更改此项。若用户私聊过 Bot，会自动替换成真实会话来源。",
         "default": "aiocqhttp"
       },
       "default_enable_configured_targets": {
@@ -69,7 +69,7 @@
       "default_style": {
         "description": "默认语气",
         "type": "string",
-        "hint": "可选：温柔、活泼、工作。用户可用“陪伴 语气”单独覆盖。",
+        "hint": "可选：温柔、活泼、工作等。用户可用“陪伴 语气”单独覆盖。",
         "default": "温柔"
       },
       "worldview_adaptation_mode": {
@@ -97,7 +97,17 @@
         "type": "string",
         "hint": "格式：HH:MM-HH:MM，例如 23:00-08:30。跨天时间段会自动处理。",
         "default": "23:00-08:30"
-      },
+      }
+    },
+    "condition": {
+      "enabled": true
+    }
+  },
+  "perception_config": {
+    "description": "感知能力",
+    "type": "object",
+    "hint": "在这里可以设置现实感知相关能力",
+    "items": {
       "enable_environment_perception": {
         "description": "启用环境感知",
         "type": "bool",
@@ -193,7 +203,7 @@
   "token_limit_config": {
     "description": "Token 限额",
     "type": "object",
-    "hint": "每日插件 Token 用量限制设置",
+    "hint": "在这里您可以设置插件的Token限额，避免过度消耗资源。每日限额会在每天零点重置。注意，这些限额仅适用于本插件内部发起的 LLM 任务，不会影响 AstrBot 的其他功能。",
     "items": {
       "daily_token_limit": {
         "description": "每日插件 Token 限额",
@@ -224,7 +234,7 @@
   "model_assignment": {
     "description": "模型设置",
     "type": "object",
-    "hint": "各功能模块LLM模型分配留空自动回退",
+    "hint": "各功能分块的模型设置。如果您只想使用一个模型，此框可以不填，插件会自动回退到 LLM_PROVIDER_ID 或 AstrBot 默认模型。",
     "items": {
       "MAI_STYLE_PROVIDER_ID": {
         "description": "私聊互动策略通用模型（留空跟随主模型）",
@@ -412,9 +422,9 @@
     }
   },
   "proactive_basic": {
-    "description": "主动消息设置",
+    "description": "私聊主动设置",
     "type": "object",
-    "hint": "私聊主动消息频率间隔与调度设置",
+    "hint": "在这里可以设置插件的私聊主动消息能力",
     "items": {
       "max_daily_messages": {
         "description": "每日最多主动消息数",
@@ -463,7 +473,7 @@
       "proactive_unanswered_max_interval_multiplier": {
         "description": "未回应最大间隔倍率",
         "type": "float",
-        "hint": "连续未回应时，同一用户最小主动间隔最多放大到多少倍。默认 2.2，与旧版硬编码一致。",
+        "hint": "连续未回应时，同一用户最小主动间隔最多放大到多少倍。默认 2.2",
         "slider": {
           "min": 1,
           "max": 8,
@@ -474,7 +484,7 @@
       "friend_unanswered_max_cooldown_hours": {
         "description": "朋友未回应最长冷却（小时）",
         "type": "float",
-        "hint": "朋友用户持续不回应时，主动消息随机延后窗口的最长上限。默认 60 小时，与旧版硬编码一致。",
+        "hint": "朋友用户持续不回应时，主动消息随机延后窗口的最长上限。默认 60 小时",
         "slider": {
           "min": 1,
           "max": 168,
@@ -581,10 +591,10 @@
   "quote_config": {
     "description": "引用消息配置",
     "type": "object",
-    "hint": "群聊私聊引用触发消息相关设置",
+    "hint": "您可以在这里决定是否让智能体引用消息",
     "items": {
       "enable_proactive_quote_trigger_message": {
-        "description": "群回复/主动引用触发消息",
+        "description": "主动引用消息总开关",
         "type": "bool",
         "hint": "开启后，群聊中明确 @、引用、唤醒或连续对话保持触发的 Bot 回复会引用当前消息；群聊主动插话会引用触发消息；模型预约的私聊主动若能追溯到同一私聊消息，也会引用。复读跟读/打断不会引用。",
         "default": false
@@ -645,9 +655,9 @@
     }
   },
   "greeting_creative": {
-    "description": "问候与创作",
+    "description": "问候行为",
     "type": "object",
-    "hint": "问候和私下创作行为相关设置",
+    "hint": "你希望你的智能体主动问候你吗？",
     "items": {
       "enable_daily_greetings": {
         "description": "启用早午晚锚点问候",
@@ -674,7 +684,17 @@
         "type": "bool",
         "hint": "开启后，即使处于免打扰时间，若 Bot 当前叠加了失眠/浅睡等状态，也可能低概率发送一条低压力深夜消息。仍受每日上限和最小间隔限制。",
         "default": true
-      },
+      }
+    },
+    "condition": {
+      "enabled": true
+    }
+  },
+  "greeting_creative": {
+    "description": "创作行为",
+    "type": "object",
+    "hint": "或许你想让你的智能体偶尔写些东西",
+    "items": {
       "enable_creative_writing": {
         "description": "启用私下创作行为",
         "type": "bool",
@@ -752,9 +772,9 @@
     }
   },
   "skill_growth_config": {
-    "description": "技能成长配置",
+    "description": "技能成长",
     "type": "object",
-    "hint": "Bot技能成长模拟相关设置",
+    "hint": "你的智能体能慢慢成长！",
     "items": {
       "enable_skill_growth_simulation": {
         "description": "启用技能成长模拟",
@@ -824,9 +844,9 @@
     }
   },
   "recall_config": {
-    "description": "撤回与防抖",
+    "description": "撤回、收口与防抖",
     "type": "object",
-    "hint": "消息撤回增强与消息收口防抖设置",
+    "hint": "这些设置能让你的智能体在聊天时更加智能",
     "items": {
       "enable_recall_enhancement": {
         "description": "启用撤回增强",
@@ -1110,7 +1130,7 @@
   "private_image_config": {
     "description": "图片转述增强",
     "type": "object",
-    "hint": "私聊图片转述GIF动图与缓存设置",
+    "hint": "智能体或许会愿意偷瞄一眼你的图片是不是在画她",
     "items": {
       "enable_private_image_self_recognition": {
         "description": "启用图片转述增强",
@@ -1197,7 +1217,7 @@
   "group_conversation_config": {
     "description": "群聊连续对话",
     "type": "object",
-    "hint": "群聊上下文续接与对话保持设置",
+    "hint": "群聊里的智能体可以更连贯的对话了",
     "items": {
       "enable_group_conversation_followup": {
         "description": "启用群聊连续对话保持",
@@ -1241,7 +1261,7 @@
   "private_interaction": {
     "description": "私聊互动策略",
     "type": "object",
-    "hint": "私聊回复互动策略记忆与学习设置",
+    "hint": "你的智能体想更了解你一些",
     "items": {
       "enable_mai_style_integration": {
         "description": "启用私聊互动策略",
@@ -1483,15 +1503,6 @@
         "condition": {
           "enable_mai_style_integration": true
         }
-      },
-      "enable_food_menu_recommendation": {
-        "description": "启用吃什么候选",
-        "type": "bool",
-        "hint": "把常吃菜、店和外卖整理成候选。用户纠结吃什么、点什么或夜宵时，只取少量贴合项作为回复参考。",
-        "default": true,
-        "condition": {
-          "enable_mai_style_integration": true
-        }
       }
     },
     "condition": {
@@ -1501,7 +1512,7 @@
   "emotion_config": {
     "description": "情绪模拟",
     "type": "object",
-    "hint": "Bot短期情绪余波与心情动态设置",
+    "hint": "这里的设置能让你的智能体偶尔闹点小情绪",
     "items": {
       "enable_emotion_simulation": {
         "description": "启用情绪模拟",
@@ -1646,7 +1657,7 @@
   "response_review_config": {
     "description": "消息润色",
     "type": "object",
-    "hint": "主动消息润色与复核设置",
+    "hint": "“说话前要先过一遍脑子”",
     "items": {
       "enable_response_self_review": {
         "description": "启用主动消息润色",
@@ -1691,7 +1702,7 @@
   "news_web_config": {
     "description": "新闻与网页探索",
     "type": "object",
-    "hint": "新闻阅读AI日报与主动搜索设置",
+    "hint": "让你的智能体紧跟时事",
     "items": {
       "enable_news_integration": {
         "description": "启用新闻阅读",
@@ -1981,7 +1992,8 @@
   "bilibili_config": {
     "description": "B站协同",
     "type": "object",
-    "hint": "B站Bot协同与视频分享设置",
+        "default": true,
+    "hint": "让你的智能体也能刷B站，不过需要配合 astrbot_plugin_bilibili_bot 插件使用",
     "items": {
       "enable_bilibili_integration": {
         "description": "启用 B 站 Bot 协同",
@@ -2047,9 +2059,9 @@
     }
   },
   "qzone_config": {
-    "description": "QQ空间集成",
+    "description": "QQ空间能力",
     "type": "object",
-    "hint": "QQ空间查看点赞评论与说说发布设置",
+    "hint": "这里的设置能让你的智能体刷QQ空间",
     "items": {
       "enable_qzone_integration": {
         "description": "启用 QQ 空间动态层",
@@ -2137,7 +2149,7 @@
   "reading_config": {
     "description": "夹层阅读",
     "type": "object",
-    "hint": "夹层阅读素材与偏好设置",
+    "hint": "让你的智能体边吃你的token边偷偷看书",
     "items": {
       "enable_private_reading_integration": {
         "description": "启用夹层阅读素材",
@@ -2287,16 +2299,16 @@
   "enable_group_companion": {
     "description": "启用群聊陪伴观察",
     "type": "bool",
-    "hint": "开启后，插件会在目标群里静默观察群聊气氛、群友发言和常见梗；默认不主动插话，只在 AstrBot 本身触发群聊回复时注入上下文。",
+    "hint": "群聊观察的总开关。开启后，插件会在目标群里静默观察群聊气氛、群友发言和常见梗；默认不主动插话，只在 AstrBot 本身触发群聊回复时注入上下文。",
     "default": true,
     "condition": {
      "enabled": true
     }
   },
   "group_basic": {
-    "description": "群聊基础",
+    "description": "群聊陪伴增强",
     "type": "object",
-    "hint": "群聊陪伴观察基础设置",
+    "hint": "群聊陪伴观察的基础设置（实则也不基础）",
     "items": {
       "group_access_mode": {
         "description": "群聊启用模式",
@@ -2628,7 +2640,7 @@
   "group_memory": {
     "description": "群聊记忆与学习",
     "type": "object",
-    "hint": "群聊黑话画像话题与片段记忆设置",
+    "hint": "让你的智能体悄悄学习群里的关系",
     "items": {
       "enable_group_slang_learning": {
         "description": "启用群内黑话/梗学习",
@@ -2658,7 +2670,10 @@
         "description": "启用群内黑话语义解释",
         "type": "bool",
         "hint": "低频调用 LLM，根据群聊样例为常见词/梗补充含义、用法、类型和置信度。证据不足的词会被省略，不再保存“语境不明”。",
-        "default": true
+        "default": true,
+        "condition": {
+          "enable_group_slang_learning": true
+        }
       },
       "enable_group_slang_web_search": {
         "description": "黑话释义联网参考",
@@ -2666,7 +2681,8 @@
         "hint": "默认关闭。开启后，黑话释义整理会低频调用 AstrBot 全局网页搜索，为已有黑话候选收集外部解释摘要，并让模型判断外部解释与本群聊天样例是否匹配。搜索结果只作为证据，不会直接覆盖群内用法。",
         "default": false,
         "condition": {
-          "enable_group_slang_meanings": true
+          "enable_group_slang_meanings": true,
+          "enable_group_slang_learning": true
         }
       },
       "group_slang_web_search_terms": {
@@ -2677,7 +2693,9 @@
         "min": 1,
         "max": 12,
         "condition": {
-          "enable_group_slang_web_search": true
+          "enable_group_slang_web_search": true,
+          "enable_group_slang_meanings": true,
+          "enable_group_slang_learning": true
         }
       },
       "group_slang_web_search_results": {
@@ -2688,7 +2706,9 @@
         "min": 1,
         "max": 5,
         "condition": {
-          "enable_group_slang_web_search": true
+          "enable_group_slang_web_search": true,
+          "enable_group_slang_meanings": true,
+          "enable_group_slang_learning": true
         }
       },
       "enable_group_relationship_graph": {
@@ -2739,7 +2759,10 @@
           "max": 2880,
           "step": 60
         },
-        "default": 360
+        "default": 360,
+        "condition": {
+          "enable_group_slang_meanings": true
+        }
       },
       "max_group_episodes": {
         "description": "最多保留群聊片段数量",
@@ -2778,7 +2801,7 @@
   "group_interjection": {
     "description": "群聊插话与复读",
     "type": "object",
-    "hint": "群聊主动插话与复读跟读设置",
+    "hint": "允不允许你的智能体主动发言和复读",
     "items": {
       "enable_group_interjection": {
         "description": "允许群聊主动插话",
@@ -2912,7 +2935,7 @@
   "group_high_intensity": {
     "description": "群聊高强度管理",
     "type": "object",
-    "hint": "群聊高强度收口与降载设置",
+    "hint": "群聊高强度收口与降载设置，免得她太活跃，疯狂吃你的token",
     "items": {
       "enable_group_high_intensity_mode": {
         "description": "群聊高强度收口模式",
@@ -3016,7 +3039,7 @@
   "forward_message_config": {
     "description": "合并消息",
     "type": "object",
-    "hint": "合并转发消息自然阅读设置",
+    "hint": "遇到转发的合并消息，你的智能体该怎么办",
     "items": {
       "enable_forward_message_adaptation": {
         "description": "启用合并消息自然阅读",
@@ -3125,7 +3148,7 @@
   "atrelay_config": {
     "description": "跨群转述",
     "type": "object",
-    "hint": "跨群转述与群友工具设置",
+    "hint": "让你的智能体帮你跨群转述消息",
     "items": {
       "enable_atrelay_tools": {
         "description": "启用跨群转述与 @ 群友工具",
@@ -3215,7 +3238,7 @@
   "worldbook_config": {
     "description": "关系网配置",
     "type": "object",
-    "hint": "群聊关系网识别与管理设置",
+    "hint": "这是群友互动关系网络的增强版设置",
     "items": {
       "enable_worldbook_member_recognition": {
         "description": "启用群聊关系网",
@@ -3287,25 +3310,22 @@
       "enabled": true
     }
   },
+ "enable_humanized_states": {
+   "description": "启用拟人化身体/梦境状态",
+    "type": "bool",
+    "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
+    "default": true
+  },
   "humanized_state_config": {
     "description": "拟人化状态",
     "type": "object",
-    "hint": "身体状态生理期与休息回复设置",
+    "hint": "让你的智能体拥有身体状态和生理期",
     "items": {
-      "enable_humanized_states": {
-        "description": "启用拟人化身体/梦境状态",
-        "type": "bool",
-        "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
-        "default": true
-      },
       "inject_passive_states": {
         "description": "被动回复前注入拟人状态",
         "type": "bool",
         "hint": "开启后，每次普通 LLM 回复前都会注入“当前扮演状态”，只影响语气、长短和节奏，不要求模型逐项汇报状态。",
-        "default": true,
-        "condition": {
-          "enable_humanized_states": true
-        }
+        "default": true
       },
       "passive_injection_position": {
         "description": "动态提示词注入位置",
@@ -3323,8 +3343,7 @@
         ],
         "default": "prompt",
         "condition": {
-          "inject_passive_states": true,
-          "enable_humanized_states": true
+          "inject_passive_states": true
         }
       },
       "framework_session_lock_mode": {
@@ -3341,19 +3360,13 @@
           "关闭（新版本推荐）",
           "始终启用（旧版排障）"
         ],
-        "default": "auto",
-        "condition": {
-          "enable_humanized_states": true
-        }
+        "default": "auto"
       },
       "enable_cycle_state": {
         "description": "启用生理期模拟",
         "type": "bool",
         "hint": "开启后，只有当人格适合人类身体设定时，拟人身体状态才可能加入“生理期前/处于生理期/生理期后”等状态。它只影响当前扮演状态的语气、精力和节奏，不是医学记录或真实日期追踪；事件带冷却，不会每天连续重抽。",
-        "default": true,
-        "condition": {
-          "enable_humanized_states": true
-        }
+        "default": true
       },
       "humanized_state_intensity": {
         "description": "拟人状态强度",
@@ -3364,19 +3377,13 @@
           "max": 100,
           "step": 5
         },
-        "default": 50,
-        "condition": {
-          "enable_humanized_states": true
-        }
+        "default": 50
       },
       "enable_rest_reply_simulation": {
         "description": "启用休息回复闸门",
         "type": "bool",
         "hint": "开启后，当当前日程处于睡眠、午休或休息段时，普通被动回复会先经过休息闸门；未放行时静默不回复，避免睡眠中每条消息都醒来。",
-        "default": false,
-        "condition": {
-          "enable_humanized_states": true
-        }
+        "default": false
       },
       "rest_reply_mode": {
         "description": "休息回复判定模式",
@@ -3392,8 +3399,7 @@
         ],
         "hint": "仅概率醒来：命中概率才回复；模型判断：由模型根据消息重要性、是否明确叫醒、情绪/安全需要等打分，达到阈值才回复。用户明确不要打扰会直接静默，紧急/明确叫醒会优先放行。",
         "condition": {
-          "enable_rest_reply_simulation": true,
-          "enable_humanized_states": true
+          "enable_rest_reply_simulation": true
         }
       },
       "rest_reply_probability": {
@@ -3407,8 +3413,7 @@
         },
         "default": 18,
         "condition": {
-          "enable_rest_reply_simulation": true,
-          "enable_humanized_states": true
+          "enable_rest_reply_simulation": true
         }
       },
       "rest_reply_llm_threshold": {
@@ -3422,19 +3427,20 @@
         },
         "default": 65,
         "condition": {
-          "enable_rest_reply_simulation": true,
-          "enable_humanized_states": true
+          "enable_rest_reply_simulation": true
         }
       }
     },
     "condition": {
-      "enabled": true
+      "enabled": true,
+      "enable_humanized_states": true
+      }
     }
   },
   "dream_config": {
     "description": "梦境配置",
     "type": "object",
-    "hint": "强化梦境生成与梦境余韵设置",
+    "hint": "梦境的增强版设置，可以让你的智能体拥有更丰富的梦境体验",
     "items": {
       "enable_enhanced_dreams": {
         "description": "启用强化梦境生成",
@@ -3499,7 +3505,7 @@
   "daily_plan_config": {
     "description": "日程配置",
     "type": "object",
-    "hint": "每日日程生成与角色设定",
+    "hint": "你的智能体的日程安排",
     "items": {
       "enable_daily_plan": {
         "description": "启用每日拟人化日程",
@@ -3616,7 +3622,7 @@
   "diary_config": {
     "description": "日记与重要日期",
     "type": "object",
-    "hint": "Bot日记与重要日期提醒设置",
+    "hint": "你的智能体或许会想写日记来记下和你的重要经历",
     "items": {
       "enable_daily_diary": {
         "description": "启用每日 Bot 日记",
@@ -3683,7 +3689,7 @@
   "photo_action_config": {
     "description": "主动生图",
     "type": "object",
-    "hint": "主动拍照生图后端与风格设置",
+    "hint": "让你的智能体可以生成图片",
     "items": {
       "enable_photo_text_action": {
         "description": "允许主动拍照/生图",
@@ -3876,7 +3882,7 @@
   "screen_action_config": {
     "description": "识屏操作",
     "type": "object",
-    "hint": "主动识屏与沉默窥屏设置",
+    "hint": "“我会一直视奸你~”",
     "items": {
       "enable_screen_glance_action": {
         "description": "允许主动看一眼屏幕",
@@ -3966,9 +3972,9 @@
     }
   },
   "voice_tts_config": {
-    "description": "语音与TTS",
+    "description": "TTS设置",
     "type": "object",
-    "hint": "主动语音TTS增强与频率控制设置",
+    "hint": "偶尔让你的智能体发几句语音",
     "items": {
       "enable_voice_action": {
         "description": "允许主动发语音",
@@ -4324,7 +4330,7 @@
   "poke_action_config": {
     "description": "戳一戳",
     "type": "object",
-    "hint": "主动戳一戳设置",
+    "hint": "让我戳戳你嘛~",
     "items": {
       "enable_poke_action": {
         "description": "允许主动戳一戳",
@@ -4354,7 +4360,7 @@
   "presence_sync_config": {
     "description": "QQ状态同步",
     "type": "object",
-    "hint": "QQ在线状态同步设置",
+    "hint": "智能体也想设置自己的qq状态",
     "items": {
       "enable_qq_presence_sync": {
         "description": "允许细化模型同步 QQ 全局状态",
@@ -4370,7 +4376,7 @@
   "weather_config": {
     "description": "天气上下文",
     "type": "object",
-    "hint": "天气查询与上下文注入设置",
+    "hint": "让智能体知道现在的天气",
     "items": {
       "enable_weather_context": {
         "description": "启用天气上下文",
@@ -4436,7 +4442,7 @@
   "segmented_reply_config": {
     "description": "消息分段",
     "type": "object",
-    "hint": "主动消息文本分段发送设置",
+    "hint": "可以让智能体的主动消息更像真实聊天，避免长文刷屏",
     "items": {
       "enable_segmented_proactive_reply": {
         "description": "主动文本分段发送",
