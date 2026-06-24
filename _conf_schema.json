@@ -3314,7 +3314,10 @@
    "description": "启用拟人化身体/梦境状态",
     "type": "bool",
     "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
-    "default": true
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
   },
   "humanized_state_config": {
     "description": "拟人化状态",
@@ -3435,7 +3438,6 @@
       "enabled": true,
       "enable_humanized_states": true
       }
-    }
   },
   "dream_config": {
     "description": "梦境配置",
