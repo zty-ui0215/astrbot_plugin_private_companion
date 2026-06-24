@@ -5658,10 +5658,6 @@ class DailyStateMixin:
             if not any(item["name"] == name for item in catalog):
                 catalog.append({"name": name, "category": category, "keywords": keywords})
 
-        for raw in re.split(r"[,，、\n]+", str(self.skill_growth_custom_skills or "")):
-            name = _single_line(raw, 24)
-            if name:
-                add(name, "自定义", [name])
         if any(token in text for token in ("学生", "上课", "学校", "高中", "初中", "大学", "作业", "考试")):
             subject_keywords = {
                 "语文": ["语文", "作文", "阅读理解", "文言文", "课文"],

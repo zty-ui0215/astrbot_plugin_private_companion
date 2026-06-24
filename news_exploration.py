@@ -966,7 +966,7 @@ class NewsExplorationMixin:
                 break
         if items:
             return items
-        legacy_mid = re.sub(r"\D+", "", str(getattr(self, "ai_daily_source_uid", "") or DEFAULT_AI_DAILY_JUYA_UID)) or DEFAULT_AI_DAILY_JUYA_UID
+        legacy_mid = re.sub(r"\D+", "", str(DEFAULT_AI_DAILY_JUYA_UID)) or DEFAULT_AI_DAILY_JUYA_UID
         return [
             {
                 "name": "AI日报",
@@ -2523,7 +2523,7 @@ class NewsExplorationMixin:
 
     def _is_now_in_ai_daily_window(self, now_dt: datetime | None = None) -> bool:
         now_dt = now_dt or datetime.now()
-        start, end = self._parse_window_minutes(str(getattr(self, "ai_daily_check_window", "") or "07:30-12:30"))
+        start, end = self._parse_window_minutes(str("07:30-12:30"))
         if start is None or end is None:
             start, end = 7 * 60 + 30, 12 * 60 + 30
         minute = now_dt.hour * 60 + now_dt.minute
@@ -2533,7 +2533,7 @@ class NewsExplorationMixin:
 
     def _ai_daily_window_has_passed(self, now_dt: datetime | None = None) -> bool:
         now_dt = now_dt or datetime.now()
-        start, end = self._parse_window_minutes(str(getattr(self, "ai_daily_check_window", "") or "07:30-12:30"))
+        start, end = self._parse_window_minutes(str("07:30-12:30"))
         if start is None or end is None:
             start, end = 7 * 60 + 30, 12 * 60 + 30
         minute = now_dt.hour * 60 + now_dt.minute

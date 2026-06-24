@@ -1,15 +1,15 @@
 {
-  "enabled": {
-    "description": "启用插件",
-    "type": "bool",
-    "hint": "总开关。关闭后后台主动消息循环不会启动，但配置仍保留。",
-    "default": false
-  },
   "basic_config": {
     "description": "基础配置",
     "type": "object",
     "hint": "插件的基础设置，在启用前请确认这些项",
     "items": {
+      "enabled": {
+        "description": "启用插件",
+        "type": "bool",
+        "hint": "总开关。关闭后后台主动消息循环不会启动，但配置仍保留。",
+        "default": false
+      },
       "enable_proactive_only_mode": {
         "description": "主动消息专用模式",
         "type": "bool",
@@ -97,6 +97,33 @@
         "type": "string",
         "hint": "格式：HH:MM-HH:MM，例如 23:00-08:30。跨天时间段会自动处理。",
         "default": "23:00-08:30"
+      },
+      "enable_qq_presence_sync": {
+        "description": "允许细化模型同步 QQ 全局状态",
+        "type": "bool",
+        "hint": "开启后，当前时间段细化可决定在线/睡觉/自定义短状态，并通过 OneBot 尝试同步。会减少忙碌，避免离开/隐身/请勿打扰；失败会静默跳过。",
+        "default": true
+      },
+      "daily_token_limit": {
+        "description": "每日插件 Token 限额",
+        "type": "int",
+        "hint": "仅限制本插件内部发起的 LLM 任务，达到后会跳过日程、梦境、记忆整理、群聊分析、创作等后台模型调用。填 0 表示不限制。",
+        "default": 1000000
+      },
+      "enable_daily_token_soft_limit": {
+        "description": "启用每日 Token 软限额",
+        "type": "bool",
+        "hint": "作为达到限额就停止插件/停止后台链路的替代方案。开启后，达到软限额时优先保留用户当下触发的回复，自动暂缓新闻、网页探索、创作、群聊整理、自检、主动生图等低优先级后台 LLM 任务。",
+        "default": true
+      },
+      "daily_token_soft_limit": {
+        "description": "每日 Token 软限额",
+        "type": "int",
+        "hint": "今日插件内部 LLM 消耗达到该值后启用软降载；填 0 表示不启用软限额，只使用每日硬限额。",
+        "default": 800000,
+        "condition": {
+          "enable_daily_token_soft_limit": true
+        }
       }
     },
     "condition": {
@@ -193,37 +220,6 @@
         "default": false,
         "condition": {
           "enable_environment_perception": true
-        }
-      }
-    },
-    "condition": {
-      "enabled": true
-    }
-  },
-  "token_limit_config": {
-    "description": "Token 限额",
-    "type": "object",
-    "hint": "在这里您可以设置插件的Token限额，避免过度消耗资源。每日限额会在每天零点重置。注意，这些限额仅适用于本插件内部发起的 LLM 任务，不会影响 AstrBot 的其他功能。",
-    "items": {
-      "daily_token_limit": {
-        "description": "每日插件 Token 限额",
-        "type": "int",
-        "hint": "仅限制本插件内部发起的 LLM 任务，达到后会跳过日程、梦境、记忆整理、群聊分析、创作等后台模型调用。填 0 表示不限制。",
-        "default": 1000000
-      },
-      "enable_daily_token_soft_limit": {
-        "description": "启用每日 Token 软限额",
-        "type": "bool",
-        "hint": "作为达到限额就停止插件/停止后台链路的替代方案。开启后，达到软限额时优先保留用户当下触发的回复，自动暂缓新闻、网页探索、创作、群聊整理、自检、主动生图等低优先级后台 LLM 任务。",
-        "default": true
-      },
-      "daily_token_soft_limit": {
-        "description": "每日 Token 软限额",
-        "type": "int",
-        "hint": "今日插件内部 LLM 消耗达到该值后启用软降载；填 0 表示不启用软限额，只使用每日硬限额。",
-        "default": 800000,
-        "condition": {
-          "enable_daily_token_soft_limit": true
         }
       }
     },
@@ -582,6 +578,61 @@
           "step": 5
         },
         "default": 45
+      },
+      "enable_poke_action": {
+        "description": "允许主动戳一戳",
+        "type": "bool",
+        "hint": "开启后，Bot 可能在想轻轻刷存在感、嘴硬关心或逗一下用户时主动戳一戳，然后再自然补一句私聊。默认关闭，避免太跳。",
+        "default": false
+      },
+      "poke_action_max_times": {
+        "description": "主动戳一戳最多次数",
+        "type": "int",
+        "hint": "每次主动 poke 最多戳几下。实际主动行为默认只会轻轻戳一下，这个值主要作为上限兜底。",
+        "slider": {
+          "min": 1,
+          "max": 3,
+          "step": 1
+        },
+        "default": 1,
+        "condition": {
+          "enable_poke_action": true
+        }
+      },
+      "enable_response_self_review": {
+        "description": "启用主动消息复核",
+        "type": "bool",
+        "hint": "主要用于主动消息发送前复核，避免把历史消息当成用户刚发来的话来回复。普通被动回复只保留本地防漏、防复读等轻量保护。",
+        "default": true
+      },
+      "response_review_mode": {
+        "description": "主动消息复核模式",
+        "type": "string",
+        "hint": "local_only 只做本地识别；severe_only 默认会让主动消息发送前进行模型价值复核，被动回复只复核严重问题；full 会让更多被动回复也参与模型改写，可能明显增加延迟。",
+        "default": "severe_only",
+        "options": [
+          "local_only",
+          "severe_only",
+          "full"
+        ],
+        "condition": {
+          "enable_response_self_review": true
+        }
+      },
+      "response_review_max_chars": {
+        "description": "被动 full 模式长度阈值",
+        "type": "int",
+        "hint": "仅在复核模式为 full 时，普通被动回复才会因偏长参与模型改写；默认模式不会因普通偏长而额外调用模型。",
+        "slider": {
+          "min": 80,
+          "max": 900,
+          "step": 20
+        },
+        "default": 260,
+        "condition": {
+          "enable_response_self_review": true,
+          "response_review_mode": "full"
+        }
       }
     },
     "condition": {
@@ -654,7 +705,7 @@
       "enabled": true
     }
   },
-  "greeting_creative": {
+  "greeting_config": {
     "description": "问候行为",
     "type": "object",
     "hint": "你希望你的智能体主动问候你吗？",
@@ -690,7 +741,7 @@
       "enabled": true
     }
   },
-  "greeting_creative": {
+  "creative_config": {
     "description": "创作行为",
     "type": "object",
     "hint": "或许你想让你的智能体偶尔写些东西",
@@ -792,15 +843,6 @@
           "step": 0.1
         },
         "default": 1.0,
-        "condition": {
-          "enable_skill_growth_simulation": true
-        }
-      },
-      "skill_growth_custom_skills": {
-        "description": "自定义技能列表（兼容旧配置）",
-        "type": "string",
-        "hint": "兼容旧配置。新的自定义技能请在扩展页观察页的“技能成长”卡片中新增、隐藏、冻结或合并别名。",
-        "default": "",
         "condition": {
           "enable_skill_growth_simulation": true
         }
@@ -1085,24 +1127,6 @@
           "max": 30,
           "step": 1
         },
-        "default": 8,
-        "condition": {
-          "enable_message_debounce": true
-        }
-      },
-      "enable_semantic_message_debounce": {
-        "description": "旧版语义收口开关",
-        "type": "bool",
-        "hint": "兼容旧配置。运行时会并入“消息收口防抖”，不再作为独立功能配置。",
-        "default": true,
-        "condition": {
-          "enable_message_debounce": true
-        }
-      },
-      "semantic_message_debounce_seconds": {
-        "description": "旧版语义收口等待秒数",
-        "type": "float",
-        "hint": "兼容旧配置。运行时会作为“文本补话等待秒数”的默认值。",
         "default": 8,
         "condition": {
           "enable_message_debounce": true
@@ -1654,51 +1678,6 @@
       "enabled": true
     }
   },
-  "response_review_config": {
-    "description": "消息复核",
-    "type": "object",
-    "hint": "“说话前要先过一遍脑子”",
-    "items": {
-      "enable_response_self_review": {
-        "description": "启用主动消息复核",
-        "type": "bool",
-        "hint": "主要用于主动消息发送前复核，避免把历史消息当成用户刚发来的话来回复。普通被动回复只保留本地防漏、防复读等轻量保护。",
-        "default": true
-      },
-      "response_review_mode": {
-        "description": "主动消息复核模式",
-        "type": "string",
-        "hint": "local_only 只做本地识别；severe_only 默认会让主动消息发送前进行模型价值复核，被动回复只复核严重问题；full 会让更多被动回复也参与模型改写，可能明显增加延迟。",
-        "default": "severe_only",
-        "options": [
-          "local_only",
-          "severe_only",
-          "full"
-        ],
-        "condition": {
-          "enable_response_self_review": true
-        }
-      },
-      "response_review_max_chars": {
-        "description": "被动 full 模式长度阈值",
-        "type": "int",
-        "hint": "仅在复核模式为 full 时，普通被动回复才会因偏长参与模型改写；默认模式不会因普通偏长而额外调用模型。",
-        "slider": {
-          "min": 80,
-          "max": 900,
-          "step": 20
-        },
-        "default": 260,
-        "condition": {
-          "enable_response_self_review": true,
-          "response_review_mode": "full"
-        }
-      }
-    },
-    "condition": {
-      "enabled": true
-    }
-  },
   "news_web_config": {
     "description": "新闻与网页探索",
     "type": "object",
@@ -1743,41 +1722,6 @@
         "type": "string",
         "hint": "每行一个来源，格式：名称|UP主名|UID|关键词|HH:MM。默认：AI日报|橘鸦Juya|285286947|日报 早报|23:00，以及 AI早报|黑鸦Heya|3706929260006322|早报 日报|12:00。插件会通过 B 站搜索 API/网页搜索找到当天视频，再读取文字版、字幕或视频公开信息。",
         "default": "AI日报|橘鸦Juya|285286947|日报 早报|23:00\nAI早报|黑鸦Heya|3706929260006322|早报 日报|12:00",
-        "condition": {
-          "enable_ai_daily_watch": true,
-          "enable_news_integration": true
-        }
-      },
-      "ai_daily_source_uid": {
-        "description": "兼容旧版 AI 早报 UID",
-        "type": "string",
-        "hint": "旧版单 UP 配置兼容项。新版本请优先使用“AI 日报/早报定时来源”。",
-        "default": "285286947",
-        "condition": {
-          "enable_ai_daily_watch": true,
-          "enable_news_integration": true
-        }
-      },
-      "ai_daily_check_window": {
-        "description": "旧版 AI 早报检查窗口",
-        "type": "string",
-        "hint": "旧版窗口轮询兼容项。新版本定时来源按每行 HH:MM 执行，不再依赖该窗口。",
-        "default": "07:30-12:30",
-        "condition": {
-          "enable_ai_daily_watch": true,
-          "enable_news_integration": true
-        }
-      },
-      "ai_daily_check_interval_minutes": {
-        "description": "旧版 AI 早报检查间隔分钟",
-        "type": "int",
-        "hint": "旧版窗口轮询兼容项。新版本到点后当天只尝试一次，避免频繁访问 B 站。",
-        "slider": {
-          "min": 10,
-          "max": 240,
-          "step": 5
-        },
-        "default": 40,
         "condition": {
           "enable_ai_daily_watch": true,
           "enable_news_integration": true
@@ -1992,7 +1936,7 @@
   "bilibili_config": {
     "description": "B站协同",
     "type": "object",
-        "default": true,
+    "default": true,
     "hint": "让你的智能体也能刷B站，不过需要配合 astrbot_plugin_bilibili_bot 插件使用",
     "items": {
       "enable_bilibili_integration": {
@@ -2296,20 +2240,20 @@
       "enabled": true
     }
   },
-  "enable_group_companion": {
-    "description": "启用群聊陪伴观察",
-    "type": "bool",
-    "hint": "群聊观察的总开关。开启后，插件会在目标群里静默观察群聊气氛、群友发言和常见梗；默认不主动插话，只在 AstrBot 本身触发群聊回复时注入上下文。",
-    "default": true,
-    "condition": {
-     "enabled": true
-    }
-  },
   "group_basic": {
     "description": "群聊陪伴增强",
     "type": "object",
     "hint": "群聊陪伴观察的基础设置（实则也不基础）",
     "items": {
+      "enable_group_companion": {
+        "description": "启用群聊陪伴观察",
+        "type": "bool",
+        "hint": "群聊观察的总开关。开启后，插件会在目标群里静默观察群聊气氛、群友发言和常见梗；默认不主动插话，只在 AstrBot 本身触发群聊回复时注入上下文。",
+        "default": true,
+        "condition": {
+          "enabled": true
+        }
+      },
       "group_access_mode": {
         "description": "群聊启用模式",
         "type": "string",
@@ -3221,16 +3165,16 @@
           "enable_atrelay_tools": true
         }
       },
-        "enable_atrelay_llm_rewrite": {
-    "description": "使用模型转述正文",
-    "type": "bool",
-    "hint": "开启后，普通转述会先让模型把用户原句改成 Bot 自然会说的话，再发送给目标；关闭后直接发送解析出的正文，延迟更低。用户明确要求原话时始终不改写。",
-    "default": true,
-    "condition": {
-      "enable_atrelay_tools": true
-    }
-  }
-      },
+      "enable_atrelay_llm_rewrite": {
+        "description": "使用模型转述正文",
+        "type": "bool",
+        "hint": "开启后，普通转述会先让模型把用户原句改成 Bot 自然会说的话，再发送给目标；关闭后直接发送解析出的正文，延迟更低。用户明确要求原话时始终不改写。",
+        "default": true,
+        "condition": {
+          "enable_atrelay_tools": true
+        }
+      }
+    },
     "condition": {
       "enabled": true
     }
@@ -3307,23 +3251,14 @@
       },
       "enable_cross_user_memory_bridge": {
         "description": "启用跨用户记忆互通",
-       "type": "bool",
-       "hint": "开启后，主人可在私聊中询问 Bot 与某个私聊对象或群聊的近期互动。该功能只读摘要，不会发送消息，默认仅主人用户可用。",
-       "default": false,
+        "type": "bool",
+        "hint": "开启后，主人可在私聊中询问 Bot 与某个私聊对象或群聊的近期互动。该功能只读摘要，不会发送消息，默认仅主人用户可用。",
+        "default": false,
         "condition": {
-           "enable_worldbook_member_recognition": true
+          "enable_worldbook_member_recognition": true
         }
       }
     },
-    "condition": {
-      "enabled": true
-    }
-  },
- "enable_humanized_states": {
-   "description": "启用拟人化身体/梦境状态",
-    "type": "bool",
-    "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
-    "default": true,
     "condition": {
       "enabled": true
     }
@@ -3333,6 +3268,15 @@
     "type": "object",
     "hint": "让你的智能体拥有身体状态和生理期",
     "items": {
+      "enable_humanized_states": {
+        "description": "启用拟人化身体/梦境状态",
+        "type": "bool",
+        "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
+        "default": true,
+        "condition": {
+          "enabled": true
+        }
+      },
       "inject_passive_states": {
         "description": "被动回复前注入拟人状态",
         "type": "bool",
@@ -3357,22 +3301,6 @@
         "condition": {
           "inject_passive_states": true
         }
-      },
-      "framework_session_lock_mode": {
-        "description": "主链会话锁兼容模式",
-        "type": "string",
-        "hint": "用于兼容旧版 AstrBot 会话库并发锁问题。新版本通常不需要，开启会让同一会话主链请求排队，可能增加回复延迟。auto 只在识别到受影响的旧版本时启用；always 仅建议仍遇到 database is locked 的旧版用户使用。",
-        "options": [
-          "auto",
-          "off",
-          "always"
-        ],
-        "labels": [
-          "自动（仅旧版兼容）",
-          "关闭（新版本推荐）",
-          "始终启用（旧版排障）"
-        ],
-        "default": "auto"
       },
       "enable_cycle_state": {
         "description": "启用生理期模拟",
@@ -3446,7 +3374,7 @@
     "condition": {
       "enabled": true,
       "enable_humanized_states": true
-      }
+    }
   },
   "dream_config": {
     "description": "梦境配置",
@@ -3720,7 +3648,7 @@
         "default": 18,
         "condition": {
           "enable_photo_text_action": true
-       }
+        }
       },
       "photo_action_max_daily": {
         "description": "每日主动生图最多次数",
@@ -4268,130 +4196,6 @@
           "auto_voice_enabled": true,
           "tts_generation_mode": "fast_tag"
         }
-      },
-      "auto_voice_probability": {
-        "description": "自动语音触发概率(旧)",
-        "type": "int",
-        "default": 20,
-        "min": 0,
-        "max": 100,
-        "hint": "仅旧版行为下生效。控制快速标签自动语音的旧触发概率；全局频控下请使用“TTS全局触发概率(%)”。",
-        "condition": {
-          "enable_tts_enhancement": true,
-          "tts_frequency_control_mode": "legacy"
-        }
-      },
-      "auto_voice_max_chars": {
-        "description": "自动语音最大字数",
-        "type": "int",
-        "default": 50,
-        "min": 0,
-        "hint": "仅快速标签模式的自动语音生效。普通回复不超过该字数才参与自动语音；填 0 表示不限制。旧版主用户单独概率命中时不受此限制。",
-        "condition": {
-          "enable_tts_enhancement": true,
-          "auto_voice_enabled": true,
-          "tts_generation_mode": "fast_tag"
-        }
-      },
-      "auto_voice_cooldown_seconds": {
-        "description": "自动语音冷却秒数",
-        "type": "int",
-        "default": 120,
-        "min": 0,
-        "hint": "仅旧版行为下生效。同一会话成功触发快速标签自动语音后，需要等待多少秒才能再次触发；全局频控下请使用“TTS会话最小间隔秒数”。",
-        "condition": {
-          "enable_tts_enhancement": true,
-          "tts_frequency_control_mode": "legacy"
-        }
-      },
-      "main_user_voice_probability": {
-        "description": "主用户触发概率(%)",
-        "type": "int",
-        "default": -1,
-        "min": -1,
-        "max": 100,
-        "hint": "仅旧版行为下作为强触发概率使用。群聊中主用户本人发言或被 @ 到时，提高快速标签自动语音倾向；填 -1 表示继承旧自动语音概率。",
-        "condition": {
-          "enable_tts_enhancement": true,
-          "tts_frequency_control_mode": "legacy"
-        }
-      },
-      "main_user_mention_voice_keywords": {
-        "description": "@主用户语音关键词",
-        "type": "text",
-        "default": "",
-        "hint": "仅旧版行为下作为强触发条件使用。群聊 @ 到主用户且命中这些关键词时，参与主用户关键词语音判定。多个关键词可用逗号、空格或换行分隔。",
-        "condition": {
-          "enable_tts_enhancement": true,
-          "tts_frequency_control_mode": "legacy"
-        }
-      },
-      "main_user_mention_voice_probability": {
-        "description": "@主用户关键词触发概率(%)",
-        "type": "int",
-        "default": 0,
-        "min": 0,
-        "max": 100,
-        "hint": "仅旧版行为下生效。命中 @主用户语音关键词后的触发概率。0 表示不启用关键词强触发。",
-        "condition": {
-          "enable_tts_enhancement": true,
-          "tts_frequency_control_mode": "legacy"
-        }
-      },
-      "main_user_mention_voice_prompt": {
-        "description": "@主用户关键词提示词",
-        "type": "text",
-        "default": "",
-        "hint": "关键词规则命中后注入给模型的补充要求，例如更短、更贴近、使用某种声线。",
-        "condition": {
-          "enable_tts_enhancement": true
-        }
-      }
-    },
-    "condition": {
-      "enabled": true
-    }
-  },
-  "poke_action_config": {
-    "description": "戳一戳",
-    "type": "object",
-    "hint": "让我戳戳你嘛~",
-    "items": {
-      "enable_poke_action": {
-        "description": "允许主动戳一戳",
-        "type": "bool",
-        "hint": "开启后，Bot 可能在想轻轻刷存在感、嘴硬关心或逗一下用户时主动戳一戳，然后再自然补一句私聊。默认关闭，避免太跳。",
-        "default": false
-      },
-      "poke_action_max_times": {
-        "description": "主动戳一戳最多次数",
-        "type": "int",
-        "hint": "每次主动 poke 最多戳几下。实际主动行为默认只会轻轻戳一下，这个值主要作为上限兜底。",
-        "slider": {
-          "min": 1,
-          "max": 3,
-          "step": 1
-        },
-        "default": 1,
-        "condition": {
-          "enable_poke_action": true
-        }
-      }
-    },
-    "condition": {
-      "enabled": true
-    }
-  },
-  "presence_sync_config": {
-    "description": "QQ状态同步",
-    "type": "object",
-    "hint": "智能体也想设置自己的qq状态",
-    "items": {
-      "enable_qq_presence_sync": {
-        "description": "允许细化模型同步 QQ 全局状态",
-        "type": "bool",
-        "hint": "开启后，当前时间段细化可决定在线/睡觉/自定义短状态，并通过 OneBot 尝试同步。会减少忙碌，避免离开/隐身/请勿打扰；失败会静默跳过。",
-        "default": true
       }
     },
     "condition": {

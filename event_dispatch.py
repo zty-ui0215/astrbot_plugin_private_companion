@@ -1777,9 +1777,9 @@ class EventDispatchMixin:
         return max(0, _safe_int(getattr(self, "message_debounce_max_merge_messages", 8), 8, 0))
 
     def _semantic_buffer_active_snapshot(self, key: str, *, wait_seconds: float | None = None, force: bool = False) -> dict[str, Any]:
-        default_wait = self._message_debounce_seconds("text") if hasattr(self, "_message_debounce_seconds") else getattr(self, "semantic_message_debounce_seconds", 0.0)
+        default_wait = self._message_debounce_seconds("text") if hasattr(self, "_message_debounce_seconds") else 0.0
         wait = max(0.0, float(wait_seconds if wait_seconds is not None else default_wait or 0.0))
-        if (not force and not bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True)))) or wait <= 0:
+        if (not force and not bool(getattr(self, "enable_message_debounce", True))) or wait <= 0:
             return {}
         buffers = getattr(self, "_semantic_message_buffers", None)
         if not isinstance(buffers, dict):
@@ -1824,9 +1824,9 @@ class EventDispatchMixin:
         smart_debounce: dict[str, Any] | None = None,
         kind: str = "text",
     ) -> bool:
-        if not force and not bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True))):
+        if not force and not bool(getattr(self, "enable_message_debounce", True)):
             return False
-        default_wait = self._message_debounce_seconds("text") if hasattr(self, "_message_debounce_seconds") else getattr(self, "semantic_message_debounce_seconds", 0.0)
+        default_wait = self._message_debounce_seconds("text") if hasattr(self, "_message_debounce_seconds") else 0.0
         wait = max(0.0, float(wait_seconds if wait_seconds is not None else default_wait or 0.0))
         if wait <= 0:
             return False

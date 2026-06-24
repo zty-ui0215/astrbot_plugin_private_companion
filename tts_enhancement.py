@@ -103,7 +103,7 @@ class TtsEnhancementMixin:
         self.tts_trigger_probability = self._cfg_int(
             config,
             "tts_trigger_probability",
-            self._cfg_int(config, "auto_voice_probability", self._cfg_int(config, "auto_japanese_voice_probability", 20, 0, 100), 0, 100),
+            self._cfg_int(config, "auto_japanese_voice_probability", 20, 0, 100),
             0,
             100,
         ) / 100.0
@@ -115,48 +115,13 @@ class TtsEnhancementMixin:
             "auto_voice_full_conversion_enabled",
             self._cfg_bool(config, "auto_japanese_voice_full_conversion_enabled", False),
         )
-        self.auto_voice_probability = self._cfg_int(
-            config,
-            "auto_voice_probability",
-            int(round(self.tts_trigger_probability * 100)),
-            0,
-            100,
-        ) / 100.0
-        self.auto_voice_max_chars = self._cfg_int(
-            config,
-            "auto_voice_max_chars",
-            self._cfg_int(config, "auto_japanese_voice_max_chars", 50, 0),
-            0,
-        )
-        self.auto_voice_cooldown_seconds = self._cfg_int(
-            config,
-            "auto_voice_cooldown_seconds",
-            self._cfg_int(config, "auto_japanese_voice_cooldown_seconds", 120, 0),
-            0,
-        )
-        self.main_user_voice_probability = self._cfg_int(
-            config,
-            "main_user_voice_probability",
-            self._cfg_int(config, "auto_japanese_voice_admin_probability", -1, -1, 100),
-            -1,
-            100,
-        ) / 100.0
-        self.main_user_mention_voice_keywords = self._parse_text_list_config(
-            config.get("main_user_mention_voice_keywords", config.get("admin_mention_keyword_voice_keywords", "")),
-            limit=80,
-        )
-        self.main_user_mention_voice_probability = self._cfg_int(
-            config,
-            "main_user_mention_voice_probability",
-            self._cfg_int(config, "admin_mention_keyword_voice_probability", 0, 0, 100),
-            0,
-            100,
-        ) / 100.0
-        self.main_user_mention_voice_prompt = self._cfg_str(
-            config,
-            "main_user_mention_voice_prompt",
-            self._cfg_str(config, "admin_mention_keyword_voice_prompt", ""),
-        )
+        self.auto_voice_probability = 0
+        self.auto_voice_max_chars = 0
+        self.auto_voice_cooldown_seconds = 0
+        self.main_user_voice_probability = -1
+        self.main_user_mention_voice_keywords = []
+        self.main_user_mention_voice_probability = 0
+        self.main_user_mention_voice_prompt = ""
         self.enable_tts_local_playback = self._cfg_bool(config, "enable_tts_local_playback", False)
         self.enable_tts_local_playback_live_only = self._cfg_bool(config, "enable_tts_local_playback_live_only", False)
         self.enable_tts_live_subtitle_sync = self._cfg_bool(config, "enable_tts_live_subtitle_sync", False)

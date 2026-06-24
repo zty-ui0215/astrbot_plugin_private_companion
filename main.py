@@ -604,27 +604,18 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             self.recall_forbidden_scope = "bot_and_group"
         self._recalled_message_ids: dict[str, dict[str, Any]] = {}
         self._recall_message_cache: dict[str, dict[str, Any]] = {}
-        self.enable_message_debounce = self._cfg_bool(
-            c,
-            "enable_message_debounce",
-            self._cfg_bool(c, "enable_semantic_message_debounce", True),
-        )
-        self.enable_semantic_message_debounce = self.enable_message_debounce
+        self.enable_message_debounce = self._cfg_bool(c, "enable_message_debounce", True)
         self.enable_smart_message_debounce = self._cfg_bool(c, "enable_smart_message_debounce", False)
         self.smart_message_debounce_provider_id = self._cfg_str(c, "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "")
         self.smart_message_debounce_wait_seconds = self._cfg_float(c, "smart_message_debounce_wait_seconds", 3.0, 0.0)
         self.smart_message_debounce_model_timeout_seconds = self._cfg_float(c, "smart_message_debounce_model_timeout_seconds", 0.8, 0.2)
         self.smart_message_debounce_learning_window_seconds = self._cfg_float(c, "smart_message_debounce_learning_window_seconds", 8.0, 1.0)
         self.smart_message_debounce_examples_limit = self._cfg_int(c, "smart_message_debounce_examples_limit", 8, 0, 30)
-        legacy_semantic_debounce_seconds = self._cfg_float(c, "semantic_message_debounce_seconds", 8.0, 0.0)
-        text_debounce_raw = c.get("text_message_debounce_seconds", None)
-        text_debounce_default = legacy_semantic_debounce_seconds if text_debounce_raw in (None, "") else 0.0
-        self.text_message_debounce_seconds = self._cfg_float(c, "text_message_debounce_seconds", text_debounce_default, 0.0)
+        self.text_message_debounce_seconds = self._cfg_float(c, "text_message_debounce_seconds", 8.0, 0.0)
         self.image_message_debounce_seconds = self._cfg_float(c, "image_message_debounce_seconds", 8.0, 0.0)
         self.forward_message_debounce_seconds = self._cfg_float(c, "forward_message_debounce_seconds", 0.0, 0.0)
         self.text_message_debounce_max_wait_seconds = self._cfg_float(c, "text_message_debounce_max_wait_seconds", 12.0, 0.0)
         self.message_debounce_max_merge_messages = self._cfg_int(c, "message_debounce_max_merge_messages", 8, 0, 30)
-        self.semantic_message_debounce_seconds = self.text_message_debounce_seconds
         self.private_image_vision_wait_seconds = self._cfg_float(c, "private_image_vision_wait_seconds", 30.0, 0.0)
         self.enable_private_image_self_recognition = self._cfg_bool(c, "enable_private_image_self_recognition", True)
         self.enable_private_image_vision_cache = self._cfg_bool(c, "enable_private_image_vision_cache", True)
@@ -723,9 +714,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.enable_passive_state_delta_injection = self._cfg_bool(c, "enable_passive_state_delta_injection", True)
         self.passive_injection_position = self._normalize_passive_injection_position(
             self._cfg_str(c, "passive_injection_position", "prompt")
-        )
-        self.framework_session_lock_mode = self._normalize_framework_session_lock_mode(
-            self._cfg_str(c, "framework_session_lock_mode", "auto", "auto")
         )
         self.proactive_share_probability = self._cfg_int(c, "proactive_share_probability", 45, 0, 100) / 100
         self.enable_daily_greetings = self._cfg_bool(c, "enable_daily_greetings", True)
@@ -895,7 +883,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.user_habit_max_items = self._cfg_int(c, "user_habit_max_items", 24, 8, 80)
         self.enable_skill_growth_simulation = self._cfg_bool(c, "enable_skill_growth_simulation", True)
         self.skill_growth_rate = self._cfg_float(c, "skill_growth_rate", 1.0, 0.1)
-        self.skill_growth_custom_skills = self._cfg_str(c, "skill_growth_custom_skills", "")
         self.enable_skill_growth_passive_injection = self._cfg_bool(c, "enable_skill_growth_passive_injection", False)
         self.enable_skill_growth_schedule_influence = self._cfg_bool(c, "enable_skill_growth_schedule_influence", True)
         self.skill_growth_schedule_influence_strength = max(0.0, min(1.0, self._cfg_float(c, "skill_growth_schedule_influence_strength", 0.35, 0.0)))
@@ -1039,9 +1026,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.news_hot_max_items = self._cfg_int(c, "news_hot_max_items", self._cfg_int(c, "hot_trend_max_items", 12, 3, 30), 3, 30)
         self.enable_ai_daily_watch = self._cfg_bool(c, "enable_ai_daily_watch", True)
         self.ai_daily_sources = self._cfg_str(c, "ai_daily_sources", DEFAULT_AI_DAILY_SOURCES)
-        self.ai_daily_source_uid = re.sub(r"\D+", "", self._cfg_str(c, "ai_daily_source_uid", "285286947")) or "285286947"
-        self.ai_daily_check_window = self._cfg_str(c, "ai_daily_check_window", "07:30-12:30")
-        self.ai_daily_check_interval_minutes = self._cfg_int(c, "ai_daily_check_interval_minutes", 40, 10, 240)
         self.ai_daily_prefer_text_version = self._cfg_bool(c, "ai_daily_prefer_text_version", True)
         self.news_sources = self._cfg_str(
             c,
@@ -2545,85 +2529,6 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             "强约束": "system_prompt",
         }
         return aliases.get(text, text if text in {"auto", "prompt", "system_prompt"} else "prompt")
-
-    @staticmethod
-    def _normalize_framework_session_lock_mode(value: Any) -> str:
-        text = str(value or "").strip().lower()
-        aliases = {
-            "auto": "auto",
-            "自动": "auto",
-            "compat": "auto",
-            "compatibility": "auto",
-            "兼容": "auto",
-            "legacy": "auto",
-            "旧版": "auto",
-            "always": "always",
-            "on": "always",
-            "true": "always",
-            "enable": "always",
-            "enabled": "always",
-            "开启": "always",
-            "始终": "always",
-            "off": "off",
-            "false": "off",
-            "disable": "off",
-            "disabled": "off",
-            "关闭": "off",
-        }
-        return aliases.get(text, text if text in {"auto", "always", "off"} else "auto")
-
-    def _detect_astrbot_version(self) -> str:
-        candidates: list[Any] = []
-        for obj in (
-            getattr(self, "context", None),
-            getattr(getattr(self, "context", None), "core_lifecycle", None),
-            getattr(getattr(self, "context", None), "metadata", None),
-        ):
-            if obj is None:
-                continue
-            for attr in ("version", "astrbot_version", "__version__", "VERSION"):
-                try:
-                    candidates.append(getattr(obj, attr, ""))
-                except Exception:
-                    pass
-        for module_name in ("astrbot", "astrbot.core", "astrbot.api"):
-            try:
-                module = importlib.import_module(module_name)
-            except Exception:
-                continue
-            for attr in ("__version__", "VERSION", "version"):
-                try:
-                    candidates.append(getattr(module, attr, ""))
-                except Exception:
-                    pass
-        for candidate in candidates:
-            text = _single_line(candidate, 40)
-            if re.search(r"\d+\.\d+(?:\.\d+)?", text):
-                return text
-        return ""
-
-    @staticmethod
-    def _parse_version_tuple(value: Any) -> tuple[int, int, int] | None:
-        match = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", str(value or ""))
-        if not match:
-            return None
-        return (
-            int(match.group(1)),
-            int(match.group(2)),
-            int(match.group(3) or 0),
-        )
-
-    def _framework_session_lock_enabled(self) -> bool:
-        mode = self._normalize_framework_session_lock_mode(getattr(self, "framework_session_lock_mode", "auto"))
-        if mode == "always":
-            return True
-        if mode == "off":
-            return False
-        version = self._parse_version_tuple(self._detect_astrbot_version())
-        if version is None:
-            return False
-        # AstrBot 4.25.x 曾出现主链/会话库并发锁问题；新版本默认不再额外串行化。
-        return (4, 25, 0) <= version <= (4, 25, 2)
 
     def _append_turn_prompt_fragment_by_position(
         self,
@@ -5471,7 +5376,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                     now=received_ts,
                 )
             private_image_enhancement_enabled = (
-                bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True)))
+                bool(getattr(self, "enable_message_debounce", True))
                 and self._message_debounce_seconds("image") > 0
             )
             private_image_only = (

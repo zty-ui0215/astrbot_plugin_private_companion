@@ -1746,7 +1746,7 @@ class PrivateImageMixin:
         return ""
 
     def _message_debounce_seconds(self, kind: str = "text") -> float:
-        if not bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True))):
+        if not bool(getattr(self, "enable_message_debounce", True)):
             return 0.0
         text_wait = _safe_float(getattr(self, "text_message_debounce_seconds", 0.0), 0.0, 0.0)
         if kind == "image":
@@ -1766,7 +1766,7 @@ class PrivateImageMixin:
             return ""
         force_consume = False
         if private_chat:
-            if not bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True))):
+            if not bool(getattr(self, "enable_message_debounce", True)):
                 return ""
             scope = f"private:{sender_id}"
             key = self._semantic_buffer_key(scope, sender_id)

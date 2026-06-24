@@ -38,14 +38,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         "group_wakeup_topic_interest_max_boost",
         "group_wakeup_debounce_pending_penalty",
         "tts_trigger_probability",
-        "auto_voice_probability",
-        "main_user_mention_voice_probability",
         "rest_reply_probability",
     }
     INHERIT_PERCENT_PROBABILITY_KEYS = {
         "tts_private_trigger_probability",
         "tts_group_trigger_probability",
-        "main_user_voice_probability",
     }
 
     def __init__(self, plugin: Any) -> None:
@@ -4499,7 +4496,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_recall_message_cache",
             "enable_recall_transcribe_command",
             "enable_forbidden_word_recall",
-            "enable_semantic_message_debounce",
             "enable_environment_perception",
             "enable_holiday_perception",
             "enable_platform_perception",
@@ -5429,7 +5425,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "worldview_adaptation_prompt",
             "quiet_hours",
             "passive_injection_position",
-            "framework_session_lock_mode",
             "response_review_mode",
             "response_review_max_chars",
             "passive_topic_memory_hours",
@@ -5453,13 +5448,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "tts_local_playback_min_interval_seconds",
             "auto_voice_enabled",
             "auto_voice_full_conversion_enabled",
-            "auto_voice_probability",
-            "auto_voice_max_chars",
-            "auto_voice_cooldown_seconds",
-            "main_user_voice_probability",
-            "main_user_mention_voice_keywords",
-            "main_user_mention_voice_probability",
-            "main_user_mention_voice_prompt",
             "daily_token_limit",
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
@@ -5501,8 +5489,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "forward_message_debounce_seconds",
             "text_message_debounce_max_wait_seconds",
             "message_debounce_max_merge_messages",
-            "enable_semantic_message_debounce",
-            "semantic_message_debounce_seconds",
             "enable_proactive_quote_trigger_message",
             "enable_quote_group_reply",
             "enable_quote_group_interjection",
@@ -5625,7 +5611,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "emotion_judgement_mode",
             "enable_skill_growth_simulation",
             "skill_growth_rate",
-            "skill_growth_custom_skills",
             "enable_skill_growth_passive_injection",
             "enable_skill_growth_schedule_influence",
             "skill_growth_schedule_influence_strength",
@@ -5745,9 +5730,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "tts_trigger_probability": _percent_attr("tts_trigger_probability", 0.2),
                 "tts_private_trigger_probability": _percent_attr("tts_private_trigger_probability", -0.01, inherit=True),
                 "tts_group_trigger_probability": _percent_attr("tts_group_trigger_probability", -0.01, inherit=True),
-                "auto_voice_probability": _percent_attr("auto_voice_probability", 0.2),
-                "main_user_voice_probability": _percent_attr("main_user_voice_probability", -0.01, inherit=True),
-                "main_user_mention_voice_probability": _percent_attr("main_user_mention_voice_probability", 0.0),
                 "rest_reply_probability": _percent_attr("rest_reply_probability", 0.18),
             }
         )
@@ -6256,13 +6238,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "tts_local_playback_min_interval_seconds",
             "auto_voice_enabled",
             "auto_voice_full_conversion_enabled",
-            "auto_voice_probability",
-            "auto_voice_max_chars",
-            "auto_voice_cooldown_seconds",
-            "main_user_voice_probability",
-            "main_user_mention_voice_keywords",
-            "main_user_mention_voice_probability",
-            "main_user_mention_voice_prompt",
         }
         if key == "enable_tts_enhancement" or key in tts_runtime_keys:
             loader = getattr(self.plugin, "_load_tts_enhancement_config", None)
@@ -6401,7 +6376,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_recall_message_cache",
             "enable_recall_transcribe_command",
             "enable_forbidden_word_recall",
-            "enable_semantic_message_debounce",
             "enable_environment_perception",
             "enable_holiday_perception",
             "enable_platform_perception",
@@ -6529,7 +6503,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "worldview_adaptation_mode",
             "worldview_adaptation_prompt",
             "quiet_hours",
-            "framework_session_lock_mode",
             "passive_topic_memory_hours",
             "tts_generation_mode",
             "tts_voice_language",
@@ -6551,13 +6524,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "tts_local_playback_min_interval_seconds",
             "auto_voice_enabled",
             "auto_voice_full_conversion_enabled",
-            "auto_voice_probability",
-            "auto_voice_max_chars",
-            "auto_voice_cooldown_seconds",
-            "main_user_voice_probability",
-            "main_user_mention_voice_keywords",
-            "main_user_mention_voice_probability",
-            "main_user_mention_voice_prompt",
             "daily_token_limit",
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
@@ -6590,8 +6556,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "forward_message_debounce_seconds",
             "text_message_debounce_max_wait_seconds",
             "message_debounce_max_merge_messages",
-            "enable_semantic_message_debounce",
-            "semantic_message_debounce_seconds",
             "enable_proactive_quote_trigger_message",
             "enable_quote_group_reply",
             "enable_quote_group_interjection",
@@ -6712,7 +6676,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "emotion_judgement_mode",
             "enable_skill_growth_simulation",
             "skill_growth_rate",
-            "skill_growth_custom_skills",
             "enable_skill_growth_passive_injection",
             "enable_skill_growth_schedule_influence",
             "skill_growth_schedule_influence_strength",
@@ -6805,12 +6768,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return normalizer(value)
             text = str(value or "prompt").strip().lower()
             return text if text in {"auto", "prompt", "system_prompt"} else "prompt"
-        if key == "framework_session_lock_mode":
-            normalizer = getattr(self.plugin, "_normalize_framework_session_lock_mode", None)
-            if callable(normalizer):
-                return normalizer(value)
-            text = str(value or "auto").strip().lower()
-            return text if text in {"auto", "always", "off"} else "auto"
         if key == "quote_target_strategy":
             text = str(value or "current").strip().lower()
             aliases = {
@@ -6919,7 +6876,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         if key == "tts_voice_language":
             lang = str(value or "ja").strip().lower()
             return lang if lang in {"ja", "zh", "en"} else "ja"
-        if key in {"tts_extra_prompt", "main_user_mention_voice_prompt"}:
+        if key == "tts_extra_prompt":
             return str(value or "").strip()[:1200]
         if key == "tts_conversion_provider_id":
             return str(value or "").strip()[:160]
@@ -6933,8 +6890,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(-1.0, min(3600.0, float(value)))
             except (TypeError, ValueError):
                 return -1.0
-        if key == "main_user_mention_voice_keywords":
-            return str(value or "").strip()[:1200]
         if key == "forward_message_mode":
             mode = str(value or "inject").strip().lower()
             if mode in {"注入", "injection"}:
@@ -7141,7 +7096,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "news_min_interval_hours",
             "news_max_items_per_source",
             "news_hot_max_items",
-            "ai_daily_check_interval_minutes",
             "external_event_self_link_cooldown_hours",
             "web_exploration_min_interval_hours",
             "web_exploration_max_results",
@@ -7162,8 +7116,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "private_image_vision_cache_max_items",
             "group_slang_web_search_terms",
             "group_slang_web_search_results",
-            "auto_voice_max_chars",
-            "auto_voice_cooldown_seconds",
         }:
             try:
                 if key == "group_high_intensity_max_merge_messages":
@@ -7185,11 +7137,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(0.0, min(30.0, float(value)))
             except (TypeError, ValueError):
                 return 3.0
-        if key == "semantic_message_debounce_seconds":
-            try:
-                return max(0.0, min(15.0, float(value)))
-            except (TypeError, ValueError):
-                return 8.0
         if key in {"text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds"}:
             try:
                 return max(0.0, min(15.0, float(value)))
@@ -7343,7 +7290,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "recall_forbidden_words",
             "recall_forbidden_scope",
             "recall_forbidden_word_case_sensitive",
-            "enable_semantic_message_debounce",
             "enable_proactive_quote_trigger_message",
             "enable_quote_group_reply",
             "enable_quote_group_interjection",
