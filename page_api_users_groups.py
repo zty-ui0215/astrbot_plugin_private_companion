@@ -86,17 +86,16 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     if role:
                         user["relationship_role"] = role
                 if "proactive_daily_limit" in payload:
-                    user["proactive_daily_limit"] = max(-1, _safe_int(payload.get("proactive_daily_limit"), -1))
-                if any(key in payload for key in ("nickname", "style", "relationship_role", "proactive_daily_limit")):
-                    for key in (
-                        "proactive_idle_minutes",
-                        "proactive_min_interval_minutes",
-                        "photo_daily_limit",
-                        "screen_peek_daily_limit",
-                        "poke_daily_limit",
-                    ):
-                        user[key] = -1
-                    user["proactive_boundary_note"] = ""
+                    user["proactive_daily_limit"] = _safe_int(payload.get("proactive_daily_limit"), -1, -1, 30)
+                for key in (
+                    "proactive_idle_minutes",
+                    "proactive_min_interval_minutes",
+                    "photo_daily_limit",
+                    "screen_peek_daily_limit",
+                    "poke_daily_limit",
+                ):
+                    if key in payload:
+                        user[key] = _safe_int(payload.get(key), -1, -1)
                 if self.plugin._private_user_role(user, user_id) == "friend":
                     user["photo_daily_limit"] = -1
                     user["photo_sent_today"] = 0

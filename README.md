@@ -7,9 +7,3 @@
 - 适配平台：`aiocqhttp`
 - AstrBot 版本：`>=4.22.0`
 - 编码要求：UTF-8
-- 原作者及其仓库https://github.com/menglimi/astrbot_plugin_private_companion
-
-这是一个经过修改的版本，由于原作者更新速度极快，该分支可能与主分支区别较大
-## 目前与原仓库的主要区别
-4.7.1.3简化了模型设置项，只保留主模型和副模型
-4.7.1.2修改了设置项，使其更整齐

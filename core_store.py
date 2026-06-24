@@ -659,7 +659,7 @@ class CoreStoreMixin:
             source = users.get(alias_id)
             if not isinstance(source, dict):
                 continue
-            target = users.setdefault(canonical_id, dict(_DEFAULT_USER_TEMPLATE))
+            target = users.setdefault(canonical_id, deepcopy(_DEFAULT_USER_TEMPLATE))
             target["user_id"] = canonical_id
             self._merge_user_record_values(target, source, alias_id)
             users.pop(alias_id, None)
@@ -708,13 +708,13 @@ class CoreStoreMixin:
         user_id = self._canonical_private_user_id(original_user_id)
         users = self.data.setdefault("users", {})
         if original_user_id and original_user_id != user_id and original_user_id in users:
-            target = users.setdefault(user_id, dict(_DEFAULT_USER_TEMPLATE))
+            target = users.setdefault(user_id, deepcopy(_DEFAULT_USER_TEMPLATE))
             target["user_id"] = user_id
             source = users.pop(original_user_id)
             if isinstance(source, dict):
                 self._merge_user_record_values(target, source, original_user_id)
         created = user_id not in users
-        user = users.setdefault(user_id, dict(_DEFAULT_USER_TEMPLATE))
+        user = users.setdefault(user_id, deepcopy(_DEFAULT_USER_TEMPLATE))
         user["user_id"] = user_id
         if original_user_id and original_user_id != user_id:
             aliases = user.setdefault("alias_user_ids", [])
@@ -722,7 +722,7 @@ class CoreStoreMixin:
                 aliases.append(original_user_id)
         for key, default_value in _DEFAULT_USER_TEMPLATE.items():
             if key not in user:
-                user[key] = default_value
+                user[key] = deepcopy(default_value)
         self._ensure_private_user_role(user_id, user)
         user.setdefault("manual_enabled", False)
         user.setdefault("manual_disabled", False)

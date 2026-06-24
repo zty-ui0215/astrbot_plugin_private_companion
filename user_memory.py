@@ -1107,6 +1107,14 @@ class UserMemoryMixin:
             }
         )
         del items[:-18]
+        self._note_proactive_afterglow_sent(
+            user,
+            action=action,
+            reason=reason,
+            text=text,
+            motive=motive,
+            action_summary=action_summary,
+        )
         continuity = user.setdefault("state_continuity", {})
         if not isinstance(continuity, dict):
             continuity = {}
@@ -1115,6 +1123,72 @@ class UserMemoryMixin:
         continuity["last_action"] = action
         continuity["last_action_reason"] = _single_line(reason, 50)
         continuity["last_action_text"] = _single_line(_strip_internal_message_blocks(text), 120)
+
+    def _note_proactive_afterglow_sent(
+        self,
+        user: dict[str, Any],
+        *,
+        action: str,
+        reason: str = "",
+        text: str = "",
+        motive: str = "",
+        action_summary: str = "",
+    ) -> None:
+        now = _now_ts()
+        semantic_kind = _single_line(user.get("planned_proactive_semantic_kind"), 40)
+        anchor_type = _single_line(user.get("planned_proactive_anchor_type"), 40)
+        semantic_score = _safe_int(user.get("planned_proactive_semantic_score"), 50, 0, 100)
+        ignored = _safe_int(user.get("ignored_streak"), 0, 0)
+        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share"} or semantic_kind == "external_share":
+            label = "刚把一个外部小发现递过去，先看它会不会被接住"
+            next_tendency = "稍后若还没回应，不要继续补同类分享"
+        elif semantic_kind in {"self_share", "observation"} or reason in {"activity_share", "diary_share", "creative_share", "background_schedule"}:
+            label = "刚把自己的一个小片段放过去，余味还在"
+            next_tendency = "下一次优先换更轻的切口，不要连续汇报自己"
+        elif semantic_kind in {"care", "check_in", "light_touch"} or reason in {"quiet_care", "state_share"}:
+            label = "刚轻轻碰了一下关系，不急着要回应"
+            next_tendency = "如果沉默继续，下一次更短更克制"
+        elif semantic_kind in {"continuation", "reminder"}:
+            label = "刚接了一次明确来源，等这条自然落地"
+            next_tendency = "除非有真实新来源，否则不要反复续同一个话头"
+        else:
+            label = "刚发出一条主动，先把窗口留给对方"
+            next_tendency = "下一次根据回应再决定靠近或收住"
+        if ignored >= 1:
+            label = f"{label}，但前面已经有未回应"
+            next_tendency = "沉默累积时不要加压，不要连续追问"
+        if semantic_score < 45:
+            next_tendency = "这次由头不算硬，后续要更依赖具体上下文"
+        afterglow = {
+            "ts": now,
+            "status": "awaiting_reply",
+            "label": _single_line(label, 140),
+            "next_tendency": _single_line(next_tendency, 160),
+            "reason": _single_line(reason, 50),
+            "action": _single_line(action, 50),
+            "semantic_kind": semantic_kind,
+            "anchor_type": anchor_type,
+            "semantic_score": semantic_score,
+            "text": _single_line(_strip_internal_message_blocks(text), 160),
+            "motive": _single_line(motive, 120),
+            "summary": _single_line(action_summary, 140),
+            "feedback": "",
+            "reply_text": "",
+            "reply_ts": 0,
+        }
+        user["proactive_afterglow"] = afterglow
+        recent = user.setdefault("recent_proactive_afterglows", [])
+        if not isinstance(recent, list):
+            recent = []
+            user["recent_proactive_afterglows"] = recent
+        recent.append(dict(afterglow))
+        del recent[:-8]
+        continuity = user.setdefault("state_continuity", {})
+        if not isinstance(continuity, dict):
+            continuity = {}
+            user["state_continuity"] = continuity
+        continuity["proactive_afterglow"] = afterglow["label"]
+        continuity["proactive_afterglow_tendency"] = afterglow["next_tendency"]
 
     def _note_action_reply_feedback(self, user: dict[str, Any], action: str, text: str = "") -> None:
         action = _single_line(action, 40) or "message"
@@ -1138,6 +1212,7 @@ class UserMemoryMixin:
             item["reply_text"] = _single_line(text, 120)
             item["reply_ts"] = now
             break
+        self._note_proactive_afterglow_reply(user, action=action, text=text, feedback=feedback, now=now)
         continuity = user.setdefault("state_continuity", {})
         if not isinstance(continuity, dict):
             continuity = {}
@@ -1145,6 +1220,103 @@ class UserMemoryMixin:
         continuity["last_reply_ts"] = now
         continuity["last_reply_feedback"] = feedback
         continuity["last_reply_text"] = _single_line(text, 120)
+
+    def _note_proactive_afterglow_reply(
+        self,
+        user: dict[str, Any],
+        *,
+        action: str,
+        text: str = "",
+        feedback: str = "neutral",
+        now: float | None = None,
+    ) -> None:
+        current = user.get("proactive_afterglow")
+        if not isinstance(current, dict):
+            return
+        check_now = _now_ts() if now is None else now
+        if check_now - _safe_float(current.get("ts"), 0) > 48 * 3600:
+            return
+        current["status"] = "replied"
+        current["feedback"] = _single_line(feedback, 24)
+        current["reply_text"] = _single_line(text, 160)
+        current["reply_ts"] = check_now
+        if feedback == "positive":
+            current["label"] = "上一条主动被接住了，关系余温往回亮了一点"
+            current["next_tendency"] = "后续可以自然一点，但不要立刻连续加码"
+        elif feedback == "negative":
+            current["label"] = "上一条主动被顶回来了，先收住一点"
+            current["next_tendency"] = "后续主动更短、更少、更低压，避开同类动作"
+        else:
+            current["label"] = "上一条主动被回应了，话头算是落地"
+            current["next_tendency"] = "后续可以顺着真实回复走，不要机械续主动"
+        recent = user.setdefault("recent_proactive_afterglows", [])
+        if isinstance(recent, list):
+            recent.append(dict(current))
+            del recent[:-8]
+        continuity = user.setdefault("state_continuity", {})
+        if not isinstance(continuity, dict):
+            continuity = {}
+            user["state_continuity"] = continuity
+        continuity["proactive_afterglow"] = current["label"]
+        continuity["proactive_afterglow_tendency"] = current["next_tendency"]
+
+    def _note_proactive_afterglow_outcome(
+        self,
+        user: dict[str, Any],
+        *,
+        status: str,
+        note: str = "",
+    ) -> None:
+        normalized_status = _single_line(status, 32)
+        if normalized_status not in {"blocked", "cancelled", "dropped", "deferred", "failed"}:
+            return
+        now = _now_ts()
+        reason = _single_line(user.get("planned_proactive_reason"), 50)
+        action = _single_line(user.get("planned_proactive_action"), 50)
+        semantic_kind = _single_line(user.get("planned_proactive_semantic_kind"), 40)
+        anchor_type = _single_line(user.get("planned_proactive_anchor_type"), 40)
+        clean_note = _single_line(note, 140)
+        if normalized_status == "deferred":
+            label = "刚才那个主动念头被先收住了"
+            tendency = "如果之后再出现，要带一点犹豫后的自然感，不要机械重试"
+        elif normalized_status == "failed":
+            label = "刚才那次主动没能送出去"
+            tendency = "下一次不要假装它已经发生，先重新找更稳的切口"
+        else:
+            label = "刚才那个主动念头被放下了"
+            tendency = "下一次避开同一个别扭点，等更自然的由头"
+        if clean_note:
+            label = f"{label}：{clean_note}"
+        afterglow = {
+            "ts": now,
+            "status": normalized_status,
+            "label": _single_line(label, 160),
+            "next_tendency": _single_line(tendency, 160),
+            "reason": reason,
+            "action": action,
+            "semantic_kind": semantic_kind,
+            "anchor_type": anchor_type,
+            "semantic_score": _safe_int(user.get("planned_proactive_semantic_score"), 0, 0, 100),
+            "text": "",
+            "motive": _single_line(user.get("planned_proactive_motive"), 120),
+            "summary": "",
+            "feedback": "",
+            "reply_text": "",
+            "reply_ts": 0,
+        }
+        user["proactive_afterglow"] = afterglow
+        recent = user.setdefault("recent_proactive_afterglows", [])
+        if not isinstance(recent, list):
+            recent = []
+            user["recent_proactive_afterglows"] = recent
+        recent.append(dict(afterglow))
+        del recent[:-8]
+        continuity = user.setdefault("state_continuity", {})
+        if not isinstance(continuity, dict):
+            continuity = {}
+            user["state_continuity"] = continuity
+        continuity["proactive_afterglow"] = afterglow["label"]
+        continuity["proactive_afterglow_tendency"] = afterglow["next_tendency"]
 
     def _format_action_consequence_hint(self, user: dict[str, Any]) -> str:
         items = self._action_consequence_items(user)

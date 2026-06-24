@@ -69,6 +69,7 @@ const providerLabels = {
   NARRATION_PROVIDER_ID: "工具结果转述",
   HISTORY_SUMMARY_PROVIDER_ID: "昨日对话摘要",
   RESPONSE_REVIEW_PROVIDER_ID: "回复/主动复核",
+  PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "主动人格判定",
   TROUBLESHOOTING_PROVIDER_ID: "排障检查",
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: "智能收口判断",
   REST_WAKEUP_PROVIDER_ID: "休息醒来判断",
@@ -86,6 +87,10 @@ const providerLabels = {
   NEWS_PROVIDER_ID: "新闻整理",
   WEB_EXPLORATION_PROVIDER_ID: "搜索决策/整理",
 };
+
+function isProviderConfigKey(key) {
+  return Object.prototype.hasOwnProperty.call(providerLabels, key);
+}
 
 const privateReadingConfigKeys = new Set([
   "enable_private_reading_integration",
@@ -105,6 +110,10 @@ const privateReadingConfigKeys = new Set([
 
 const noFallbackProviderKeys = new Set([
   "PRIVATE_READING_VISION_PROVIDER_ID",
+]);
+
+const optionalNoFallbackProviderKeys = new Set([
+  "NARRATION_PROVIDER_ID",
 ]);
 
 const providerPreferenceMeta = {
@@ -306,6 +315,13 @@ const providerGuides = {
     fit: "适合便宜、短文本改写自然、边界判断稳的模型。",
     fallback: "留空时回退到陪伴通用模型，再回退到主模型。",
   },
+  PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: {
+    preference: "speed",
+    passiveImpact: "async",
+    purpose: "主动计划到点后，先判断这个念头是否贴合当前角色、世界观、关系温度和打扰边界。",
+    fit: "适合 JSON 输出稳定、角色边界感强、短文本判断保守的小到中型模型。",
+    fallback: "留空时复用回复/主动复核模型，再回退到陪伴通用模型。",
+  },
   TROUBLESHOOTING_PROVIDER_ID: {
     preference: "speed",
     passiveImpact: "async",
@@ -425,7 +441,7 @@ const providerGroups = [
     id: "core",
     title: "基础与兜底",
     desc: "主模型、陪伴通用和最终回复前后的基础能力。",
-    keys: ["LLM_PROVIDER_ID", "MAI_STYLE_PROVIDER_ID", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "RESPONSE_REVIEW_PROVIDER_ID", "REST_WAKEUP_PROVIDER_ID", "TROUBLESHOOTING_PROVIDER_ID", "NARRATION_PROVIDER_ID"],
+    keys: ["LLM_PROVIDER_ID", "MAI_STYLE_PROVIDER_ID", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "RESPONSE_REVIEW_PROVIDER_ID", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "REST_WAKEUP_PROVIDER_ID", "TROUBLESHOOTING_PROVIDER_ID", "NARRATION_PROVIDER_ID"],
   },
   {
     id: "daily",
@@ -822,6 +838,12 @@ const configLabels = {
   schedule_worldview_prompt: "世界观/生活背景",
   roleplay_user_profile_prompt: "用户与关系补充",
   max_daily_messages: "每日主动上限",
+  enable_llm_proactive_message: "主动文本使用 LLM 生成",
+  proactive_prompt_template: "主动生成提示词模板",
+  enable_llm_proactive_persona_judge: "主动人格/世界观判定",
+  PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "主动人格判定模型",
+  proactive_persona_judge_send_threshold: "人格判定放行阈值",
+  proactive_persona_judge_cache_minutes: "人格判定缓存分钟",
   timer_pre_silence_minutes: "预约前静默窗口",
   enable_tts_enhancement: "TTS强化",
   tts_generation_mode: "TTS生成路径",
@@ -1111,6 +1133,12 @@ const configLabels = {
 
 const configDescriptions = {
   enable_proactive_only_mode: "开启后，本插件只保留主动私聊的日程、主动生成和发送链路；普通私聊、群聊消息不会再被本插件做状态/TTS/图片/转发/群聊上下文注入，也不会触发被动回复增强。用户回复主动消息时仍会被轻量记为已回应。它会让普通被动回复的 prompt 更稳定，显著提高缓存命中率。",
+  enable_llm_proactive_message: "开启后，主动调度只负责挑选动机和时机，真正文本会调用 AstrBot 人格生成；关闭时回退为本地模板，更省但更机械。",
+  proactive_prompt_template: "自定义主动消息生成提示词。留空使用内置模板；适合把角色口吻、世界观约束和“不要像回复空气”这类要求固定下来。",
+  enable_llm_proactive_persona_judge: "主动计划到点后，先让模型判断这个念头是否符合角色、世界观、关系温度和当下打扰边界；可放行、改写、延后或丢弃。",
+  PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: "用于主动人格/世界观判定的轻量模型。建议选择 JSON 稳定、判断保守、理解角色边界的小到中型模型。",
+  proactive_persona_judge_send_threshold: "模型判定为 send 但分数低于该阈值时，会自动转为延后。越高越克制，越低越容易放行。",
+  proactive_persona_judge_cache_minutes: "同一主动计划在该时间内复用模型判定，减少重复调用；计划内容、语义或触发来源变化后会自动失效。",
   default_style: "没有单独学习到用户偏好时，插件用于生成日程、状态和主动行为的基础语气参考。",
   plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于角色设定补充，它会影响私聊被动回复和关系判断。",
   private_user_aliases: "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射，例如：688C2CE7...=100012345。",
@@ -1418,7 +1446,7 @@ const featureSettingGroups = {
   enable_open_loop_tracking: ["max_dialogue_episodes"],
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: [],
-  enable_proactive_only_mode: [],
+  enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
   enable_humanized_states: ["humanized_state_intensity", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
   enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
@@ -1535,6 +1563,18 @@ const featureSettingGroups = {
 };
 
 const featureSettingSections = {
+  enable_proactive_only_mode: [
+    {
+      title: "主动生成",
+      note: "调度层只决定念头和时机，文本层负责把它写成符合人格的自然开口。",
+      keys: ["enable_llm_proactive_message", "proactive_prompt_template"],
+    },
+    {
+      title: "人格/世界观复核",
+      note: "到点后先检查这个念头是否像当前角色会说、是否越界、是否该延后。",
+      keys: ["enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
+    },
+  ],
   enable_mai_style_integration: [
     {
       title: "回复基座",
@@ -1865,6 +1905,10 @@ const featureSettingTypes = {
   emotion_judgement_mode: { type: "select", options: [["suspicious", "仅复核可疑项"], ["always", "总是复核普通文本"], ["off", "关闭复核"]] },
   group_high_intensity_merge_scope: { type: "select", options: [["group", "全群连续叫 Bot 合并"], ["same_user", "只合并同一发送者补话"]] },
   EMOTION_JUDGEMENT_PROVIDER_ID: { type: "provider" },
+  PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: { type: "provider" },
+  proactive_prompt_template: { type: "textarea" },
+  proactive_persona_judge_send_threshold: { type: "number", min: 0, max: 100, step: 1 },
+  proactive_persona_judge_cache_minutes: { type: "number", min: 5, max: 720, step: 5 },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
   rest_backlog_max_messages: { type: "number", min: 1, max: 12, step: 1 },
@@ -6970,6 +7014,137 @@ function renderCreativeBookReader(book, kindLabel, displayTitle, displayIntro, d
   `;
 }
 
+function proactiveSemanticLabel(kind) {
+  const labels = {
+    greeting: "问候",
+    care: "关心",
+    self_share: "自我分享",
+    external_share: "外界分享",
+    continuation: "续话",
+    reminder: "提醒",
+    observation: "观察",
+    light_touch: "轻触碰",
+    check_in: "确认一下",
+  };
+  return labels[kind] || kind || "";
+}
+
+function proactiveAnchorLabel(anchor) {
+  const labels = {
+    recent_context: "近期上下文",
+    group_context: "群聊上下文",
+    inner_life: "内在状态",
+    current_activity: "当前活动",
+    important_date: "重要日期",
+    external_info: "外界信息",
+    time_ritual: "时间仪式",
+    environment: "环境",
+    topic_hint: "话题线索",
+    vague: "由头偏弱",
+  };
+  return labels[anchor] || anchor || "";
+}
+
+function proactivePercent100(value) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num) || num <= 0) return "";
+  return `${Math.round(num)}%`;
+}
+
+function proactiveScore01(value) {
+  const num = Number(value || 0);
+  if (!Number.isFinite(num) || num <= 0) return "";
+  return `${Math.round(num * 100)}%`;
+}
+
+function proactiveSemanticMeta(item) {
+  const meta = [];
+  if (item.semantic_kind) meta.push(`语义：${proactiveSemanticLabel(item.semantic_kind)}`);
+  if (item.semantic_anchor_type) meta.push(`锚点：${proactiveAnchorLabel(item.semantic_anchor_type)}`);
+  const semanticScore = proactivePercent100(item.semantic_score);
+  if (semanticScore) meta.push(`贴合：${semanticScore}`);
+  const pressure = proactivePercent100(item.semantic_pressure);
+  if (pressure) meta.push(`压力：${pressure}`);
+  const risk = proactivePercent100(item.semantic_risk);
+  if (risk) meta.push(`风险：${risk}`);
+  if (item.semantic_note) meta.push(`语义说明：${item.semantic_note}`);
+  return meta;
+}
+
+function proactiveWindowPhaseLabel(phase) {
+  const labels = {
+    before: "还没到点",
+    best: "最佳表达期",
+    tail: "余温期",
+    expired: "已过期",
+    unknown: "未记录",
+  };
+  return labels[phase] || phase || "";
+}
+
+function proactiveWindowMeta(item) {
+  const meta = [];
+  if (item.window_phase) meta.push(`窗口：${proactiveWindowPhaseLabel(item.window_phase)}`);
+  if (item.window_detail) meta.push(item.window_detail);
+  const value = proactivePercent100(item.impulse_value);
+  if (value) meta.push(`念头强度：${value}`);
+  if (item.best_until_ts) meta.push(`最佳到：${item.best_until || "-"}`);
+  if (item.expire_ts) meta.push(`过期：${item.expire || "-"}`);
+  if (item.planned_impulse_id) meta.push(`impulse：${item.planned_impulse_id}`);
+  return meta;
+}
+
+function proactiveReadinessMeta(item) {
+  const readiness = item?.inner_readiness || {};
+  const meta = [];
+  const score = proactiveScore01(readiness.score);
+  if (score) meta.push(`开口欲：${score}${readiness.label ? ` · ${readiness.label}` : ""}`);
+  if (readiness.drive_label || readiness.drive_detail) {
+    meta.push(`状态：${[readiness.drive_label, readiness.drive_detail].filter(Boolean).join(" · ")}`);
+  }
+  if (readiness.temperature_label || readiness.temperature_detail) {
+    meta.push(`关系温度：${[readiness.temperature_label, readiness.temperature_detail].filter(Boolean).join(" · ")}`);
+  }
+  return meta;
+}
+
+function proactiveAfterglowHtml(source) {
+  const afterglow = source?.afterglow || {};
+  if (!afterglow.label && !afterglow.next_tendency) return "";
+  const meta = [
+    afterglow.time ? `记录：${afterglow.time}` : "",
+    afterglow.status ? `结果：${afterglow.status}` : "",
+    afterglow.semantic_kind ? `语义：${proactiveSemanticLabel(afterglow.semantic_kind)}` : "",
+    afterglow.next_tendency ? `下次倾向：${afterglow.next_tendency}` : "",
+  ].filter(Boolean);
+  return `
+    <div class="proactive-afterglow">
+      <b>主动余韵</b>
+      <span>${escapeHtml(afterglow.label || "有一条主动余韵")}</span>
+      ${meta.length ? `<div class="proactive-meta">${meta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function proactiveHesitationMeta(item) {
+  const hesitation = item?.hesitation || {};
+  const meta = [];
+  if (hesitation.note) meta.push(`犹豫：${hesitation.note}`);
+  if (hesitation.count) meta.push(`收住次数：${hesitation.count}`);
+  if (hesitation.time) meta.push(`犹豫记录：${hesitation.time}`);
+  if (hesitation.topic) meta.push(`原话题：${hesitation.topic}`);
+  return meta;
+}
+
+function proactiveModelJudgeMeta(item) {
+  const judge = item?.model_judge || {};
+  const meta = [];
+  if (judge.decision) meta.push(`模型判定：${judge.decision}${judge.score ? ` · ${judge.score}` : ""}`);
+  if (judge.reason) meta.push(`判定原因：${judge.reason}`);
+  if (judge.judged_ts) meta.push(`判定时间：${judge.judged || "-"}`);
+  return meta;
+}
+
 function renderProactiveCandidates() {
   const data = state.overview?.proactive_candidates || {};
   const users = data.users || [];
@@ -7005,6 +7180,7 @@ function renderProactiveCandidates() {
     const repeat = Number(item.repeat_count || 1);
     const userLabel = item.user_label || item.user_id || "-";
     const roleLabel = item.user_role_label || (item.user_role === "owner" ? "主人" : "朋友");
+    const semanticMeta = proactiveSemanticMeta(item);
     return `
       <section class="proactive-candidate ${escapeHtml(item.status || "unknown")}">
         <div class="proactive-candidate-head">
@@ -7016,6 +7192,7 @@ function renderProactiveCandidates() {
         </div>
         <p>${escapeHtml(item.motive || "暂无动机记录")}</p>
         <div class="proactive-meta">
+          ${semanticMeta.map((value) => `<span class="proactive-semantic-chip">${escapeHtml(value)}</span>`).join("")}
           <span>用户：${escapeHtml(userLabel)}</span>
           <span>ID：${escapeHtml(item.user_id || "-")}</span>
           <span>计划：${escapeHtml(item.scheduled || "-")}</span>
@@ -7073,6 +7250,11 @@ function proactiveTaskMarkup(item) {
   const status = proactiveTaskStatusLabel(item.status);
   const source = proactiveTaskSourceLabel(item.source, item.has_timer_event);
   const title = item.topic || item.reason_label || item.reason || "未命名主动任务";
+  const semanticMeta = proactiveSemanticMeta(item);
+  const windowMeta = proactiveWindowMeta(item);
+  const readinessMeta = proactiveReadinessMeta(item);
+  const hesitationMeta = proactiveHesitationMeta(item);
+  const modelJudgeMeta = proactiveModelJudgeMeta(item);
   const meta = [
     `用户：${item.user_label || item.user_id || "-"}`,
     `来源：${source}`,
@@ -7090,6 +7272,7 @@ function proactiveTaskMarkup(item) {
     item.timer_error ? `错误：${item.timer_error}` : "",
     item.raw_time ? `原始时间：${item.raw_time}` : "",
     item.trigger_message_id ? `触发消息：${item.trigger_message_id}` : "",
+    item.planned_candidate_id ? `candidate：${item.planned_candidate_id}` : "",
     item.silence_until_due ? "到点前静默" : "",
   ].filter(Boolean);
   return `
@@ -7103,8 +7286,14 @@ function proactiveTaskMarkup(item) {
       </div>
       <p>${escapeHtml(item.motive || "暂无登记动机")}</p>
       <div class="proactive-meta">
+        ${semanticMeta.map((value) => `<span class="proactive-semantic-chip">${escapeHtml(value)}</span>`).join("")}
+        ${windowMeta.map((value) => `<span class="proactive-window-chip">${escapeHtml(value)}</span>`).join("")}
+        ${readinessMeta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}
+        ${hesitationMeta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}
+        ${modelJudgeMeta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}
         ${meta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}
       </div>
+      ${proactiveAfterglowHtml(item)}
     </section>
   `;
 }
@@ -7116,11 +7305,15 @@ function proactiveUserStateHtml(items) {
       ${items.map((item) => {
         const quota = `${item.sent_today ?? 0}/${item.effective_daily_limit ?? "-"}`;
         const status = item.proactive_sending ? "发送中" : item.next_proactive_ts ? "已排程" : "未排程";
+        const readinessMeta = proactiveReadinessMeta(item);
+        const hesitationMeta = proactiveHesitationMeta(item);
         const meta = [
           `今日：${quota}`,
           item.next_proactive_ts ? `下次：${item.next_proactive}` : "下次：-",
           item.last_sent_ts ? `上次主动：${item.last_sent}` : "",
           item.last_skip_reason ? `最近${item.last_skip_prefix || "跳过"}：${item.last_skip_reason}` : "",
+          ...readinessMeta,
+          ...hesitationMeta,
         ].filter(Boolean);
         return `
           <section class="proactive-user-state ${item.proactive_sending ? "running" : ""}">
@@ -7129,6 +7322,7 @@ function proactiveUserStateHtml(items) {
               <span>${escapeHtml(item.user_role_label || "-")} · ${escapeHtml(status)}</span>
             </div>
             <div class="proactive-meta">${meta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div>
+            ${proactiveAfterglowHtml(item)}
           </section>
         `;
       }).join("")}
@@ -7169,6 +7363,7 @@ function proactiveAuditHtml(items) {
   return visibleItems.slice(0, 30).map((item) => {
     const status = proactiveAuditStatusLabel(item.status);
     const title = item.topic || item.reason_label || item.reason || item.note || "主动执行记录";
+    const semanticMeta = proactiveSemanticMeta(item);
     const meta = [
       `用户：${item.user_label || item.user_id || "-"}`,
       `动作：${item.action || "message"}`,
@@ -7193,7 +7388,10 @@ function proactiveAuditHtml(items) {
           <span class="badge">${escapeHtml(status)}</span>
         </div>
         <p>${escapeHtml(item.motive || item.note || "暂无动机记录")}</p>
-        <div class="proactive-meta">${meta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div>
+        <div class="proactive-meta">
+          ${semanticMeta.map((value) => `<span class="proactive-semantic-chip">${escapeHtml(value)}</span>`).join("")}
+          ${meta.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}
+        </div>
       </section>
     `;
   }).join("");
@@ -9620,6 +9818,13 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, name)) return state.featureDraft[name];
     return Object.prototype.hasOwnProperty.call(settings, name) ? settings[name] : fallback;
   };
+  if (featureKey === "enable_proactive_only_mode") {
+    if (settingKey === "proactive_prompt_template") return boolSetting("enable_llm_proactive_message");
+    if (["PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"].includes(settingKey)) {
+      return boolSetting("enable_llm_proactive_persona_judge");
+    }
+    return true;
+  }
   if (featureKey === "enable_humanized_states") {
     const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
     if (restChildren.has(settingKey)) {
@@ -9833,12 +10038,16 @@ function syncFeatureProviderInput(select) {
 function collectFeatureDetailPayload(featureKey, root = document) {
   const features = { [featureKey]: toBool(state.featureDraft[featureKey]) };
   const settings = {};
+  const providers = {};
   const overviewSettings = state.overview?.settings || {};
   root.querySelectorAll("[data-feature-param]").forEach((input) => {
     const key = input.dataset.featureParam;
     if (!key) return;
     const value = collectSettingValue(key, input);
-    if (Object.prototype.hasOwnProperty.call(overviewSettings, key)) {
+    if (isProviderConfigKey(key)) {
+      providers[key] = String(value || "").trim();
+      state.providerDraft = { ...(state.providerDraft || {}), [key]: providers[key] };
+    } else if (Object.prototype.hasOwnProperty.call(overviewSettings, key)) {
       settings[key] = value;
       if (Object.prototype.hasOwnProperty.call(state.featureDraft || {}, key)) {
         state.featureDraft[key] = toBool(value);
@@ -9850,7 +10059,7 @@ function collectFeatureDetailPayload(featureKey, root = document) {
       settings[key] = value;
     }
   });
-  return { features, settings };
+  return { features, settings, providers };
 }
 
 function featureDependencyLines(key) {
@@ -10746,8 +10955,9 @@ function providerCardMarkup(key, label, providers) {
   const resolved = resolveProviderId(key, providers);
   const configured = Boolean(selected);
   const noFallback = noFallbackProviderKeys.has(key);
+  const optionalNoFallback = optionalNoFallbackProviderKeys.has(key);
   const group = providerGroupByKey[key];
-  const statusLabel = configured ? "已单独配置" : (noFallback ? "未配置" : "自动回退");
+  const statusLabel = configured ? "已单独配置" : (noFallback ? "未配置" : (optionalNoFallback ? "可选未启用" : "自动回退"));
   const guide = providerGuides[key] || {};
   const preference = providerPreferenceMeta[guide.preference || "balanced"];
   const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
@@ -10833,7 +11043,7 @@ function providerMatchesFilter(key, label, providers) {
 function renderProviderSummary(providers) {
   const keys = Object.keys(providerLabels).filter((key) => visibleConfigKey(key));
   const configured = keys.filter((key) => Boolean(providers[key])).length;
-  const inherited = keys.filter((key) => !providers[key] && !noFallbackProviderKeys.has(key)).length;
+  const inherited = keys.filter((key) => !providers[key] && !noFallbackProviderKeys.has(key) && !optionalNoFallbackProviderKeys.has(key)).length;
   const requiredMissing = keys.filter((key) => !providers[key] && noFallbackProviderKeys.has(key)).length;
   const available = state.availableProviders.length;
   const passiveSensitive = keys.filter((key) => providerGuides[key]?.passiveImpact === "direct").length;
@@ -10917,7 +11127,19 @@ function currentProviderValues() {
 function resolveProviderId(key, values = currentProviderValues()) {
   if (values[key]) return values[key];
   if (noFallbackProviderKeys.has(key)) return "";
-  if (key === "TROUBLESHOOTING_PROVIDER_ID" && values.RESPONSE_REVIEW_PROVIDER_ID) return values.RESPONSE_REVIEW_PROVIDER_ID;
+  if (optionalNoFallbackProviderKeys.has(key)) return "";
+  if (key === "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID") {
+    return values.LLM_PROVIDER_ID || "";
+  }
+  if (key === "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID") {
+    return values.RESPONSE_REVIEW_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
+  }
+  if (key === "REST_WAKEUP_PROVIDER_ID") {
+    return values.RESPONSE_REVIEW_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
+  }
+  if (key === "TROUBLESHOOTING_PROVIDER_ID") {
+    return values.RESPONSE_REVIEW_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
+  }
   if (key === "EMOTION_JUDGEMENT_PROVIDER_ID") {
     return values.TROUBLESHOOTING_PROVIDER_ID || values.RELATIONSHIP_ANALYSIS_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
   }
@@ -10991,6 +11213,10 @@ function rememberProviderDraft(key) {
 async function testProvider(key) {
   const providerId = resolveProviderId(key);
   setProviderStatus(key, "测试中...", "info");
+  if (!providerId && (noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key))) {
+    setProviderStatus(key, optionalNoFallbackProviderKeys.has(key) ? "未单独配置：当前不会调用该模型" : "未配置，无法测试", "warn");
+    return;
+  }
   try {
     const result = await postJson("/provider/test", { key, provider_id: providerId });
     if (result.ok) {
@@ -11029,7 +11255,12 @@ function renderProviderFlow(providers) {
     </div>
     <div class="flow-tasks">
       ${tasks.map(([key, label]) => {
-        const value = providers[key] || (noFallbackProviderKeys.has(key) ? "未配置" : mai);
+        const resolved = resolveProviderId(key, providers);
+        const value = providers[key] || (
+          noFallbackProviderKeys.has(key)
+            ? "未配置"
+            : (optionalNoFallbackProviderKeys.has(key) ? "未启用" : (resolved || "AstrBot 默认模型"))
+        );
         const inherited = !providers[key];
         return `<span class="flow-node ${inherited ? "inherited" : "primary"}">${escapeHtml(label)}<br><b>${escapeHtml(value)}</b></span>`;
       }).join("")}

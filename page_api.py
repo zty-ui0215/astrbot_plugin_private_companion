@@ -21,6 +21,7 @@ from quart import request, send_file
 
 from .constants import _REASON_TEXT
 from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _today_key
+from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _today_key
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"
@@ -39,6 +40,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         "group_wakeup_debounce_pending_penalty",
         "tts_trigger_probability",
         "rest_reply_probability",
+        "proactive_photo_text_probability",
+        "proactive_share_probability",
     }
     INHERIT_PERCENT_PROBABILITY_KEYS = {
         "tts_private_trigger_probability",
@@ -47,7 +50,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
-        self._schema_bool_key_cache: set[str] | None = None
+        self._schema_key_index_cache: dict[str, Any] | None = None
 
     def register_routes(self) -> None:
         register = self.plugin.context.register_web_api
@@ -860,6 +863,17 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "planned_proactive_source",
             "planned_proactive_motive",
             "planned_proactive_topic",
+            "planned_proactive_impulse_id",
+            "planned_proactive_window_start_at",
+            "planned_proactive_best_until_at",
+            "planned_proactive_expire_at",
+            "planned_proactive_semantic_kind",
+            "planned_proactive_anchor_type",
+            "planned_proactive_semantic_score",
+            "planned_proactive_semantic_note",
+            "planned_proactive_model_judge_signature",
+            "planned_proactive_model_judge_result",
+            "planned_proactive_model_judge_at",
             "planned_event_chain",
             "planned_opener_mode",
             "planned_followup_kind",
@@ -867,6 +881,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "planned_candidate_id",
             "planned_proactive_trigger_message_id",
             "planned_proactive_trigger_umo",
+            "planned_proactive_trigger_ts",
             "planned_proactive_trigger_created_at",
             "llm_timer_event",
             "sent_today",
@@ -881,6 +896,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "last_proactive_motive",
             "recent_proactive_topics",
             "proactive_daypart_counts",
+            "proactive_afterglow",
+            "recent_proactive_afterglows",
+            "recent_proactive_hesitations",
+            "last_proactive_hesitation_at",
+            "last_proactive_hesitation_note",
+            "state_continuity",
             "pending_followup_event",
             "suspended_proactive",
             "poke_daily_limit",
@@ -927,7 +948,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "reason": self._single_line(current.get("planned_proactive_reason"), 40) or "check_in",
                     "error": "",
                 }
-            restore = {key: deepcopy(current.get(key)) for key in plan_keys}
+            restore = {
+                "values": {key: deepcopy(current[key]) for key in plan_keys if key in current},
+                "missing": [key for key in plan_keys if key not in current],
+            }
             current["troubleshooting_proactive_restore"] = restore
             current["troubleshooting_proactive_test_id"] = test_id
             current["troubleshooting_proactive_started_at"] = now
@@ -943,6 +967,16 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             current["planned_proactive_source"] = "troubleshooting"
             current["planned_proactive_motive"] = "对方希望你主动来找一下,轻轻开口确认主动消息链路能正常工作。"
             current["planned_proactive_topic"] = "主动来找对方一下"
+            current["planned_proactive_impulse_id"] = ""
+            current["planned_proactive_window_start_at"] = scheduled_ts
+            active_span, grace_span = self.plugin._proactive_impulse_default_window_seconds("check_in")
+            current["planned_proactive_best_until_at"] = scheduled_ts + active_span
+            current["planned_proactive_expire_at"] = scheduled_ts + active_span + grace_span
+            semantics = self.plugin._planned_proactive_semantics(current)
+            current["planned_proactive_semantic_kind"] = self._single_line(semantics.get("kind"), 40)
+            current["planned_proactive_anchor_type"] = self._single_line(semantics.get("anchor_type"), 40)
+            current["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, self._float(semantics.get("score")))) * 100)
+            current["planned_proactive_semantic_note"] = self._single_line(semantics.get("note"), 180)
             current["planned_event_chain"] = []
             current["planned_opener_mode"] = ""
             current["planned_followup_kind"] = ""
@@ -4638,11 +4672,36 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         keys = [
             "LLM_PROVIDER_ID",
             "tts_conversion_provider_id",
+            "PHOTO_PROMPT_PROVIDER_ID",
+            "NARRATION_PROVIDER_ID",
+            "HISTORY_SUMMARY_PROVIDER_ID",
+            "RESPONSE_REVIEW_PROVIDER_ID",
+            "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID",
+            "TROUBLESHOOTING_PROVIDER_ID",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+            "REST_WAKEUP_PROVIDER_ID",
+            "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
+            "EMOTION_JUDGEMENT_PROVIDER_ID",
+            "COMPANION_MEMORY_PROVIDER_ID",
+            "DIALOGUE_EPISODE_PROVIDER_ID",
+            "GROUP_INTERJECT_PROVIDER_ID",
+            "GROUP_EPISODE_PROVIDER_ID",
+            "GROUP_SLANG_PROVIDER_ID",
+            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
+            "FORWARD_MESSAGE_PROVIDER_ID",
+            "PLUGIN_VISION_PROVIDER_ID",
+            "PRIVATE_READING_VISION_PROVIDER_ID",
+            "NEWS_PROVIDER_ID",
+            "WEB_EXPLORATION_PROVIDER_ID",
         ]
+        for key in sorted(self._schema_provider_keys(public_only=True)):
+            if key not in keys:
+                keys.append(key)
         values = {key: self._config_get(key) for key in keys}
         if not values.get("SMART_MESSAGE_DEBOUNCE_PROVIDER_ID"):
             values["SMART_MESSAGE_DEBOUNCE_PROVIDER_ID"] = str(getattr(self.plugin, "smart_message_debounce_provider_id", "") or "")
+        if not values.get("PROACTIVE_PERSONA_JUDGE_PROVIDER_ID"):
+            values["PROACTIVE_PERSONA_JUDGE_PROVIDER_ID"] = str(getattr(self.plugin, "proactive_persona_judge_provider_id", "") or "")
         if not values.get("tts_conversion_provider_id"):
             values["tts_conversion_provider_id"] = str(getattr(self.plugin, "tts_conversion_provider_id", "") or "")
         return values
@@ -5649,6 +5708,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "atrelay_default_relay_style",
             "atrelay_multi_target_limit",
         ]
+        provider_keys = self._schema_provider_keys(public_only=True)
+        for key in sorted(self._schema_setting_keys(public_only=True)):
+            if key not in keys and key not in provider_keys:
+                keys.append(key)
         values = {key: getattr(self.plugin, key, self._config_get(key)) for key in keys}
         values["private_user_aliases"] = self._config_get("private_user_aliases")
         values.update(
@@ -6090,6 +6153,31 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         self._set_config_value(key, value)
         attr_map = {
             "LLM_PROVIDER_ID": "llm_provider_id",
+            "MAI_STYLE_PROVIDER_ID": "mai_style_provider_id",
+            "DAILY_PLAN_PROVIDER_ID": "daily_plan_provider_id",
+            "DETAIL_ENHANCEMENT_PROVIDER_ID": "detail_enhancement_provider_id",
+            "DREAM_DIARY_PROVIDER_ID": "dream_diary_provider_id",
+            "CREATIVE_PROVIDER_ID": "creative_provider_id",
+            "VOICE_PROMPT_PROVIDER_ID": "voice_prompt_provider_id",
+            "PHOTO_PROMPT_PROVIDER_ID": "photo_prompt_provider_id",
+            "NARRATION_PROVIDER_ID": "narration_provider_id",
+            "HISTORY_SUMMARY_PROVIDER_ID": "history_summary_provider_id",
+            "RESPONSE_REVIEW_PROVIDER_ID": "response_review_provider_id",
+            "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": "proactive_persona_judge_provider_id",
+            "TROUBLESHOOTING_PROVIDER_ID": "troubleshooting_provider_id",
+            "RELATIONSHIP_ANALYSIS_PROVIDER_ID": "relationship_analysis_provider_id",
+            "EMOTION_JUDGEMENT_PROVIDER_ID": "emotion_judgement_provider_id",
+            "COMPANION_MEMORY_PROVIDER_ID": "companion_memory_provider_id",
+            "DIALOGUE_EPISODE_PROVIDER_ID": "dialogue_episode_provider_id",
+            "GROUP_INTERJECT_PROVIDER_ID": "group_interject_provider_id",
+            "GROUP_EPISODE_PROVIDER_ID": "group_episode_provider_id",
+            "GROUP_SLANG_PROVIDER_ID": "group_slang_provider_id",
+            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": "group_followup_judge_provider_id",
+            "FORWARD_MESSAGE_PROVIDER_ID": "forward_message_provider_id",
+            "PLUGIN_VISION_PROVIDER_ID": "plugin_vision_provider_id",
+            "PRIVATE_READING_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",
+            "NEWS_PROVIDER_ID": "news_provider_id",
+            "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": "smart_message_debounce_provider_id",
         }
         if key in attr_map:
@@ -6146,6 +6234,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             raw = float(value or 0)
             setattr(self.plugin, key, max(0.0, min(1.0, raw / 100.0 if raw > 1 else raw)))
             return
+        if key in {"proactive_photo_text_probability", "proactive_share_probability"}:
+            raw = float(value or 0)
+            setattr(self.plugin, key, max(0.0, min(1.0, raw / 100.0 if raw > 1 else raw)))
+            return
         tts_runtime_keys = {
             "tts_generation_mode",
             "tts_voice_language",
@@ -6195,21 +6287,32 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         config = getattr(self.plugin, "config", None)
         if config is None:
             return
+        if _set_into_config(config, key, value, allow_flat_fallback=False):
+            return
+        if self._set_schema_group_config_value(config, key, value):
+            return
         _set_into_config(config, key, value)
-        # 额外兜底：非 dict 对象
-        if not isinstance(config, dict):
-            data = getattr(config, "data", None)
-            if isinstance(data, dict):
-                data[key] = value
-                return
-            raw = getattr(config, "config", None)
-            if isinstance(raw, dict):
-                raw[key] = value
-                return
-            try:
-                setattr(config, key, value)
-            except Exception:
-                logger.debug("[PrivateCompanionPage] 配置字段写入失败: %s", key)
+        return
+
+    def _set_schema_group_config_value(self, config: Any, key: str, value: Any) -> bool:
+        group_key = self._schema_group_for_key(key)
+        if not group_key:
+            return False
+
+        def set_in_group(target: dict[str, Any]) -> bool:
+            group = target.get(group_key)
+            if isinstance(group, dict):
+                group[key] = value
+                return True
+            return False
+
+        if isinstance(config, dict) and set_in_group(config):
+            return True
+        for attr in ("data", "config"):
+            target = getattr(config, attr, None)
+            if isinstance(target, dict) and set_in_group(target):
+                return True
+        return False
 
     def _config_overlay(self, overrides: dict[str, Any]) -> Any:
         base = getattr(self.plugin, "config", {}) or {}
@@ -6218,15 +6321,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             def get(self, item: str, default: Any = None) -> Any:
                 if item in overrides:
                     return overrides[item]
-                getter = getattr(base, "get", None)
-                if callable(getter):
-                    try:
-                        return getter(item, default)
-                    except Exception:
-                        return default
-                if isinstance(base, dict):
-                    return base.get(item, default)
-                return getattr(base, item, default)
+                return _flat_get(base, item, getattr(base, item, default))
 
         return _Overlay()
 
@@ -6239,10 +6334,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         # 非 dict 对象兜底
         data = getattr(config, "data", None)
         if isinstance(data, dict):
-            return str(data.get(key, "") or "")
+            value = _flat_get(data, key, None)
+            if value not in (None, ""):
+                return str(value)
         raw = getattr(config, "config", None)
         if isinstance(raw, dict):
-            return str(raw.get(key, "") or "")
+            value = _flat_get(raw, key, None)
+            if value not in (None, ""):
+                return str(value)
         try:
             return str(getattr(config, key, "") or "")
         except Exception:
@@ -6270,8 +6369,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         config = getattr(self.plugin, "config", None)
         return any(callable(getattr(config, method_name, None)) for method_name in ("save_config", "save", "save_conf"))
 
-    @staticmethod
-    def _allowed_feature_keys() -> set[str]:
+    def _allowed_feature_keys(self) -> set[str]:
         return {
             "enable_proactive_only_mode",
             "enable_mai_style_integration",
@@ -6367,14 +6465,29 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "creative_hidden_mode",
         }
 
-    @staticmethod
-    def _allowed_provider_keys() -> set[str]:
-        return {
+    def _allowed_provider_keys(self) -> set[str]:
+        keys = {
             "LLM_PROVIDER_ID",
             "AUX_PROVIDER_ID",
             "tts_conversion_provider_id",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
+            "REST_WAKEUP_PROVIDER_ID",
+            "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
+            "COMPANION_MEMORY_PROVIDER_ID",
+            "DIALOGUE_EPISODE_PROVIDER_ID",
+            "GROUP_INTERJECT_PROVIDER_ID",
+            "GROUP_EPISODE_PROVIDER_ID",
+            "GROUP_SLANG_PROVIDER_ID",
+            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
+            "FORWARD_MESSAGE_PROVIDER_ID",
+            "PLUGIN_VISION_PROVIDER_ID",
+            "PRIVATE_READING_VISION_PROVIDER_ID",
+            "NEWS_PROVIDER_ID",
+            "WEB_EXPLORATION_PROVIDER_ID",
+            "EMOTION_JUDGEMENT_PROVIDER_ID",
         }
+        keys.update(self._schema_provider_keys(public_only=True))
+        return keys
 
     @staticmethod
     def _allowed_setting_keys() -> set[str]:
@@ -6658,6 +6771,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "atrelay_default_relay_style",
             "atrelay_multi_target_limit",
         }
+        keys.update(self._schema_setting_keys(public_only=True))
+        return keys
 
     def _normalize_setting_value(self, key: str, value: Any) -> Any:
         if key in self._schema_bool_keys():
@@ -6931,6 +7046,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(0, min(100, int(value)))
             except (TypeError, ValueError):
                 return 65
+        if key == "proactive_persona_judge_send_threshold":
+            try:
+                return max(0, min(100, int(value)))
+            except (TypeError, ValueError):
+                return 62
         if key == "quote_skip_short_reply_chars":
             try:
                 return max(0, min(120, int(value)))
@@ -6941,6 +7061,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return max(1, min(12, int(value)))
             except (TypeError, ValueError):
                 return 4
+        if key == "proactive_reply_context_hours":
+            try:
+                return max(1, min(72, int(value)))
+            except (TypeError, ValueError):
+                return 12
+        if key == "proactive_persona_judge_cache_minutes":
+            try:
+                return max(5, min(720, int(value)))
+            except (TypeError, ValueError):
+                return 180
+        if key == "max_proactive_plan_lag_minutes":
+            try:
+                return max(5, min(1440, int(value)))
+            except (TypeError, ValueError):
+                return 180
         if key in {
             "check_interval_seconds",
             "daily_token_limit",
@@ -7218,7 +7353,55 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_atrelay_llm_rewrite",
         }:
             return self._normalize_bool_value(value)
+        schema_item = self._schema_item_for_key(key)
+        if schema_item:
+            return self._normalize_schema_setting_value(value, schema_item)
         return self._single_line(value, 240)
+
+    def _normalize_schema_setting_value(self, value: Any, schema_item: dict[str, Any]) -> Any:
+        item_type = str(schema_item.get("type") or "").lower()
+        default = schema_item.get("default")
+        slider = schema_item.get("slider") if isinstance(schema_item.get("slider"), dict) else {}
+
+        def clamp_number(raw: float) -> float:
+            if "min" in slider:
+                try:
+                    raw = max(float(slider.get("min")), raw)
+                except (TypeError, ValueError):
+                    pass
+            if "max" in slider:
+                try:
+                    raw = min(float(slider.get("max")), raw)
+                except (TypeError, ValueError):
+                    pass
+            return raw
+
+        if item_type == "bool":
+            return self._normalize_bool_value(value)
+        if item_type == "int":
+            try:
+                return int(round(clamp_number(float(value))))
+            except (TypeError, ValueError):
+                try:
+                    return int(default)
+                except (TypeError, ValueError):
+                    return 0
+        if item_type == "float":
+            try:
+                return clamp_number(float(value))
+            except (TypeError, ValueError):
+                try:
+                    return float(default)
+                except (TypeError, ValueError):
+                    return 0.0
+        if item_type == "list":
+            if isinstance(value, list):
+                return [self._single_line(item, 160) for item in value if self._single_line(item, 160)]
+            text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+            parts = re.split(r"[\n,，、\s]+", text)
+            return [self._single_line(item, 160) for item in parts if self._single_line(item, 160)]
+        limit = 4000 if item_type == "text" else 1000
+        return str(value if value is not None else default or "").strip()[:limit]
 
     @staticmethod
     def _normalize_multiline_source_config(value: Any, *, limit: int = 4000) -> str:
@@ -7243,23 +7426,81 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 lines.append(line)
         return "\n".join(lines)[:limit].strip()
 
-    def _schema_bool_keys(self) -> set[str]:
-        cached = self._schema_bool_key_cache
+    def _schema_key_index(self) -> dict[str, Any]:
+        cached = self._schema_key_index_cache
         if cached is not None:
             return cached
-        keys: set[str] = set()
+        index: dict[str, Any] = {
+            "all": set(),
+            "public": set(),
+            "bool": set(),
+            "public_bool": set(),
+            "provider": set(),
+            "public_provider": set(),
+            "group": {},
+            "item": {},
+        }
+
+        def visit(items: dict[str, Any], group_key: str = "") -> None:
+            for raw_key, item in items.items():
+                if not isinstance(item, dict):
+                    continue
+                key = str(raw_key)
+                item_type = str(item.get("type") or "")
+                if item_type == "object" and isinstance(item.get("items"), dict):
+                    visit(item["items"], key)
+                    continue
+                hidden = bool(item.get("invisible"))
+                index["group"][key] = group_key
+                index["item"][key] = item
+                index["all"].add(key)
+                if not hidden:
+                    index["public"].add(key)
+                if item_type == "bool":
+                    index["bool"].add(key)
+                    if not hidden:
+                        index["public_bool"].add(key)
+                if self._schema_item_is_provider(key, item):
+                    index["provider"].add(key)
+                    if not hidden:
+                        index["public_provider"].add(key)
+
         try:
             raw = json.loads(Path(__file__).with_name("_conf_schema.json").read_text(encoding="utf-8"))
             if isinstance(raw, dict):
-                keys = {
-                    str(key)
-                    for key, item in raw.items()
-                    if isinstance(item, dict) and item.get("type") == "bool"
-                }
+                visit(raw)
         except Exception as exc:
-            logger.debug("[PrivateCompanionPage] 读取配置 schema 布尔字段失败: %s", exc)
-        self._schema_bool_key_cache = keys
-        return keys
+            logger.debug("[PrivateCompanionPage] 读取配置 schema 索引失败: %s", exc)
+        self._schema_key_index_cache = index
+        return index
+
+    @staticmethod
+    def _schema_item_is_provider(key: str, item: dict[str, Any]) -> bool:
+        if item.get("_special") == "select_provider":
+            return True
+        return key.endswith("PROVIDER_ID") or key.endswith("_provider_id") or key.endswith("provider_id")
+
+    def _schema_setting_keys(self, *, public_only: bool = False) -> set[str]:
+        index = self._schema_key_index()
+        key_name = "public" if public_only else "all"
+        provider_key_name = "public_provider" if public_only else "provider"
+        return set(index[key_name]) - set(index[provider_key_name])
+
+    def _schema_provider_keys(self, *, public_only: bool = False) -> set[str]:
+        index = self._schema_key_index()
+        return set(index["public_provider" if public_only else "provider"])
+
+    def _schema_bool_keys(self) -> set[str]:
+        return set(self._schema_key_index()["bool"])
+
+    def _schema_group_for_key(self, key: str) -> str:
+        group_map = self._schema_key_index().get("group")
+        return str(group_map.get(key, "") if isinstance(group_map, dict) else "")
+
+    def _schema_item_for_key(self, key: str) -> dict[str, Any]:
+        item_map = self._schema_key_index().get("item")
+        item = item_map.get(key) if isinstance(item_map, dict) else None
+        return item if isinstance(item, dict) else {}
 
     @classmethod
     def _normalize_worldbook_member_id(cls, value: Any) -> str:
@@ -8477,6 +8718,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             signature = self._single_line(item.get("signature"), 120)
             topic = self._single_line(item.get("topic"), 100)
             motive = self._single_line(item.get("motive"), 180)
+            semantic_kind = self._single_line(item.get("semantic_kind"), 40)
+            semantic_anchor_type = self._single_line(item.get("semantic_anchor_type"), 40)
+            semantic_score = self._int(item.get("semantic_score"))
+            semantic_pressure = self._int(item.get("semantic_pressure"))
+            semantic_risk = self._int(item.get("semantic_risk"))
+            semantic_note = self._single_line(item.get("semantic_note"), 180)
             sanitizer = getattr(self.plugin, "_sanitize_friend_proactive_plan_fields", None)
             if isinstance(user, dict) and callable(sanitizer):
                 sanitized = sanitizer(
@@ -8523,6 +8770,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                         "topic": topic,
                         "motive": motive,
                         "score": self._int(item.get("score")),
+                        "semantic_kind": semantic_kind,
+                        "semantic_anchor_type": semantic_anchor_type,
+                        "semantic_score": semantic_score,
+                        "semantic_pressure": semantic_pressure,
+                        "semantic_risk": semantic_risk,
+                        "semantic_note": semantic_note,
                         "status": status,
                         "note": note,
                         "repeat_count": repeat_count,
@@ -8539,6 +8792,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             merged["last_seen_ts"] = max(self._float(merged.get("last_seen_ts")), last_seen, created)
             merged["scheduled_ts"] = max(self._float(merged.get("scheduled_ts")), scheduled)
             merged["score"] = max(self._int(merged.get("score")), self._int(item.get("score")))
+            if semantic_score >= self._int(merged.get("semantic_score")):
+                merged["semantic_kind"] = semantic_kind
+                merged["semantic_anchor_type"] = semantic_anchor_type
+                merged["semantic_score"] = semantic_score
+                merged["semantic_pressure"] = semantic_pressure
+                merged["semantic_risk"] = semantic_risk
+                merged["semantic_note"] = semantic_note
             if topic:
                 merged["topic"] = topic
             if motive:
@@ -8581,9 +8841,131 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         audit_status_counts: dict[str, int] = {}
         user_states: list[dict[str, Any]] = []
 
+        def readiness_snapshot(user: dict[str, Any]) -> dict[str, Any]:
+            getter = getattr(self.plugin, "_proactive_inner_readiness", None)
+            if not callable(getter):
+                return {}
+            try:
+                raw = getter(user, now=now)
+            except Exception:
+                return {}
+            if not isinstance(raw, dict):
+                return {}
+            drive = raw.get("drive") if isinstance(raw.get("drive"), dict) else {}
+            temperature = raw.get("temperature") if isinstance(raw.get("temperature"), dict) else {}
+            return {
+                "score": round(self._float(raw.get("score")), 3),
+                "label": self._single_line(raw.get("label"), 80),
+                "detail": self._single_line(raw.get("detail"), 220),
+                "drive_score": round(self._float(drive.get("score")), 3) if drive else 0,
+                "drive_label": self._single_line(drive.get("label"), 40) if drive else "",
+                "drive_detail": self._single_line(drive.get("detail"), 140) if drive else "",
+                "temperature_score": round(self._float(temperature.get("score")), 3) if temperature else 0,
+                "temperature_label": self._single_line(temperature.get("label"), 40) if temperature else "",
+                "temperature_detail": self._single_line(temperature.get("detail"), 140) if temperature else "",
+            }
+
+        def planned_semantic_snapshot(user: dict[str, Any]) -> dict[str, Any]:
+            semantic_kind = self._single_line(user.get("planned_proactive_semantic_kind"), 40)
+            anchor_type = self._single_line(user.get("planned_proactive_anchor_type"), 40)
+            semantic_score = self._int(user.get("planned_proactive_semantic_score"))
+            semantic_note = self._single_line(user.get("planned_proactive_semantic_note"), 180)
+            pressure = 0
+            risk = 0
+            getter = getattr(self.plugin, "_planned_proactive_semantics", None)
+            if callable(getter):
+                try:
+                    semantics = getter(user)
+                except Exception:
+                    semantics = {}
+                if isinstance(semantics, dict):
+                    semantic_kind = semantic_kind or self._single_line(semantics.get("kind"), 40)
+                    anchor_type = anchor_type or self._single_line(semantics.get("anchor_type"), 40)
+                    if semantic_score <= 0:
+                        semantic_score = int(max(0.0, min(1.0, self._float(semantics.get("score")))) * 100)
+                    pressure = int(max(0.0, min(1.0, self._float(semantics.get("pressure")))) * 100)
+                    risk = int(max(0.0, min(1.0, self._float(semantics.get("risk")))) * 100)
+                    semantic_note = semantic_note or self._single_line(semantics.get("note"), 180)
+            return {
+                "semantic_kind": semantic_kind,
+                "semantic_anchor_type": anchor_type,
+                "semantic_score": semantic_score,
+                "semantic_pressure": pressure,
+                "semantic_risk": risk,
+                "semantic_note": semantic_note,
+            }
+
+        def planned_window_snapshot(user: dict[str, Any]) -> dict[str, Any]:
+            start_ts = self._float(user.get("planned_proactive_window_start_at"))
+            best_until_ts = self._float(user.get("planned_proactive_best_until_at"))
+            expire_ts = self._float(user.get("planned_proactive_expire_at"))
+            phase = ""
+            detail = ""
+            phase_getter = getattr(self.plugin, "_planned_impulse_window_phase", None)
+            if callable(phase_getter):
+                try:
+                    phase, detail = phase_getter(user, now=now)
+                except Exception:
+                    phase, detail = "", ""
+            impulse_value = 0
+            value_getter = getattr(self.plugin, "_planned_impulse_value", None)
+            if callable(value_getter):
+                try:
+                    impulse_value = int(max(0.0, min(1.0, self._float(value_getter(user, now=now)))) * 100)
+                except Exception:
+                    impulse_value = 0
+            return {
+                "window_start_ts": start_ts,
+                "window_start": self.plugin._format_timestamp_elapsed(start_ts),
+                "best_until_ts": best_until_ts,
+                "best_until": self.plugin._format_timestamp_elapsed(best_until_ts),
+                "expire_ts": expire_ts,
+                "expire": self.plugin._format_timestamp_elapsed(expire_ts),
+                "window_phase": self._single_line(phase, 24),
+                "window_detail": self._single_line(detail, 160),
+                "impulse_value": impulse_value,
+            }
+
+        def afterglow_snapshot(user: dict[str, Any]) -> dict[str, Any]:
+            raw = user.get("proactive_afterglow")
+            if not isinstance(raw, dict):
+                return {}
+            ts = self._float(raw.get("ts"))
+            return {
+                "ts": ts,
+                "time": self.plugin._format_timestamp_elapsed(ts),
+                "status": self._single_line(raw.get("status"), 32),
+                "label": self._single_line(raw.get("label"), 180),
+                "next_tendency": self._single_line(raw.get("next_tendency"), 180),
+                "reason": self._single_line(raw.get("reason"), 50),
+                "action": self._single_line(raw.get("action"), 50),
+                "semantic_kind": self._single_line(raw.get("semantic_kind"), 40),
+                "anchor_type": self._single_line(raw.get("anchor_type"), 40),
+                "semantic_score": self._int(raw.get("semantic_score")),
+            }
+
+        def hesitation_snapshot(user: dict[str, Any]) -> dict[str, Any]:
+            raw = user.get("recent_proactive_hesitations")
+            latest = raw[-1] if isinstance(raw, list) and raw and isinstance(raw[-1], dict) else {}
+            ts = self._float(latest.get("ts") if isinstance(latest, dict) else 0) or self._float(user.get("last_proactive_hesitation_at"))
+            note = self._single_line(latest.get("note") if isinstance(latest, dict) else "", 160) or self._single_line(user.get("last_proactive_hesitation_note"), 160)
+            if not ts and not note:
+                return {}
+            return {
+                "ts": ts,
+                "time": self.plugin._format_timestamp_elapsed(ts),
+                "note": note,
+                "count": self._int(latest.get("count") if isinstance(latest, dict) else 0),
+                "topic": self._single_line(latest.get("topic") if isinstance(latest, dict) else "", 80),
+                "motive": self._single_line(latest.get("motive") if isinstance(latest, dict) else "", 140),
+            }
+
         for user_id, user in users.items():
             if not isinstance(user, dict):
                 continue
+            readiness = readiness_snapshot(user)
+            afterglow = afterglow_snapshot(user)
+            hesitation = hesitation_snapshot(user)
             if bool(user.get("enabled", True)):
                 user_summary_for_state = self._user_summary(str(user_id), user)
                 effective_limit = (
@@ -8609,6 +8991,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                         "last_skip_prefix": self._single_line(user.get("last_proactive_skip_prefix"), 20),
                         "last_sent_ts": self._float(user.get("last_sent")),
                         "last_sent": self.plugin._format_timestamp_elapsed(user.get("last_sent", 0)),
+                        "inner_readiness": readiness,
+                        "afterglow": afterglow,
+                        "hesitation": hesitation,
                     }
                 )
             scheduled_ts = self._float(user.get("next_proactive_at"))
@@ -8662,6 +9047,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 action = self._single_line(sanitized.get("action"), 40) or action
                 topic = self._single_line(sanitized.get("topic"), 80)
                 motive = self._single_line(sanitized.get("motive"), 180)
+            semantic = planned_semantic_snapshot(user)
+            window = planned_window_snapshot(user)
+            model_result = user.get("planned_proactive_model_judge_result")
+            if not isinstance(model_result, dict):
+                model_result = {}
+            judged_at = self._float(user.get("planned_proactive_model_judge_at"))
             items.append(
                 {
                     "user_id": str(user_id),
@@ -8676,6 +9067,21 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "reason_detail": self._proactive_reason_detail(reason=reason, source=source, topic=topic, motive=motive, note=user.get("last_proactive_skip_reason")),
                     "topic": topic,
                     "motive": motive,
+                    "planned_impulse_id": self._single_line(user.get("planned_proactive_impulse_id"), 40),
+                    "planned_candidate_id": self._single_line(user.get("planned_candidate_id"), 40),
+                    **semantic,
+                    **window,
+                    "inner_readiness": readiness,
+                    "afterglow": afterglow,
+                    "hesitation": hesitation,
+                    "model_judge": {
+                        "decision": self._single_line(model_result.get("decision"), 24),
+                        "score": self._int(model_result.get("score")),
+                        "reason": self._single_line(model_result.get("reason"), 140),
+                        "cached": bool(model_result.get("cached")),
+                        "judged_ts": judged_at,
+                        "judged": self.plugin._format_timestamp_elapsed(judged_at),
+                    } if model_result or judged_at > 0 else {},
                     "scheduled_ts": scheduled_ts,
                     "scheduled": self.plugin._format_timestamp_elapsed(scheduled_ts),
                     "last_skip": self.plugin._format_timestamp_elapsed(user.get("last_proactive_skip_at", 0)),
@@ -8770,6 +9176,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "action": audit_action,
                 "topic": audit_topic,
                 "motive": audit_motive,
+                "semantic_kind": self._single_line(raw.get("semantic_kind"), 40),
+                "semantic_anchor_type": self._single_line(raw.get("semantic_anchor_type"), 40),
+                "semantic_score": self._int(raw.get("semantic_score")),
+                "semantic_pressure": self._int(raw.get("semantic_pressure")),
+                "semantic_risk": self._int(raw.get("semantic_risk")),
+                "semantic_note": self._single_line(raw.get("semantic_note"), 180),
                 "note": note,
                 "text_preview": self._display_message_text(raw.get("text_preview"), 180),
                 "scheduled_ts": self._float(raw.get("scheduled_ts")),
@@ -9239,18 +9651,28 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         return rows[-limit:]
 
     @staticmethod
-    def _int(value: Any) -> int:
+    def _int(value: Any, default: int = 0, minimum: int | None = None, maximum: int | None = None) -> int:
         try:
-            return int(value)
+            parsed = int(value)
         except (TypeError, ValueError):
-            return 0
+            parsed = default
+        if minimum is not None:
+            parsed = max(minimum, parsed)
+        if maximum is not None:
+            parsed = min(maximum, parsed)
+        return parsed
 
     @staticmethod
-    def _float(value: Any) -> float:
+    def _float(value: Any, default: float = 0.0, minimum: float | None = None, maximum: float | None = None) -> float:
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError):
-            return 0.0
+            parsed = default
+        if minimum is not None:
+            parsed = max(minimum, parsed)
+        if maximum is not None:
+            parsed = min(maximum, parsed)
+        return parsed
 
     def _segment_from_story_windows(self, snapshot: dict[str, Any]) -> dict[str, Any] | None:
         minutes: list[int] = []

@@ -266,6 +266,1263 @@ class ProactiveEngineMixin:
         self.data["proactive_candidate_pool"] = kept[-120:]
         return self.data["proactive_candidate_pool"]
 
+    def _proactive_impulse_pool(self, user: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = user.get("proactive_impulses")
+        if not isinstance(raw, list):
+            raw = []
+            user["proactive_impulses"] = raw
+        return raw
+
+    def _cleanup_proactive_impulses(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        check_now = _now_ts() if now is None else now
+        kept: list[dict[str, Any]] = []
+        for item in self._proactive_impulse_pool(user):
+            if not isinstance(item, dict):
+                continue
+            created = _safe_float(item.get("created_ts"), 0)
+            updated = _safe_float(item.get("updated_ts"), created)
+            state = str(item.get("state") or "queued").strip().lower()
+            expire_at = _safe_float(item.get("expire_at"), 0)
+            if state in {"sent", "blocked", "cancelled", "dropped"}:
+                if max(created, updated, expire_at) > 0 and check_now - max(created, updated, expire_at) <= 12 * 3600:
+                    kept.append(item)
+                continue
+            if expire_at > 0 and check_now - expire_at > 2 * 3600:
+                continue
+            if created > 0 and check_now - created > 48 * 3600:
+                continue
+            kept.append(item)
+        user["proactive_impulses"] = kept[-16:]
+        return user["proactive_impulses"]
+
+    def _proactive_impulse_signature(self, item: dict[str, Any]) -> str:
+        return self._proactive_topic_signature(
+            item.get("reason"),
+            item.get("source"),
+            item.get("topic"),
+            item.get("motive"),
+        )
+
+    def _proactive_impulse_default_window_seconds(self, reason: str) -> tuple[float, float]:
+        if reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
+            return 70 * 60.0, 35 * 60.0
+        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share"}:
+            return 45 * 60.0, 60 * 60.0
+        if reason in {"quiet_care", "check_in", "state_share"}:
+            return 55 * 60.0, 80 * 60.0
+        return 50 * 60.0, 70 * 60.0
+
+    def _event_time_window_bounds(
+        self,
+        event: dict[str, Any],
+        *,
+        reason: str,
+        now: float | None = None,
+    ) -> tuple[float, float, float, float]:
+        check_now = _now_ts() if now is None else now
+        preferred_ts = _safe_float(event.get("_scheduled_ts"), 0)
+        start_ts = preferred_ts
+        end_ts = 0.0
+        window = str(event.get("window") or "").strip()
+        if window:
+            start_minute, end_minute = self._parse_window_minutes(window)
+            if start_minute is not None and end_minute is not None:
+                when = self._environment_fromtimestamp(check_now)
+                date_text = str(event.get("date") or "").strip()
+                try:
+                    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_text):
+                        base_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+                    else:
+                        base_date = when.date()
+                except Exception:
+                    base_date = when.date()
+                tzinfo = when.tzinfo
+                start_dt = datetime.combine(base_date, datetime.min.time(), tzinfo=tzinfo) + timedelta(minutes=start_minute)
+                end_dt = datetime.combine(base_date, datetime.min.time(), tzinfo=tzinfo) + timedelta(minutes=end_minute)
+                start_ts = start_dt.timestamp()
+                end_ts = end_dt.timestamp()
+        if preferred_ts <= 0:
+            preferred_ts = start_ts if start_ts > 0 else check_now + 60
+        if start_ts <= 0:
+            start_ts = preferred_ts
+        active_span, grace_span = self._proactive_impulse_default_window_seconds(reason)
+        if end_ts <= 0:
+            end_ts = max(start_ts + 60.0, preferred_ts + active_span)
+        expire_at = max(end_ts + grace_span, preferred_ts + 5 * 60.0)
+        return start_ts, preferred_ts, end_ts, expire_at
+
+    def _build_proactive_impulse(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str,
+        action: str,
+        motive: str,
+        topic: str,
+        source: str,
+        window_start_at: float,
+        preferred_ts: float,
+        best_until_at: float,
+        expire_at: float,
+        chain: list[dict[str, Any]] | None = None,
+        trigger_message_id: str = "",
+        trigger_umo: str = "",
+        trigger_ts: float = 0,
+        quota_exempt: bool = False,
+        context_key: str = "",
+        context: Any = None,
+        opener_mode: str = "",
+        followup_kind: str = "",
+    ) -> dict[str, Any]:
+        role = self._private_user_role(user)
+        impulse_reason = _single_line(reason, 40) or "check_in"
+        impulse_action = _single_line(action, 40) or "message"
+        impulse_topic = _single_line(topic, 80)
+        impulse_motive = self._normalize_internal_motive_text(_single_line(motive, 180))
+        salience = 0.54
+        warmth = 0.46
+        urgency = 0.38
+        if source in {"followup", "timer", "pending_followup"}:
+            salience += 0.2
+            urgency += 0.12
+        elif source in {"story", "event"}:
+            salience += 0.12
+        elif source == "random":
+            warmth += 0.06
+        if impulse_reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
+            warmth += 0.1
+            urgency += 0.08
+        if impulse_reason in {"quiet_care", "important_date_share"}:
+            warmth += 0.16
+        if role == "friend":
+            warmth = max(0.18, warmth - 0.08)
+            urgency = max(0.16, urgency - 0.04)
+        decay_per_hour = 0.06 if source in {"followup", "timer"} else 0.1
+        persona_alignment = self._proactive_persona_alignment(
+            user,
+            reason=impulse_reason,
+            action=impulse_action,
+            motive=impulse_motive,
+            topic=impulse_topic,
+            source=source,
+        )
+        semantics = self._proactive_candidate_semantics(
+            user,
+            reason=impulse_reason,
+            action=impulse_action,
+            motive=impulse_motive,
+            topic=impulse_topic,
+            source=source,
+            context=context,
+            chain=chain,
+            trigger_message_id=trigger_message_id,
+            trigger_ts=trigger_ts,
+        )
+        return {
+            "id": uuid.uuid4().hex[:12],
+            "created_ts": _now_ts(),
+            "updated_ts": _now_ts(),
+            "state": "queued",
+            "source": _single_line(source, 40) or "random",
+            "reason": impulse_reason,
+            "action": impulse_action,
+            "topic": impulse_topic,
+            "motive": impulse_motive,
+            "window_start_at": max(0.0, float(window_start_at or preferred_ts or _now_ts())),
+            "preferred_ts": max(0.0, float(preferred_ts or window_start_at or _now_ts())),
+            "best_until_at": max(float(best_until_at or preferred_ts or _now_ts()), float(window_start_at or 0.0)),
+            "expire_at": max(float(expire_at or best_until_at or preferred_ts or _now_ts()), float(best_until_at or 0.0)),
+            "salience": max(0.0, min(1.0, salience)),
+            "warmth": max(0.0, min(1.0, warmth)),
+            "urgency": max(0.0, min(1.0, urgency)),
+            "decay_per_hour": max(0.01, min(0.5, decay_per_hour)),
+            "persona_fit": max(0.0, min(1.0, _safe_float(persona_alignment.get("score"), 0.5))),
+            "persona_fit_note": _single_line(persona_alignment.get("note"), 160),
+            "persona_fit_blocker": bool(persona_alignment.get("blocker")),
+            "semantic_kind": _single_line(semantics.get("kind"), 40),
+            "semantic_anchor_type": _single_line(semantics.get("anchor_type"), 40),
+            "semantic_score": max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))),
+            "semantic_anchor_score": max(0.0, min(1.0, _safe_float(semantics.get("anchor_score"), 0.5))),
+            "semantic_pressure": max(0.0, min(1.0, _safe_float(semantics.get("pressure"), 0.4))),
+            "semantic_risk": max(0.0, min(1.0, _safe_float(semantics.get("risk"), 0.0))),
+            "semantic_note": _single_line(semantics.get("note"), 180),
+            "semantic_blocker": bool(semantics.get("blocker")),
+            "signature": self._proactive_topic_signature(impulse_reason, source, impulse_topic, impulse_motive),
+            "chain": [] if role == "friend" else [dict(item) for item in (chain or []) if isinstance(item, dict)],
+            "trigger_message_id": _single_line(trigger_message_id, 120),
+            "trigger_umo": _single_line(trigger_umo, 160),
+            "trigger_ts": _safe_float(trigger_ts, 0),
+            "quota_exempt": bool(quota_exempt),
+            "context_key": _single_line(context_key, 60),
+            "context": dict(context) if isinstance(context, dict) else context,
+            "opener_mode": _single_line(opener_mode, 24),
+            "followup_kind": _single_line(followup_kind, 32),
+        }
+
+    def _queue_proactive_impulse(
+        self,
+        user: dict[str, Any],
+        impulse: dict[str, Any],
+    ) -> dict[str, Any]:
+        pool = self._cleanup_proactive_impulses(user)
+        signature = self._proactive_impulse_signature(impulse)
+        reason = _single_line(impulse.get("reason"), 40)
+        source = _single_line(impulse.get("source"), 40)
+        for existing in reversed(pool):
+            if not isinstance(existing, dict):
+                continue
+            if str(existing.get("state") or "queued") not in {"queued", "deferred"}:
+                continue
+            if str(existing.get("reason") or "") != reason:
+                continue
+            if str(existing.get("source") or "") != source:
+                continue
+            if not self._topic_signature_similar(signature, str(existing.get("signature") or "")):
+                continue
+            existing_start = _safe_float(existing.get("window_start_at"), 0)
+            incoming_start = _safe_float(impulse.get("window_start_at"), 0)
+            existing_preferred = _safe_float(existing.get("preferred_ts"), 0)
+            incoming_preferred = _safe_float(impulse.get("preferred_ts"), 0)
+            existing["updated_ts"] = _now_ts()
+            if existing_start <= 0:
+                existing["window_start_at"] = incoming_start
+            elif incoming_start > 0:
+                existing["window_start_at"] = min(existing_start, incoming_start)
+            if existing_preferred <= 0:
+                existing["preferred_ts"] = incoming_preferred
+            elif incoming_preferred > 0:
+                existing["preferred_ts"] = min(existing_preferred, incoming_preferred)
+            existing["best_until_at"] = max(
+                _safe_float(existing.get("best_until_at"), 0),
+                _safe_float(impulse.get("best_until_at"), 0),
+            )
+            existing["expire_at"] = max(
+                _safe_float(existing.get("expire_at"), 0),
+                _safe_float(impulse.get("expire_at"), 0),
+            )
+            existing["salience"] = max(_safe_float(existing.get("salience"), 0.0), _safe_float(impulse.get("salience"), 0.0))
+            existing["warmth"] = max(_safe_float(existing.get("warmth"), 0.0), _safe_float(impulse.get("warmth"), 0.0))
+            existing["urgency"] = max(_safe_float(existing.get("urgency"), 0.0), _safe_float(impulse.get("urgency"), 0.0))
+            existing_fit = _safe_float(existing.get("persona_fit"), 0.0)
+            incoming_fit = _safe_float(impulse.get("persona_fit"), 0.0)
+            if incoming_fit > 0:
+                existing["persona_fit"] = max(existing_fit, incoming_fit)
+            if incoming_fit >= existing_fit:
+                existing["persona_fit_blocker"] = bool(impulse.get("persona_fit_blocker"))
+            elif impulse.get("persona_fit_blocker"):
+                existing["persona_fit_blocker"] = True
+            if _single_line(impulse.get("persona_fit_note"), 160):
+                existing["persona_fit_note"] = _single_line(impulse.get("persona_fit_note"), 160)
+            existing_semantic = _safe_float(existing.get("semantic_score"), 0.0)
+            incoming_semantic = _safe_float(impulse.get("semantic_score"), 0.0)
+            if incoming_semantic >= existing_semantic:
+                for key in (
+                    "semantic_kind",
+                    "semantic_anchor_type",
+                    "semantic_score",
+                    "semantic_anchor_score",
+                    "semantic_pressure",
+                    "semantic_risk",
+                    "semantic_note",
+                    "semantic_blocker",
+                ):
+                    if key in impulse:
+                        existing[key] = impulse.get(key)
+            elif impulse.get("semantic_blocker"):
+                existing["semantic_blocker"] = True
+                existing["semantic_risk"] = max(_safe_float(existing.get("semantic_risk"), 0.0), _safe_float(impulse.get("semantic_risk"), 0.0))
+            if _single_line(impulse.get("topic"), 80):
+                existing["topic"] = _single_line(impulse.get("topic"), 80)
+            if _single_line(impulse.get("motive"), 180):
+                existing["motive"] = self._normalize_internal_motive_text(_single_line(impulse.get("motive"), 180))
+            if impulse.get("chain"):
+                existing["chain"] = [dict(item) for item in impulse.get("chain", []) if isinstance(item, dict)]
+            if _single_line(impulse.get("trigger_message_id"), 120):
+                existing["trigger_message_id"] = _single_line(impulse.get("trigger_message_id"), 120)
+            if _single_line(impulse.get("trigger_umo"), 160):
+                existing["trigger_umo"] = _single_line(impulse.get("trigger_umo"), 160)
+            if _safe_float(impulse.get("trigger_ts"), 0) > 0:
+                existing["trigger_ts"] = _safe_float(impulse.get("trigger_ts"), 0)
+            if impulse.get("quota_exempt"):
+                existing["quota_exempt"] = True
+            if _single_line(impulse.get("context_key"), 60) and isinstance(impulse.get("context"), dict):
+                existing["context_key"] = _single_line(impulse.get("context_key"), 60)
+                existing["context"] = dict(impulse.get("context"))
+            return existing
+        item = dict(impulse)
+        item["id"] = _single_line(item.get("id"), 20) or uuid.uuid4().hex[:12]
+        item["signature"] = signature
+        item["state"] = str(item.get("state") or "queued")
+        pool.append(item)
+        del pool[:-16]
+        return item
+
+    def _candidate_to_impulse(
+        self,
+        user: dict[str, Any],
+        candidate: dict[str, Any],
+        *,
+        source: str,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(candidate, dict):
+            return None
+        check_now = _now_ts() if now is None else now
+        reason = _single_line(candidate.get("reason"), 40) or "check_in"
+        action = _single_line(candidate.get("action"), 40) or "message"
+        motive = _single_line(candidate.get("motive"), 180)
+        topic = _single_line(candidate.get("topic"), 80)
+        window_start_at = _safe_float(candidate.get("window_start_at"), 0)
+        preferred_ts = _safe_float(candidate.get("preferred_ts"), 0)
+        best_until_at = _safe_float(candidate.get("best_until_at"), 0)
+        expire_at = _safe_float(candidate.get("expire_at"), 0)
+        if any(value <= 0 for value in (window_start_at, preferred_ts, best_until_at, expire_at)):
+            window_start_at, preferred_ts, best_until_at, expire_at = self._event_time_window_bounds(
+                candidate,
+                reason=reason,
+                now=check_now,
+            )
+        return self._build_proactive_impulse(
+            user,
+            reason=reason,
+            action=action,
+            motive=motive,
+            topic=topic,
+            source=source,
+            window_start_at=window_start_at,
+            preferred_ts=preferred_ts,
+            best_until_at=best_until_at,
+            expire_at=expire_at,
+            chain=candidate.get("chain") if isinstance(candidate.get("chain"), list) else [],
+            trigger_message_id=self._candidate_trigger_message_id(candidate),
+            trigger_umo=_single_line(candidate.get("trigger_umo") or candidate.get("umo"), 160),
+            trigger_ts=_safe_float(candidate.get("trigger_ts") or candidate.get("created_ts"), 0),
+            quota_exempt=bool(candidate.get("_free_screen_peek")),
+            context_key=_single_line(candidate.get("context_key"), 60),
+            context=candidate.get("context"),
+            opener_mode="name_only" if candidate.get("_name_only_opener") else "",
+            followup_kind=(
+                "suspended_opener"
+                if candidate.get("_opener_followup")
+                else "chain_followup"
+                if candidate.get("_chain_followup")
+                else ""
+            ),
+        )
+
+    def _impulse_ready_now(self, impulse: dict[str, Any], *, now: float | None = None) -> bool:
+        check_now = _now_ts() if now is None else now
+        return (
+            str(impulse.get("state") or "queued") in {"queued", "deferred"}
+            and check_now >= _safe_float(impulse.get("window_start_at"), 0)
+            and check_now <= _safe_float(impulse.get("expire_at"), 0)
+        )
+
+    def _score_proactive_impulse(
+        self,
+        user: dict[str, Any],
+        impulse: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> float:
+        check_now = _now_ts() if now is None else now
+        created = _safe_float(impulse.get("created_ts"), check_now)
+        preferred_ts = _safe_float(impulse.get("preferred_ts"), _safe_float(impulse.get("window_start_at"), check_now))
+        best_until_at = _safe_float(impulse.get("best_until_at"), preferred_ts)
+        age_hours = max(0.0, check_now - created) / 3600.0
+        score = (
+            _safe_float(impulse.get("salience"), 0.5)
+            + _safe_float(impulse.get("urgency"), 0.3) * 0.9
+            + _safe_float(impulse.get("warmth"), 0.3) * 0.7
+        )
+        score -= age_hours * _safe_float(impulse.get("decay_per_hour"), 0.08)
+        if preferred_ts > 0:
+            score -= min(0.55, abs(check_now - preferred_ts) / 3600.0 * 0.14)
+        if best_until_at > 0 and check_now > best_until_at:
+            score -= min(0.7, (check_now - best_until_at) / 3600.0 * 0.25)
+        if str(impulse.get("source") or "") in {"pending_followup", "followup"} or str(impulse.get("reason") or "") == "quiet_care":
+            score += 0.05
+        persona_fit = _safe_float(impulse.get("persona_fit"), -1.0)
+        if persona_fit < 0:
+            persona_alignment = self._proactive_persona_alignment(
+                user,
+                reason=_single_line(impulse.get("reason"), 40),
+                action=_single_line(impulse.get("action"), 40) or "message",
+                motive=_single_line(impulse.get("motive"), 180),
+                topic=_single_line(impulse.get("topic"), 80),
+                source=_single_line(impulse.get("source"), 40),
+                now=check_now,
+            )
+            persona_fit = _safe_float(persona_alignment.get("score"), 0.55)
+            impulse["persona_fit"] = persona_fit
+            impulse["persona_fit_note"] = _single_line(persona_alignment.get("note"), 160)
+            impulse["persona_fit_blocker"] = bool(persona_alignment.get("blocker"))
+        score += (persona_fit - 0.6) * 0.36
+        if impulse.get("persona_fit_blocker"):
+            score -= 0.45
+        semantic_score = _safe_float(impulse.get("semantic_score"), -1.0)
+        if semantic_score < 0:
+            semantics = self._proactive_candidate_semantics(
+                user,
+                reason=_single_line(impulse.get("reason"), 40),
+                action=_single_line(impulse.get("action"), 60) or "message",
+                motive=_single_line(impulse.get("motive"), 180),
+                topic=_single_line(impulse.get("topic"), 100),
+                source=_single_line(impulse.get("source"), 40),
+                context=impulse.get("context"),
+                chain=impulse.get("chain") if isinstance(impulse.get("chain"), list) else [],
+                trigger_message_id=_single_line(impulse.get("trigger_message_id"), 120),
+                trigger_ts=_safe_float(impulse.get("trigger_ts"), 0),
+            )
+            semantic_score = _safe_float(semantics.get("score"), 0.5)
+            impulse["semantic_kind"] = _single_line(semantics.get("kind"), 40)
+            impulse["semantic_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
+            impulse["semantic_score"] = semantic_score
+            impulse["semantic_anchor_score"] = _safe_float(semantics.get("anchor_score"), 0.5)
+            impulse["semantic_pressure"] = _safe_float(semantics.get("pressure"), 0.4)
+            impulse["semantic_risk"] = _safe_float(semantics.get("risk"), 0.0)
+            impulse["semantic_note"] = _single_line(semantics.get("note"), 180)
+            impulse["semantic_blocker"] = bool(semantics.get("blocker"))
+        score += (semantic_score - 0.5) * 0.42
+        score -= max(0.0, _safe_float(impulse.get("semantic_pressure"), 0.4) - 0.55) * 0.22
+        score -= _safe_float(impulse.get("semantic_risk"), 0.0) * 0.42
+        if impulse.get("semantic_blocker"):
+            score -= 0.5
+        readiness = self._proactive_inner_readiness(user, now=check_now)
+        temperature = readiness.get("temperature") if isinstance(readiness.get("temperature"), dict) else {}
+        score += (_safe_float(readiness.get("score"), 0.55) - 0.55) * 0.38
+        score += (_safe_float(temperature.get("score"), 0.55) - 0.55) * 0.22
+        hesitation_count = _safe_int(impulse.get("hesitation_count"), 0, 0, 8)
+        if hesitation_count > 0:
+            score += min(0.12, hesitation_count * 0.035)
+        if _safe_int(user.get("ignored_streak"), 0, 0) >= 2:
+            score -= 0.08
+        return score
+
+    def _proactive_persona_alignment(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str,
+        action: str,
+        motive: str,
+        topic: str = "",
+        source: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        role = self._private_user_role(user)
+        normalized_reason = str(reason or "check_in")
+        normalized_action = str(action or "message").strip() or "message"
+        normalized_motive = self._normalize_internal_motive_text(_single_line(motive, 180))
+        normalized_topic = _single_line(topic, 80)
+        normalized_source = _single_line(source, 40)
+        text = f"{normalized_reason} {normalized_action} {normalized_topic} {normalized_motive}"
+        profile = self._persona_action_profile()
+        score = 0.66
+        notes: list[str] = []
+        blocker = False
+
+        def note(text_value: str) -> None:
+            clean = _single_line(text_value, 60)
+            if clean and clean not in notes:
+                notes.append(clean)
+
+        intimate = (
+            self._proactive_reason_is_intimate(normalized_reason)
+            or self._proactive_action_is_intimate(normalized_action)
+            or self._proactive_text_is_intimate(normalized_reason, normalized_action, normalized_motive, normalized_topic)
+        )
+        if role == "friend":
+            score += 0.02
+            if self._friend_sensitive_proactive_reason(normalized_reason) or self._friend_sensitive_proactive_action(normalized_action):
+                blocker = True
+                score -= 0.45
+                note("朋友关系不适合这个主动来源/能力")
+            if intimate:
+                score -= 0.22
+                note("朋友关系下亲密度偏高")
+            if self._is_vague_seek_user_motive(normalized_reason, normalized_action, normalized_motive, normalized_topic):
+                score -= 0.12
+                note("朋友关系下动机太像索取回应")
+        else:
+            if intimate and (profile.get("clingy") or profile.get("voicey")):
+                score += 0.07
+                note("亲近型人格可承载这个主动")
+            if self._is_vague_seek_user_motive(normalized_reason, normalized_action, normalized_motive, normalized_topic):
+                score -= 0.07
+                note("动机略空,需要更具体的生活钩子")
+
+        action_parts = {part.strip() for part in normalized_action.split("+") if part.strip()}
+        if "screen_peek" in action_parts:
+            if profile.get("observant"):
+                score += 0.07
+                note("观察型人格适合轻观察")
+            else:
+                score -= 0.05
+                note("观察能力和人格标记不强")
+        if "photo_text" in action_parts:
+            if profile.get("visual"):
+                score += 0.08
+                note("视觉表达贴合人格")
+            else:
+                score -= 0.04
+                note("图片表达缺少人格支撑")
+        if "voice" in action_parts:
+            if profile.get("voicey"):
+                score += 0.08
+                note("语音表达贴合人格")
+            else:
+                score -= 0.04
+                note("语音表达缺少人格支撑")
+        if "poke" in action_parts:
+            if profile.get("playful") or profile.get("clingy"):
+                score += 0.06
+                note("轻互动贴合俏皮/依恋人格")
+            else:
+                score -= 0.06
+                note("戳一戳不像当前人格的自然动作")
+        if "jm_cosmos_read" in action_parts and not any(token in str(self._get_default_persona_prompt() or "") for token in ("阅读", "书", "小说", "本子", "夹层")):
+            score -= 0.08
+            note("私下阅读缺少人格兴趣支撑")
+
+        if normalized_reason in {"activity_share", "diary_share", "background_schedule"}:
+            if profile.get("playful") or profile.get("visual") or profile.get("observant"):
+                score += 0.04
+                note("轻分享和人格气质相容")
+        if not normalized_topic and not normalized_motive and normalized_reason in {"check_in", "quiet_care", "state_share"}:
+            score -= 0.08
+            note("念头缺少具体来源")
+
+        leak_tokens = ("模型", "插件", "action", "模块", "接口", "提示词", "LLM", "prompt", "后台任务", "系统调度")
+        if any(token in text for token in leak_tokens):
+            score -= 0.28
+            blocker = True
+            note("内部机制泄露风险")
+        worldview_mode = str(getattr(self, "worldview_adaptation_mode", "auto") or "auto")
+        if worldview_mode in {"fantasy", "sci_fi", "custom"} and any(token in text for token in ("现实网络", "现实设备", "影响现实", "控制设备")):
+            score -= 0.25
+            blocker = True
+            note("世界观边界风险")
+
+        mode = self._current_emotion_gate_mode(user, now=now) or self._current_relationship_gate_mode(user, now=now)
+        if mode in {"careful", "hurt", "refusing", "backoff"} and intimate and normalized_source != "timer":
+            score -= 0.22
+            if mode in {"refusing", "backoff"}:
+                blocker = True
+            note(f"关系状态 {mode} 不适合亲密主动")
+
+        score = max(0.0, min(1.0, score))
+        if not notes:
+            note("动机、动作和当前关系基本贴合")
+        return {
+            "score": score,
+            "note": "；".join(notes[:3]),
+            "blocker": blocker,
+        }
+
+    def _proactive_candidate_semantics(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str,
+        action: str,
+        motive: str,
+        topic: str = "",
+        source: str = "",
+        context: Any = None,
+        chain: list[dict[str, Any]] | None = None,
+        trigger_message_id: str = "",
+        trigger_ts: float = 0,
+    ) -> dict[str, Any]:
+        normalized_reason = _single_line(reason, 40) or "check_in"
+        normalized_action = _single_line(action, 60) or "message"
+        normalized_motive = self._normalize_internal_motive_text(_single_line(motive, 180))
+        normalized_topic = _single_line(topic, 100)
+        normalized_source = _single_line(source, 40)
+        context_text = self._proactive_semantic_evidence_text(context)
+        chain_text = self._proactive_semantic_chain_text(chain)
+        has_context = bool(context_text)
+        has_chain = bool(chain_text)
+        has_trigger = bool(_single_line(trigger_message_id, 120))
+        text = f"{normalized_reason} {normalized_action} {normalized_topic} {normalized_motive}"
+        evidence_text = f"{text} {context_text} {chain_text}"
+        action_parts = {part.strip() for part in normalized_action.split("+") if part.strip()}
+        kind = "check_in"
+        if normalized_reason in {"morning_greeting", "noon_greeting", "evening_greeting", "insomnia_night"}:
+            kind = "greeting"
+        elif normalized_reason in {"quiet_care", "state_share"}:
+            kind = "care"
+        elif normalized_reason in {"activity_share", "diary_share", "background_schedule", "creative_share"}:
+            kind = "self_share"
+        elif normalized_reason in {"important_date_share"}:
+            kind = "reminder"
+        elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share"}:
+            kind = "external_share"
+        elif normalized_source in {"pending_followup", "followup"}:
+            kind = "continuation"
+        elif action_parts & {"screen_peek"}:
+            kind = "observation"
+        elif action_parts & {"poke"}:
+            kind = "light_touch"
+
+        anchor_type = "vague"
+        anchor_score = 0.28
+        if normalized_source in {"pending_followup", "followup"} or has_trigger or has_chain or "前面提过" in evidence_text:
+            anchor_type, anchor_score = "recent_context", 0.78
+        elif normalized_reason in {"group_share"} or "群" in evidence_text:
+            anchor_type, anchor_score = "group_context", 0.72
+        elif normalized_reason in {"diary_share", "creative_share"} or any(token in evidence_text for token in ("日记", "写到", "作品", "片段")):
+            anchor_type, anchor_score = "inner_life", 0.68
+        elif normalized_reason in {"background_schedule"} or any(token in evidence_text for token in ("手上", "忙到", "日程", "计划", "刚好停")):
+            anchor_type, anchor_score = "current_activity", 0.62
+        elif normalized_reason in {"important_date_share"} or any(token in evidence_text for token in ("生日", "纪念", "日期", "考试", "提醒")):
+            anchor_type, anchor_score = "important_date", 0.78
+        elif normalized_reason in {"news_share", "web_exploration_share", "bili_video_share"}:
+            anchor_type, anchor_score = "external_info", 0.66
+        elif normalized_reason in {"morning_greeting", "noon_greeting", "evening_greeting", "insomnia_night"}:
+            anchor_type, anchor_score = "time_ritual", 0.55
+        elif any(token in evidence_text for token in ("天气", "雨", "阳光", "晚霞", "天色", "风", "窗")):
+            anchor_type, anchor_score = "environment", 0.58
+        elif has_context:
+            anchor_type, anchor_score = "topic_hint", 0.56
+        elif normalized_topic:
+            anchor_type, anchor_score = "topic_hint", 0.48
+
+        pressure = 0.34
+        if kind in {"greeting", "self_share", "reminder"}:
+            pressure -= 0.04
+        if kind in {"check_in", "care", "observation", "light_touch"}:
+            pressure += 0.08
+        if action_parts & {"screen_peek", "poke", "voice"}:
+            pressure += 0.16
+        if has_context or has_trigger:
+            pressure -= 0.05
+        if has_chain and normalized_source in {"pending_followup", "followup", "daily_greeting"}:
+            pressure -= 0.03
+        if self._is_vague_seek_user_motive(normalized_reason, normalized_action, normalized_motive, normalized_topic):
+            pressure += 0.18
+        if self._private_user_role(user) == "friend":
+            pressure += 0.08
+        if _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            pressure += min(0.22, _safe_int(user.get("ignored_streak"), 0, 0) * 0.06)
+
+        risk = 0.0
+        blocker = False
+        notes: list[str] = []
+
+        def note(value: str) -> None:
+            clean = _single_line(value, 60)
+            if clean and clean not in notes:
+                notes.append(clean)
+
+        if anchor_score >= 0.65:
+            note(f"由头明确:{anchor_type}")
+        elif anchor_score <= 0.35:
+            note("由头偏虚")
+        if pressure >= 0.62:
+            note("打扰压力偏高")
+        if self._unverified_social_relay_plan_reason(
+            {
+                "reason": normalized_reason,
+                "action": normalized_action,
+                "topic": normalized_topic,
+                "motive": normalized_motive,
+                "scene": context_text,
+            },
+            source=normalized_source,
+            has_trigger=has_trigger,
+        ):
+            risk += 0.35
+            blocker = True
+            note("疑似无来源转述")
+        if any(token in evidence_text for token in ("模型", "插件", "接口", "后台", "提示词", "系统调度", "action")):
+            risk += 0.42
+            blocker = True
+            note("内部机制泄露")
+        if self._friend_can_receive_proactive_reason(user, normalized_reason, normalized_action) is False:
+            risk += 0.35
+            blocker = True
+            note("朋友关系语义越界")
+        if self._proactive_text_is_intimate(normalized_reason, normalized_action, normalized_motive, normalized_topic):
+            risk += 0.18
+            if self._private_user_role(user) == "friend":
+                risk += 0.18
+                note("朋友关系亲密过量")
+        score = 0.52 + (anchor_score - 0.5) * 0.42 - max(0.0, pressure - 0.45) * 0.36 - risk * 0.5
+        if kind in {"continuation", "reminder"}:
+            score += 0.08
+        if kind == "self_share" and anchor_score >= 0.48:
+            score += 0.05
+        if has_context and anchor_score >= 0.5:
+            score += 0.04
+        if kind == "check_in" and anchor_score < 0.45:
+            score -= 0.08
+        score = max(0.0, min(1.0, score))
+        if not notes:
+            note(f"{kind}/{anchor_type}")
+        return {
+            "kind": kind,
+            "anchor_type": anchor_type,
+            "anchor_score": anchor_score,
+            "pressure": max(0.0, min(1.0, pressure)),
+            "risk": max(0.0, min(1.0, risk)),
+            "score": score,
+            "note": "；".join(notes[:4]),
+            "blocker": blocker,
+        }
+
+    def _proactive_semantic_evidence_text(self, value: Any, *, limit: int = 260) -> str:
+        parts: list[str] = []
+
+        def collect(item: Any, depth: int = 0) -> None:
+            if len(parts) >= 8 or depth > 2:
+                return
+            if isinstance(item, dict):
+                priority = (
+                    "title",
+                    "topic",
+                    "summary",
+                    "text",
+                    "content",
+                    "reason",
+                    "why",
+                    "scene",
+                    "impulse",
+                    "tone",
+                    "group_name",
+                    "sender_name",
+                    "share_decision",
+                    "share_tone",
+                    "share_boundary",
+                )
+                for key in priority:
+                    if key in item:
+                        collect(item.get(key), depth + 1)
+                if len(parts) < 4:
+                    for key, nested in list(item.items())[:8]:
+                        if key not in priority:
+                            collect(nested, depth + 1)
+            elif isinstance(item, list):
+                for nested in item[:5]:
+                    collect(nested, depth + 1)
+            else:
+                text = _single_line(item, 80)
+                if text and text not in parts:
+                    parts.append(text)
+
+        collect(value)
+        return _single_line(" ".join(parts), limit)
+
+    def _proactive_semantic_chain_text(self, chain: list[dict[str, Any]] | None) -> str:
+        if not isinstance(chain, list):
+            return ""
+        parts: list[str] = []
+        for step in chain[:4]:
+            if not isinstance(step, dict):
+                continue
+            bits = [
+                _single_line(step.get("kind"), 30),
+                _single_line(step.get("reason"), 40),
+                _single_line(step.get("topic"), 60),
+                _single_line(step.get("motive"), 80),
+                _single_line(step.get("tone"), 40),
+            ]
+            line = _single_line(" ".join(bit for bit in bits if bit), 120)
+            if line:
+                parts.append(line)
+        return _single_line(" ".join(parts), 240)
+
+    def _planned_proactive_semantics(self, user: dict[str, Any]) -> dict[str, Any]:
+        impulse = self._planned_proactive_impulse(user)
+        if isinstance(impulse, dict):
+            return {
+                "kind": _single_line(impulse.get("semantic_kind"), 40),
+                "anchor_type": _single_line(impulse.get("semantic_anchor_type"), 40),
+                "score": _safe_float(impulse.get("semantic_score"), 0.5),
+                "anchor_score": _safe_float(impulse.get("semantic_anchor_score"), 0.5),
+                "pressure": _safe_float(impulse.get("semantic_pressure"), 0.4),
+                "risk": _safe_float(impulse.get("semantic_risk"), 0.0),
+                "note": _single_line(impulse.get("semantic_note"), 180),
+                "blocker": bool(impulse.get("semantic_blocker")),
+            }
+        return self._proactive_candidate_semantics(
+            user,
+            reason=_single_line(user.get("planned_proactive_reason"), 40) or "check_in",
+            action=_single_line(user.get("planned_proactive_action"), 60) or "message",
+            motive=_single_line(user.get("planned_proactive_motive"), 180),
+            topic=_single_line(user.get("planned_proactive_topic"), 100),
+            source=_single_line(user.get("planned_proactive_source"), 40),
+            chain=user.get("planned_event_chain") if isinstance(user.get("planned_event_chain"), list) else [],
+            trigger_message_id=_single_line(user.get("planned_proactive_trigger_message_id"), 120),
+            trigger_ts=_safe_float(user.get("planned_proactive_trigger_ts"), 0),
+        )
+
+    def _planned_proactive_persona_alignment(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return self._proactive_persona_alignment(
+            user,
+            reason=_single_line(user.get("planned_proactive_reason"), 40) or "check_in",
+            action=_single_line(user.get("planned_proactive_action"), 40) or "message",
+            motive=_single_line(user.get("planned_proactive_motive"), 180),
+            topic=_single_line(user.get("planned_proactive_topic"), 80),
+            source=_single_line(user.get("planned_proactive_source"), 40),
+            now=now,
+        )
+
+    def _planned_proactive_model_judge_signature(self, user: dict[str, Any]) -> str:
+        persona = _single_line(str(self._get_default_persona_prompt() or ""), 800)
+        worldview = _single_line(str(self._format_worldview_adaptation_prompt() or ""), 400)
+        rel_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
+        readiness = self._proactive_inner_readiness(user)
+        semantics = self._planned_proactive_semantics(user)
+        parts = [
+            self._private_user_role(user),
+            user.get("planned_proactive_source"),
+            user.get("planned_proactive_reason"),
+            user.get("planned_proactive_action"),
+            user.get("planned_proactive_topic"),
+            user.get("planned_proactive_motive"),
+            user.get("planned_proactive_impulse_id"),
+            _single_line(semantics.get("kind"), 40),
+            _single_line(semantics.get("anchor_type"), 40),
+            f"semantic={_safe_float(semantics.get('score'), 0.5):.2f}",
+            f"pressure={_safe_float(semantics.get('pressure'), 0.4):.2f}",
+            f"risk={_safe_float(semantics.get('risk'), 0.0):.2f}",
+            rel_state.get("mode") if isinstance(rel_state, dict) else "",
+            user.get("ignored_streak"),
+            f"inner={_safe_float(readiness.get('score'), 0.55):.2f}",
+            _single_line(readiness.get("label"), 80),
+            persona,
+            worldview,
+        ]
+        raw = "\n".join(_single_line(part, 1000) for part in parts)
+        return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _cached_proactive_model_judgement(
+        self,
+        user: dict[str, Any],
+        *,
+        signature: str,
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        if not signature:
+            return None
+        check_now = _now_ts() if now is None else now
+        if _single_line(user.get("planned_proactive_model_judge_signature"), 80) != signature:
+            return None
+        judged_at = _safe_float(user.get("planned_proactive_model_judge_at"), 0)
+        ttl = max(5, _safe_int(getattr(self, "proactive_persona_judge_cache_minutes", 180), 180, 5, 720)) * 60
+        if judged_at <= 0 or check_now - judged_at > ttl:
+            return None
+        cached = user.get("planned_proactive_model_judge_result")
+        return dict(cached) if isinstance(cached, dict) else None
+
+    def _normalize_proactive_model_judgement(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        decision = str(payload.get("decision") or "").strip().lower()
+        if decision not in {"send", "rewrite", "defer", "drop"}:
+            return None
+        score = _safe_int(payload.get("score"), 0, 0, 100)
+        threshold = _safe_int(getattr(self, "proactive_persona_judge_send_threshold", 62), 62, 0, 100)
+        if decision == "send" and score > 0 and score < threshold:
+            decision = "defer"
+        reason = _single_line(payload.get("reason"), 140) or "模型人格判定"
+        result = {
+            "decision": decision,
+            "score": score,
+            "reason": reason,
+            "delay_minutes": _safe_int(payload.get("delay_minutes"), 90, 20, 360),
+            "reason_field": _single_line(payload.get("planned_reason") or payload.get("reason_field"), 40),
+            "action": _single_line(payload.get("action"), 40),
+            "topic": _single_line(payload.get("topic"), 80),
+            "motive": self._normalize_internal_motive_text(_single_line(payload.get("motive"), 180)),
+        }
+        return result
+
+    def _format_proactive_model_judge_prompt(self, user: dict[str, Any]) -> str:
+        persona = str(self._get_default_persona_prompt() or "").strip()
+        worldview = str(self._format_worldview_adaptation_prompt() or "").strip()
+        boundary = self._format_private_user_boundary_hint(user) if isinstance(user, dict) else ""
+        rel_summary = ""
+        formatter = getattr(self, "_format_relationship_summary", None)
+        if callable(formatter):
+            try:
+                rel_summary = _single_line(formatter(user), 220)
+            except Exception:
+                rel_summary = ""
+        local_alignment = self._planned_proactive_persona_alignment(user)
+        semantics = self._planned_proactive_semantics(user)
+        window_phase, window_detail = self._planned_impulse_window_phase(user)
+        inner_readiness = self._proactive_inner_readiness(user)
+        role = self._private_user_role(user)
+        nickname = _single_line(user.get("nickname"), 40) or self.default_nickname
+        return f"""
+你是“主动消息人格/世界观判定器”。只判断这个主动计划是否像当前角色会自然产生的念头,不要写最终聊天正文。
+
+输出必须是 JSON 对象,不要 Markdown,不要解释：
+{{"decision":"send|rewrite|defer|drop","score":0,"reason":"20字以内原因","delay_minutes":90,"planned_reason":"","action":"","topic":"","motive":""}}
+
+判定含义：
+- send：计划自然,可以进入生成。
+- rewrite：方向有价值,但动机/话题/动作需要更贴合角色；只改 planned_reason/action/topic/motive,不要写最终聊天正文。
+- defer：现在不适合或动机不够自然,稍后再看。
+- drop：明显不符合角色/世界观/关系边界,或像系统任务、索取回应、无由头打扰。
+
+硬要求：
+- 不得放行内部机制泄露、工具名、模型、插件、提示词、后台任务。
+- 不得新增事实、现实能力或用户没给过的关系信息。
+- 朋友关系必须普通、低频、不过度亲密；主人/亲近关系也要尊重休息和拒绝。
+- 世界观表达必须贴合设定；能力只能作为角色内自然动机,不能露出调用过程。
+- 如果只是“想你了/来看看/在不在/忙不忙”且没有具体由头,通常 defer 或 rewrite。
+
+【角色设定】
+{_single_line(persona, 1800) or "（未读取到显式人格,按自然私聊陪伴角色处理）"}
+
+【世界观/适配】
+{_single_line(worldview, 1000) or "（无额外世界观适配）"}
+
+【关系边界】
+{boundary}
+
+【当前对象】
+- 昵称：{nickname}
+- 关系角色：{role}
+- 关系摘要：{rel_summary or "暂无"}
+- 连续未回应：{_safe_int(user.get("ignored_streak"), 0, 0)}
+- 最近用户消息：{_single_line(user.get("last_user_message"), 160) or "（无）"}
+- 最近 Bot 消息：{_single_line(user.get("last_companion_message"), 160) or "（无）"}
+- Bot 当前开口欲/关系温度：{_safe_float(inner_readiness.get("score"), 0.55):.2f}｜{_single_line(inner_readiness.get("label"), 60)}｜{_single_line(inner_readiness.get("detail"), 180)}
+
+【当前主动计划】
+- source：{_single_line(user.get("planned_proactive_source"), 40) or "unknown"}
+- reason：{_single_line(user.get("planned_proactive_reason"), 40) or "check_in"}
+- action：{_single_line(user.get("planned_proactive_action"), 40) or "message"}
+- topic：{_single_line(user.get("planned_proactive_topic"), 100) or "无"}
+- motive：{_single_line(user.get("planned_proactive_motive"), 220) or "无"}
+- 候选语义：{_single_line(semantics.get("kind"), 40)}/{_single_line(semantics.get("anchor_type"), 40)}｜score={_safe_float(semantics.get("score"), 0.5):.2f}｜pressure={_safe_float(semantics.get("pressure"), 0.4):.2f}｜risk={_safe_float(semantics.get("risk"), 0.0):.2f}｜{_single_line(semantics.get("note"), 140)}
+- 念头窗口：{window_phase}｜{window_detail}
+- 本地粗判：{_safe_float(local_alignment.get("score"), 0.0):.2f}｜{_single_line(local_alignment.get("note"), 140)}
+""".strip()
+
+    async def _review_planned_proactive_with_model(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        check_now = _now_ts() if now is None else now
+        if not bool(getattr(self, "enable_llm_proactive_persona_judge", True)):
+            return {"decision": "send", "score": 100, "reason": "模型人格判定关闭"}
+        if str(user.get("planned_proactive_source") or "") in {"timer", "troubleshooting", "simulation"}:
+            return {"decision": "send", "score": 100, "reason": "特权计划跳过模型人格判定"}
+        signature = self._planned_proactive_model_judge_signature(user)
+        cached = self._cached_proactive_model_judgement(user, signature=signature, now=check_now)
+        if isinstance(cached, dict):
+            cached["cached"] = True
+            return cached
+        prompt = self._format_proactive_model_judge_prompt(user)
+        started = time.perf_counter()
+        raw = await self._llm_call(
+            prompt,
+            max_tokens=260,
+            provider_id=self._task_provider(
+                getattr(self, "proactive_persona_judge_provider_id", ""),
+                self.response_review_provider_id,
+                self.mai_style_provider_id,
+            ),
+            task="proactive_persona_judge",
+        )
+        parsed = self._parse_json_object(raw)
+        result = self._normalize_proactive_model_judgement(parsed)
+        if not isinstance(result, dict):
+            logger.info("[PrivateCompanion] 模型人格判定无有效 JSON,降级本地判定")
+            return {"decision": "send", "score": 0, "reason": "模型判定失败,降级本地"}
+        result["signature"] = signature
+        result["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "[PrivateCompanion] 主动模型人格判定: decision=%s score=%s reason=%s elapsed=%sms",
+            result.get("decision"),
+            result.get("score"),
+            _single_line(result.get("reason"), 100),
+            result.get("elapsed_ms"),
+        )
+        return result
+
+    def _cache_proactive_model_judgement(
+        self,
+        user: dict[str, Any],
+        judgement: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> None:
+        signature = _single_line(judgement.get("signature"), 80) or self._planned_proactive_model_judge_signature(user)
+        user["planned_proactive_model_judge_signature"] = signature
+        user["planned_proactive_model_judge_result"] = {
+            key: value
+            for key, value in judgement.items()
+            if key in {"decision", "score", "reason", "delay_minutes", "reason_field", "action", "topic", "motive"}
+        }
+        user["planned_proactive_model_judge_at"] = _now_ts() if now is None else now
+
+    def _apply_proactive_model_rewrite(self, user: dict[str, Any], judgement: dict[str, Any]) -> bool:
+        changed = False
+        new_reason = _single_line(judgement.get("reason_field"), 40)
+        new_action = _single_line(judgement.get("action"), 40)
+        new_topic = _single_line(judgement.get("topic"), 80)
+        new_motive = self._normalize_internal_motive_text(_single_line(judgement.get("motive"), 180))
+        if new_reason and new_reason != str(user.get("planned_proactive_reason") or ""):
+            user["planned_proactive_reason"] = new_reason
+            changed = True
+        if new_action and self._action_is_available(new_action, user) and new_action != str(user.get("planned_proactive_action") or ""):
+            user["planned_proactive_action"] = new_action
+            changed = True
+        if new_topic and new_topic != _single_line(user.get("planned_proactive_topic"), 80):
+            user["planned_proactive_topic"] = new_topic
+            changed = True
+        if new_motive and new_motive != _single_line(user.get("planned_proactive_motive"), 180):
+            user["planned_proactive_motive"] = new_motive
+            changed = True
+        if changed and self._private_user_role(user) == "friend":
+            sanitized = self._sanitize_friend_proactive_plan_fields(
+                user,
+                reason=str(user.get("planned_proactive_reason") or "check_in"),
+                action=str(user.get("planned_proactive_action") or "message"),
+                topic=_single_line(user.get("planned_proactive_topic"), 80),
+                motive=_single_line(user.get("planned_proactive_motive"), 180),
+            )
+            user["planned_proactive_reason"] = sanitized["reason"]
+            user["planned_proactive_action"] = sanitized["action"]
+            user["planned_proactive_topic"] = sanitized["topic"]
+            user["planned_proactive_motive"] = sanitized["motive"]
+        return changed
+
+    def _planned_proactive_impulse(self, user: dict[str, Any]) -> dict[str, Any] | None:
+        impulse_id = _single_line(user.get("planned_proactive_impulse_id"), 20)
+        if not impulse_id:
+            return None
+        for item in self._cleanup_proactive_impulses(user):
+            if isinstance(item, dict) and _single_line(item.get("id"), 20) == impulse_id:
+                return item
+        return None
+
+    def _planned_impulse_value(self, user: dict[str, Any], *, now: float | None = None) -> float:
+        impulse = self._planned_proactive_impulse(user)
+        if isinstance(impulse, dict):
+            return self._score_proactive_impulse(user, impulse, now=now)
+        reason = str(user.get("planned_proactive_reason") or "")
+        source = str(user.get("planned_proactive_source") or "")
+        value = 0.62
+        if source in {"timer", "troubleshooting", "simulation"}:
+            value += 0.35
+        if source in {"pending_followup", "daily_greeting", "story", "state"}:
+            value += 0.08
+        if reason in {"important_date_share", "quiet_care", "group_share", "news_share", "creative_share"}:
+            value += 0.08
+        if self._private_user_role(user) == "friend":
+            value -= 0.06
+        return value
+
+    def _planned_impulse_window_phase(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> tuple[str, str]:
+        check_now = _now_ts() if now is None else now
+        start_at = _safe_float(user.get("planned_proactive_window_start_at"), 0)
+        best_until = _safe_float(user.get("planned_proactive_best_until_at"), 0)
+        expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
+        if expire_at > 0 and check_now > expire_at:
+            return "expired", "念头窗口已过期"
+        if start_at > 0 and check_now < start_at:
+            return "before", f"距窗口开始还有 {self._format_elapsed(start_at - check_now)}"
+        if best_until > 0 and check_now <= best_until:
+            return "best", f"正处于最佳表达窗口,剩余 {self._format_elapsed(best_until - check_now)}"
+        if expire_at > 0:
+            return "tail", f"已过最佳窗口,距过期 {self._format_elapsed(max(0, expire_at - check_now))}"
+        return "unknown", "未记录念头窗口"
+
+    def _defer_or_replace_planned_impulse(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+        note: str = "",
+        delay_minutes: tuple[float, float] = (30.0, 90.0),
+        block_current: bool = False,
+    ) -> bool:
+        check_now = _now_ts() if now is None else now
+        impulse = self._planned_proactive_impulse(user)
+        current_id = _single_line(user.get("planned_proactive_impulse_id"), 20)
+        self._mark_planned_candidate_status(user, "blocked" if block_current else "deferred", note)
+        if isinstance(impulse, dict):
+            impulse["updated_ts"] = check_now
+            impulse["last_note"] = _single_line(note, 160)
+            if block_current:
+                impulse["state"] = "blocked"
+            else:
+                hesitation_count = _safe_int(impulse.get("hesitation_count"), 0, 0, 8) + 1
+                impulse["hesitation_count"] = hesitation_count
+                impulse["hesitation_at"] = check_now
+                impulse["hesitation_note"] = _single_line(note, 160)
+                self._remember_proactive_hesitation(user, impulse, note=note, now=check_now)
+                delay = random.uniform(max(1.0, delay_minutes[0]), max(delay_minutes[0] + 1.0, delay_minutes[1])) * 60
+                next_window = check_now + delay
+                impulse["state"] = "deferred"
+                impulse["window_start_at"] = next_window
+                impulse["preferred_ts"] = max(_safe_float(impulse.get("preferred_ts"), 0), next_window)
+                impulse["best_until_at"] = max(_safe_float(impulse.get("best_until_at"), 0), next_window + 25 * 60)
+                impulse["expire_at"] = max(_safe_float(impulse.get("expire_at"), 0), next_window + 90 * 60)
+        self._clear_pending_proactive_plan(user)
+        if not self._materialize_best_proactive_impulse(user, now=check_now):
+            return False
+        return bool(_single_line(user.get("planned_proactive_impulse_id"), 20) != current_id)
+
+    def _remember_proactive_hesitation(
+        self,
+        user: dict[str, Any],
+        impulse: dict[str, Any],
+        *,
+        note: str = "",
+        now: float | None = None,
+    ) -> None:
+        check_now = _now_ts() if now is None else now
+        raw = user.setdefault("recent_proactive_hesitations", [])
+        if not isinstance(raw, list):
+            raw = []
+            user["recent_proactive_hesitations"] = raw
+        item = {
+            "ts": check_now,
+            "reason": _single_line(impulse.get("reason"), 40),
+            "source": _single_line(impulse.get("source"), 40),
+            "topic": _single_line(impulse.get("topic"), 80),
+            "motive": _single_line(impulse.get("motive"), 140),
+            "note": _single_line(note, 140),
+            "count": _safe_int(impulse.get("hesitation_count"), 1, 1, 20),
+        }
+        raw.append(item)
+        del raw[:-8]
+        user["last_proactive_hesitation_at"] = check_now
+        user["last_proactive_hesitation_note"] = item["note"]
+
+    def _motive_with_hesitation_memory(self, impulse: dict[str, Any], motive: str) -> str:
+        count = _safe_int(impulse.get("hesitation_count"), 0, 0, 8)
+        if count <= 0:
+            return self._normalize_internal_motive_text(motive)
+        source = str(impulse.get("source") or "")
+        if source in {"timer", "troubleshooting", "simulation"}:
+            return self._normalize_internal_motive_text(motive)
+        cleaned = self._normalize_internal_motive_text(motive)
+        if any(token in cleaned for token in ("刚才想说", "刚才差点", "忍住", "收住")):
+            return cleaned
+        topic = _single_line(impulse.get("topic"), 40)
+        if count >= 2:
+            prefix = "这个念头前面忍过一次,但它还没散"
+        else:
+            prefix = "刚才差点想说,后来又先收住了"
+        if topic:
+            prefix += f",这会儿又绕回“{topic}”"
+        if cleaned:
+            return self._normalize_internal_motive_text(f"{prefix}；{cleaned}")
+        return self._normalize_internal_motive_text(prefix)
+
+    def _materialize_best_proactive_impulse(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> bool:
+        check_now = _now_ts() if now is None else now
+        user_id = str(user.get("user_id") or user.get("id") or "")
+        active = [
+            item
+            for item in self._cleanup_proactive_impulses(user, now=check_now)
+            if isinstance(item, dict) and str(item.get("state") or "queued") in {"queued", "deferred"}
+        ]
+        if not active:
+            return False
+        ready = [item for item in active if self._impulse_ready_now(item, now=check_now)]
+        selected: dict[str, Any] | None = None
+        review_at = 0.0
+        if ready:
+            ready.sort(key=lambda item: self._score_proactive_impulse(user, item, now=check_now), reverse=True)
+            selected = ready[0]
+            review_at = check_now
+        else:
+            future = sorted(
+                active,
+                key=lambda item: (
+                    _safe_float(item.get("window_start_at"), check_now + 365 * 24 * 3600),
+                    -self._score_proactive_impulse(user, item, now=check_now),
+                ),
+            )
+            if not future:
+                return False
+            selected = future[0]
+            review_at = _safe_float(selected.get("window_start_at"), check_now)
+        candidate = {
+            "source": _single_line(selected.get("source"), 40) or "impulse",
+            "reason": _single_line(selected.get("reason"), 40) or "check_in",
+            "action": _single_line(selected.get("action"), 40) or "message",
+            "scheduled_ts": max(review_at, _safe_float(selected.get("window_start_at"), review_at)),
+            "topic": _single_line(selected.get("topic"), 80),
+            "motive": self._motive_with_hesitation_memory(selected, _single_line(selected.get("motive"), 180)),
+            "score": int(max(0.0, min(1.0, self._score_proactive_impulse(user, selected, now=check_now))) * 100),
+        }
+        item = self._record_proactive_candidate(
+            user_id,
+            candidate,
+            status="accepted",
+            note="由潜在念头池物化为当前主动计划",
+            user=user,
+        )
+        user["next_proactive_at"] = candidate["scheduled_ts"]
+        user["planned_proactive_reason"] = candidate["reason"]
+        user["planned_proactive_action"] = candidate["action"]
+        user["planned_proactive_source"] = candidate["source"]
+        user["planned_proactive_motive"] = self._normalize_internal_motive_text(candidate["motive"])
+        user["planned_proactive_topic"] = candidate["topic"]
+        user["planned_proactive_impulse_id"] = _single_line(selected.get("id"), 20)
+        user["planned_proactive_window_start_at"] = _safe_float(selected.get("window_start_at"), 0)
+        user["planned_proactive_best_until_at"] = _safe_float(selected.get("best_until_at"), 0)
+        user["planned_proactive_expire_at"] = _safe_float(selected.get("expire_at"), 0)
+        user["planned_proactive_semantic_kind"] = _single_line(selected.get("semantic_kind"), 40)
+        user["planned_proactive_anchor_type"] = _single_line(selected.get("semantic_anchor_type"), 40)
+        user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(selected.get("semantic_score"), 0.5))) * 100)
+        user["planned_proactive_semantic_note"] = _single_line(selected.get("semantic_note"), 180)
+        user["planned_candidate_id"] = item.get("id", "")
+        user["planned_event_chain"] = (
+            []
+            if self._private_user_role(user) == "friend"
+            else [dict(step) for step in selected.get("chain", []) if isinstance(step, dict)]
+        )
+        user["planned_opener_mode"] = _single_line(selected.get("opener_mode"), 24)
+        user["planned_followup_kind"] = _single_line(selected.get("followup_kind"), 32)
+        user["planned_proactive_quota_exempt"] = bool(selected.get("quota_exempt"))
+        self._set_planned_proactive_trigger(
+            user,
+            message_id=_single_line(selected.get("trigger_message_id"), 120),
+            umo=_single_line(selected.get("trigger_umo"), 160),
+            created_at=_safe_float(selected.get("trigger_ts"), 0),
+        )
+        context_key = _single_line(selected.get("context_key"), 60)
+        context = selected.get("context")
+        if context_key and isinstance(context, dict):
+            user[context_key] = dict(context)
+        selected["updated_ts"] = check_now
+        selected["state"] = "queued"
+        return True
+
     def _record_proactive_candidate(
         self,
         user_id: str,
@@ -273,6 +1530,7 @@ class ProactiveEngineMixin:
         *,
         status: str,
         note: str = "",
+        user: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = _now_ts()
         topic = _single_line(candidate.get("topic"), 80)
@@ -282,6 +1540,28 @@ class ProactiveEngineMixin:
         reason = _single_line(candidate.get("reason"), 40) or "check_in"
         scheduled = _safe_float(candidate.get("scheduled_ts"), now)
         signature = self._proactive_topic_signature(topic, motive)
+        semantics: dict[str, Any] = {}
+        if isinstance(user, dict):
+            semantics = self._proactive_candidate_semantics(
+                user,
+                reason=reason,
+                action=action,
+                motive=motive,
+                topic=topic,
+                source=source,
+                context=candidate.get("context"),
+                chain=candidate.get("chain") if isinstance(candidate.get("chain"), list) else [],
+                trigger_message_id=self._candidate_trigger_message_id(candidate),
+                trigger_ts=_safe_float(candidate.get("trigger_ts") or candidate.get("created_ts"), 0),
+            )
+        semantic_fields = {
+            "semantic_kind": _single_line(semantics.get("kind"), 40),
+            "semantic_anchor_type": _single_line(semantics.get("anchor_type"), 40),
+            "semantic_score": int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.0))) * 100) if semantics else 0,
+            "semantic_pressure": int(max(0.0, min(1.0, _safe_float(semantics.get("pressure"), 0.0))) * 100) if semantics else 0,
+            "semantic_risk": int(max(0.0, min(1.0, _safe_float(semantics.get("risk"), 0.0))) * 100) if semantics else 0,
+            "semantic_note": _single_line(semantics.get("note"), 180),
+        }
         pool = self._cleanup_proactive_candidate_pool(now=now)
         if status in {"blocked", "accepted"}:
             for existing in reversed(pool):
@@ -308,6 +1588,8 @@ class ProactiveEngineMixin:
                 if note:
                     existing["note"] = _single_line(note, 160)
                 existing["score"] = max(_safe_int(existing.get("score"), 0, 0, 100), _safe_int(candidate.get("score"), 0, 0, 100))
+                if semantics:
+                    existing.update(semantic_fields)
                 return existing
         item = {
             "id": uuid.uuid4().hex[:12],
@@ -325,6 +1607,7 @@ class ProactiveEngineMixin:
             "status": status,
             "note": _single_line(note, 160),
             "repeat_count": 1,
+            **(semantic_fields if semantics else {}),
         }
         pool.append(item)
         del pool[:-120]
@@ -363,11 +1646,11 @@ class ProactiveEngineMixin:
             has_trigger=bool(self._candidate_trigger_message_id(candidate)),
         )
         if social_relay_note:
-            self._record_proactive_candidate(user_id, candidate, status="blocked", note=social_relay_note)
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note=social_relay_note, user=user)
             return False
         rest_until = self._user_rest_silence_until(user, now=now)
         if rest_until > now and scheduled < rest_until and source != "timer":
-            self._record_proactive_candidate(user_id, candidate, status="blocked", note="用户明确休息中")
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="用户明确休息中", user=user)
             return False
         if not self._user_enabled_for_proactive(str(user_id), user):
             self._clear_pending_proactive_plan(user)
@@ -378,17 +1661,17 @@ class ProactiveEngineMixin:
         timer_scheduled = _safe_float(timer_event.get("scheduled_ts"), 0) if isinstance(timer_event, dict) else 0.0
         if timer_scheduled > now and scheduled < timer_scheduled and self._in_llm_timer_silence_window(user, now=now):
             self._remember_silenced_candidate_for_timer(user, candidate, now=now)
-            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有聊天临时预约临近")
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有聊天临时预约临近", user=user)
             return False
         if _safe_float(user.get("next_proactive_at"), 0) > 0 and str(user.get("planned_proactive_source") or "") == "timer":
             current_timer = self._get_active_llm_timer(user)
             if self._llm_timer_can_use_internal_scheduler(current_timer if isinstance(current_timer, dict) else None):
-                self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有用户预约/定时主动")
+                self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有用户预约/定时主动", user=user)
                 return False
             self._clear_llm_timer_internal_plan_fields(user)
         current_next = _safe_float(user.get("next_proactive_at"), 0)
         if current_next > 0 and current_next <= scheduled:
-            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有更早主动候选")
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="已有更早主动候选", user=user)
             return False
         action = _single_line(candidate.get("action"), 40) or "message"
         if self._private_user_role(user, str(user_id)) == "friend" and self._action_has_photo_text(action):
@@ -407,12 +1690,15 @@ class ProactiveEngineMixin:
             candidate["topic"] = sanitized["topic"]
             candidate["motive"] = sanitized["motive"]
         if not self._action_is_available(action, user):
-            self._record_proactive_candidate(user_id, candidate, status="blocked", note="动作不可用或媒体额度不足")
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="动作不可用或媒体额度不足", user=user)
             return False
         if self._proactive_candidate_repeated(user, candidate):
-            self._record_proactive_candidate(user_id, candidate, status="blocked", note="近期主题过于相似")
+            self._record_proactive_candidate(user_id, candidate, status="blocked", note="近期主题过于相似", user=user)
             return False
-        item = self._record_proactive_candidate(user_id, candidate, status="accepted", note="进入主动计划")
+        item = self._record_proactive_candidate(user_id, candidate, status="accepted", note="进入主动计划", user=user)
+        impulse = self._candidate_to_impulse(user, candidate, source=source, now=now)
+        if isinstance(impulse, dict):
+            self._queue_proactive_impulse(user, impulse)
         user["next_proactive_at"] = scheduled
         user["planned_proactive_reason"] = _single_line(candidate.get("reason"), 40) or "check_in"
         user["planned_proactive_action"] = action
@@ -421,9 +1707,37 @@ class ProactiveEngineMixin:
             _single_line(candidate.get("motive"), 180)
         )
         user["planned_proactive_topic"] = _single_line(candidate.get("topic"), 80)
-        user["planned_event_chain"] = []
-        user["planned_opener_mode"] = ""
-        user["planned_followup_kind"] = ""
+        user["planned_proactive_impulse_id"] = _single_line(impulse.get("id"), 20) if isinstance(impulse, dict) else ""
+        user["planned_proactive_window_start_at"] = _safe_float(
+            impulse.get("window_start_at"),
+            scheduled,
+        ) if isinstance(impulse, dict) else scheduled
+        user["planned_proactive_best_until_at"] = _safe_float(
+            impulse.get("best_until_at"),
+            scheduled,
+        ) if isinstance(impulse, dict) else scheduled
+        user["planned_proactive_expire_at"] = _safe_float(
+            impulse.get("expire_at"),
+            scheduled,
+        ) if isinstance(impulse, dict) else scheduled
+        if isinstance(impulse, dict):
+            user["planned_proactive_semantic_kind"] = _single_line(impulse.get("semantic_kind"), 40)
+            user["planned_proactive_anchor_type"] = _single_line(impulse.get("semantic_anchor_type"), 40)
+            user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(impulse.get("semantic_score"), 0.5))) * 100)
+            user["planned_proactive_semantic_note"] = _single_line(impulse.get("semantic_note"), 180)
+        else:
+            semantics = self._planned_proactive_semantics(user)
+            user["planned_proactive_semantic_kind"] = _single_line(semantics.get("kind"), 40)
+            user["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
+            user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))) * 100)
+            user["planned_proactive_semantic_note"] = _single_line(semantics.get("note"), 180)
+        user["planned_event_chain"] = [] if self._private_user_role(user) == "friend" else (
+            [dict(step) for step in impulse.get("chain", []) if isinstance(step, dict)]
+            if isinstance(impulse, dict)
+            else []
+        )
+        user["planned_opener_mode"] = _single_line(impulse.get("opener_mode"), 24) if isinstance(impulse, dict) else ""
+        user["planned_followup_kind"] = _single_line(impulse.get("followup_kind"), 32) if isinstance(impulse, dict) else ""
         self._clear_planned_proactive_trigger(user)
         user["planned_proactive_quota_exempt"] = False
         user["planned_candidate_id"] = item.get("id", "")
@@ -539,6 +1853,16 @@ class ProactiveEngineMixin:
         user["planned_proactive_source"] = "timer"
         user["planned_proactive_motive"] = self._normalize_internal_motive_text(_single_line(event.get("motive"), 140))
         user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
+        user["planned_proactive_impulse_id"] = ""
+        user["planned_proactive_window_start_at"] = scheduled_ts
+        active_span, grace_span = self._proactive_impulse_default_window_seconds(user["planned_proactive_reason"])
+        user["planned_proactive_best_until_at"] = scheduled_ts + active_span
+        user["planned_proactive_expire_at"] = scheduled_ts + active_span + grace_span
+        semantics = self._planned_proactive_semantics(user)
+        user["planned_proactive_semantic_kind"] = _single_line(semantics.get("kind"), 40)
+        user["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
+        user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))) * 100)
+        user["planned_proactive_semantic_note"] = _single_line(semantics.get("note"), 180)
         user["planned_event_chain"] = [] if self._private_user_role(user) == "friend" else (
             list(event.get("chain") or []) if isinstance(event.get("chain"), list) else []
         )
@@ -569,6 +1893,16 @@ class ProactiveEngineMixin:
         user["planned_proactive_source"] = "timer"
         user["planned_proactive_motive"] = self._normalize_internal_motive_text(_single_line(event.get("motive"), 140))
         user["planned_proactive_topic"] = _single_line(event.get("topic"), 60)
+        user["planned_proactive_impulse_id"] = ""
+        user["planned_proactive_window_start_at"] = scheduled_ts
+        active_span, grace_span = self._proactive_impulse_default_window_seconds(user["planned_proactive_reason"])
+        user["planned_proactive_best_until_at"] = scheduled_ts + active_span
+        user["planned_proactive_expire_at"] = scheduled_ts + active_span + grace_span
+        semantics = self._planned_proactive_semantics(user)
+        user["planned_proactive_semantic_kind"] = _single_line(semantics.get("kind"), 40)
+        user["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
+        user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))) * 100)
+        user["planned_proactive_semantic_note"] = _single_line(semantics.get("note"), 180)
         user["planned_event_chain"] = [] if self._private_user_role(user) == "friend" else (
             list(event.get("chain") or []) if isinstance(event.get("chain"), list) else []
         )
@@ -672,12 +2006,47 @@ class ProactiveEngineMixin:
             planned_reason = str(user.get("planned_proactive_reason") or "")
             planned_source = str(user.get("planned_proactive_source") or planned_source)
         next_at = _safe_float(user.get("next_proactive_at"), 0)
+        planned_impulse_id = _single_line(user.get("planned_proactive_impulse_id"), 20)
+        planned_expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
+        if (
+            not is_troubleshooting
+            and planned_impulse_id
+            and planned_expire_at > 0
+            and now > planned_expire_at
+            and not due_timer_active
+        ):
+            self._mark_planned_candidate_status(user, "blocked", "潜在念头窗口已过期")
+            self._clear_pending_proactive_plan(user)
+            if not self._materialize_best_proactive_impulse(user, now=now):
+                self._schedule_next_proactive(user, now=now, delay_hours=(1.0, 3.0))
+            return False, "原主动念头已过期,已重新挑选"
         if next_at <= 0:
             self._schedule_next_proactive(user, now=now)
             return False, "已安排下一次候选主动时间"
+        impulse_value = self._planned_impulse_value(user, now=now)
+        window_phase, window_detail = self._planned_impulse_window_phase(user, now=now)
+        if (
+            not is_troubleshooting
+            and planned_impulse_id
+            and window_phase == "tail"
+            and impulse_value < 0.58
+            and not due_timer_active
+        ):
+            replaced = self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note="低价值念头已过最佳表达窗口",
+                delay_minutes=(45, 120),
+                block_current=True,
+            )
+            if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now, delay_hours=(1.0, 3.0))
+            return False, "低价值念头已过最佳窗口,已重新挑选"
         if not is_troubleshooting and self._promote_earlier_daily_greeting_event(user, now=now):
             planned_reason = str(user.get("planned_proactive_reason") or "")
             next_at = _safe_float(user.get("next_proactive_at"), 0)
+            impulse_value = self._planned_impulse_value(user, now=now)
+            window_phase, window_detail = self._planned_impulse_window_phase(user, now=now)
         if (
             not is_troubleshooting
             and
@@ -694,6 +2063,26 @@ class ProactiveEngineMixin:
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(1, 4))
             return False, "候选主动计划已过期,已重新安排"
+        inner_readiness = self._proactive_inner_readiness(user, now=now)
+        inner_score = _safe_float(inner_readiness.get("score"), 0.55)
+        if (
+            not is_troubleshooting
+            and not due_timer_active
+            and planned_source != "timer"
+            and inner_score < 0.36
+            and impulse_value < 0.72
+        ):
+            delay_low = 90 if self._private_user_role(user) != "friend" else 240
+            self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note="Bot 状态/关系温度偏低,这个念头先忍住: " + _single_line(inner_readiness.get("detail"), 120),
+                delay_minutes=(delay_low, delay_low + 150),
+                block_current=False,
+            )
+            if _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now, delay_hours=(2.0, 6.0))
+            return False, "Bot 状态/关系温度偏低,主动念头先收住"
         social_relay_note = self._unverified_social_relay_plan_reason(
             user,
             source=planned_source,
@@ -720,6 +2109,16 @@ class ProactiveEngineMixin:
             if now - _safe_float(user.get("last_seen"), 0) < idle_limit:
                 if self._is_sticky_greeting_reason(planned_reason):
                     self._reschedule_greeting_within_window(user, planned_reason, now=now)
+                else:
+                    replaced = self._defer_or_replace_planned_impulse(
+                        user,
+                        now=now,
+                        note="用户刚活跃过,当前念头先收住",
+                        delay_minutes=(max(8.0, idle_limit / 60 * 0.5), max(15.0, idle_limit / 60 + 8.0)),
+                        block_current=impulse_value < 0.52,
+                    )
+                    if replaced:
+                        return False, "用户刚活跃过,已换用更贴近当前节奏的念头"
                 return False, "用户刚活跃过"
         min_interval = self._effective_min_interval_seconds(user)
         if self._is_greeting_reason(planned_reason) and self._private_user_role(user) != "friend":
@@ -727,6 +2126,15 @@ class ProactiveEngineMixin:
         if not is_troubleshooting and not due_timer_active and now - _safe_float(user.get("last_sent"), 0) < min_interval:
             if self._is_sticky_greeting_reason(planned_reason):
                 self._reschedule_greeting_within_window(user, planned_reason, now=now)
+            else:
+                remaining_minutes = max(5.0, (min_interval - (now - _safe_float(user.get("last_sent"), 0))) / 60)
+                self._defer_or_replace_planned_impulse(
+                    user,
+                    now=now,
+                    note="距离上次主动太近,当前念头先压低",
+                    delay_minutes=(remaining_minutes, remaining_minutes + 30.0),
+                    block_current=False,
+                )
             return False, "发送间隔不足"
         planned_action = str(user.get("planned_proactive_action") or "message")
         normalizer = getattr(self, "_normalize_existing_plan_for_emotion", None)
@@ -755,13 +2163,78 @@ class ProactiveEngineMixin:
             self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
             return False, "朋友关系不接收敏感主动"
+        planned_semantics = self._planned_proactive_semantics(user)
+        semantic_score = _safe_float(planned_semantics.get("score"), 0.5)
+        semantic_pressure = _safe_float(planned_semantics.get("pressure"), 0.4)
+        semantic_risk = _safe_float(planned_semantics.get("risk"), 0.0)
+        semantic_blocked = bool(planned_semantics.get("blocker"))
+        if (
+            not is_troubleshooting
+            and not due_timer_active
+            and planned_source != "timer"
+            and (semantic_blocked or semantic_risk >= 0.45 or (semantic_score < 0.32 and semantic_pressure >= 0.58))
+        ):
+            replaced = self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note="候选语义不够自然: " + _single_line(planned_semantics.get("note"), 120),
+                delay_minutes=(90, 240),
+                block_current=semantic_blocked or semantic_risk >= 0.45,
+            )
+            if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
+            return False, "候选语义不够自然,已重新挑选"
+        persona_alignment = self._planned_proactive_persona_alignment(user, now=now)
+        persona_fit = _safe_float(persona_alignment.get("score"), 0.55)
+        persona_blocked = bool(persona_alignment.get("blocker"))
+        persona_threshold = 0.48 if self._private_user_role(user) == "friend" else 0.42
+        if (
+            not is_troubleshooting
+            and not due_timer_active
+            and planned_source != "timer"
+            and (persona_blocked or persona_fit < persona_threshold)
+        ):
+            replaced = self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note="人格/世界观贴合度不足: " + _single_line(persona_alignment.get("note"), 120),
+                delay_minutes=(90, 240),
+                block_current=True,
+            )
+            if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
+            return False, "人格/世界观贴合度不足,已重新挑选"
         if due_timer_active:
             return True, "ok(timer)"
+        ignored_streak = _safe_int(user.get("ignored_streak"), 0, 0)
+        if (
+            not is_troubleshooting
+            and ignored_streak >= 2
+            and impulse_value < (0.72 if self._private_user_role(user) == "friend" else 0.66)
+        ):
+            replaced = self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note=f"连续 {ignored_streak} 次未回应,低压念头先不打扰",
+                delay_minutes=(90, 240),
+                block_current=True,
+            )
+            if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now, delay_hours=(2.5, 6.0))
+            return False, "连续未回应,低价值主动已收住"
         if not is_troubleshooting and not self._is_reason_allowed_now(planned_reason):
             if self._is_sticky_greeting_reason(planned_reason):
                 self._reschedule_greeting_within_window(user, planned_reason, now=now)
                 return False, "问候仍在窗口内,稍后再试"
-            self._schedule_next_proactive(user, now=now)
+            replaced = self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note="计划动机不适合当前时间",
+                delay_minutes=(45, 150),
+                block_current=window_phase == "tail" or impulse_value < 0.6,
+            )
+            if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now)
             return False, "计划动机不适合当前时间"
         if self._private_user_role(user) == "friend" and self._action_has_photo_text(planned_action):
             fallback_action = self._fallback_action_for_unavailable(planned_action, user)
@@ -773,21 +2246,40 @@ class ProactiveEngineMixin:
             if load_defer_note:
                 self._defer_planned_photo_text_for_load(user, now=now, note=load_defer_note)
                 return False, load_defer_note
-            self._mark_planned_candidate_status(user, "blocked", "动作不可用或媒体额度不足")
-            self._clear_pending_proactive_plan(user)
-            self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
+            replaced = self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note="动作不可用或媒体额度不足",
+                delay_minutes=(90, 240),
+                block_current=True,
+            )
+            if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
             return False, "动作不可用或媒体额度不足"
         if not is_troubleshooting and self._planned_proactive_recently_repeated(user):
-            self._mark_planned_candidate_status(user, "blocked", "近期主题过于相似")
-            self._clear_pending_proactive_plan(user)
-            self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
+            replaced = self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note="近期主题过于相似",
+                delay_minutes=(120, 360),
+                block_current=True,
+            )
+            if not replaced and _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now, delay_hours=(2, 6))
             return False, "近期主动主题过于相似"
         if not is_troubleshooting and self._planned_event_exceeds_daypart_cap(user, planned_reason, next_at):
-            self._clear_pending_proactive_plan(user)
             delay = self._friend_proactive_spread_delay_hours(user, now=now)
             if delay is None:
                 delay = (7.5, 10.5) if self._proactive_daypart_bucket_for_timestamp(next_at) == "late_night" else (2.5, 5.0)
-            self._schedule_next_proactive(user, now=now, delay_hours=delay)
+            self._defer_or_replace_planned_impulse(
+                user,
+                now=now,
+                note="当前时段主动已足够",
+                delay_minutes=(delay[0] * 60, delay[1] * 60),
+                block_current=False,
+            )
+            if _safe_float(user.get("next_proactive_at"), 0) <= 0:
+                self._schedule_next_proactive(user, now=now, delay_hours=delay)
             if self._private_user_role(user) == "friend":
                 return False, "朋友主动已按日内节奏延后"
             return False, "当前时段主动已足够,已避开扎堆"
@@ -858,16 +2350,81 @@ class ProactiveEngineMixin:
             return "疑似第三方邀约内容,缺少真实触发来源"
         return ""
 
-    def _mark_planned_candidate_status(self, user: dict[str, Any], status: str, note: str = "") -> None:
-        candidate_id = str(user.get("planned_candidate_id") or "")
-        if not candidate_id:
-            return
-        for item in self._cleanup_proactive_candidate_pool():
-            if str(item.get("id") or "") == candidate_id:
-                item["status"] = status
-                item["note"] = _single_line(note, 160)
-                item["updated_ts"] = _now_ts()
+    def _planned_proactive_status_snapshot(self, user: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(user, dict):
+            return {}
+        keys = (
+            "planned_candidate_id",
+            "planned_proactive_impulse_id",
+            "planned_proactive_reason",
+            "planned_proactive_action",
+            "planned_proactive_source",
+            "planned_proactive_motive",
+            "planned_proactive_topic",
+            "planned_proactive_semantic_kind",
+            "planned_proactive_anchor_type",
+            "planned_proactive_semantic_score",
+            "planned_proactive_semantic_note",
+        )
+        return {key: user.get(key) for key in keys}
+
+    def _mark_planned_candidate_status(
+        self,
+        user: dict[str, Any],
+        status: str,
+        note: str = "",
+        *,
+        planned_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        restored_values: dict[str, Any] = {}
+        if isinstance(planned_snapshot, dict) and planned_snapshot:
+            for key, value in planned_snapshot.items():
+                if value in (None, "", {}, []):
+                    continue
+                restored_values[key] = user.get(key)
+                user[key] = value
+        try:
+            outcome_recorder = getattr(self, "_note_proactive_afterglow_outcome", None)
+            if callable(outcome_recorder):
+                try:
+                    outcome_recorder(user, status=status, note=note)
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] 主动结果余韵记录失败: %s", _single_line(exc, 120))
+            candidate_id = str(user.get("planned_candidate_id") or "")
+            if candidate_id:
+                for item in self._cleanup_proactive_candidate_pool():
+                    if str(item.get("id") or "") == candidate_id:
+                        item["status"] = status
+                        item["note"] = _single_line(note, 160)
+                        item["updated_ts"] = _now_ts()
+                        break
+            impulse_id = _single_line(user.get("planned_proactive_impulse_id"), 20)
+            if not impulse_id:
+                return
+            for impulse in self._cleanup_proactive_impulses(user):
+                if _single_line(impulse.get("id"), 20) != impulse_id:
+                    continue
+                impulse["updated_ts"] = _now_ts()
+                impulse["last_status"] = _single_line(status, 24)
+                impulse["last_note"] = _single_line(note, 160)
+                if status in {"sent"}:
+                    impulse["state"] = "sent"
+                elif status in {"blocked", "cancelled", "dropped"}:
+                    impulse["state"] = "blocked"
+                elif status == "deferred":
+                    impulse["state"] = "deferred"
+                    next_at = _safe_float(user.get("next_proactive_at"), 0)
+                    if next_at > 0:
+                        impulse["window_start_at"] = next_at
+                        impulse["preferred_ts"] = max(_safe_float(impulse.get("preferred_ts"), 0), next_at)
+                        impulse["best_until_at"] = max(_safe_float(impulse.get("best_until_at"), 0), next_at + 20 * 60)
+                        impulse["expire_at"] = max(_safe_float(impulse.get("expire_at"), 0), impulse["best_until_at"] + 40 * 60)
+                else:
+                    impulse["state"] = "queued"
                 break
+        finally:
+            for key, value in restored_values.items():
+                user[key] = value
 
     def _proactive_decision_factors(self, user: dict[str, Any], *, now: float | None = None) -> list[dict[str, Any]]:
         now = _now_ts() if now is None else now
@@ -985,6 +2542,117 @@ class ProactiveEngineMixin:
                     if next_at > 0
                     else "未安排"
                 ),
+                blocker=False,
+            )
+        impulse_value = self._planned_impulse_value(user, now=now)
+        window_phase, window_detail = self._planned_impulse_window_phase(user, now=now)
+        phase_labels = {
+            "before": "窗口未开始",
+            "best": "最佳窗口",
+            "tail": "窗口尾段",
+            "expired": "已经过期",
+            "unknown": "未记录",
+        }
+        window_ok = window_phase not in {"expired"}
+        add(
+            "impulse_window",
+            "念头窗口",
+            window_ok,
+            7 if window_phase == "best" else 2 if window_phase == "tail" else -6 if window_phase == "before" else -35 if window_phase == "expired" else 0,
+            f"{phase_labels.get(window_phase, window_phase)}｜{window_detail}",
+            blocker=window_phase == "expired",
+        )
+        add(
+            "impulse_value",
+            "念头价值",
+            impulse_value >= 0.55,
+            8 if impulse_value >= 0.85 else 4 if impulse_value >= 0.65 else -8,
+            f"{impulse_value:.2f}｜越高越像当前角色真的想说",
+            blocker=False,
+        )
+        inner_readiness = self._proactive_inner_readiness(user, now=now)
+        drive = inner_readiness.get("drive") if isinstance(inner_readiness.get("drive"), dict) else {}
+        temperature = inner_readiness.get("temperature") if isinstance(inner_readiness.get("temperature"), dict) else {}
+        inner_score = _safe_float(inner_readiness.get("score"), 0.55)
+        add(
+            "bot_drive",
+            "Bot 开口欲",
+            inner_score >= 0.36,
+            7 if inner_score >= 0.72 else 3 if inner_score >= 0.5 else -14,
+            f"{inner_score:.2f}｜{_single_line(inner_readiness.get('label'), 40)}｜{_single_line(drive.get('detail'), 70)}",
+            blocker=inner_score < 0.28,
+        )
+        temp_score = _safe_float(temperature.get("score"), 0.55)
+        add(
+            "relationship_temperature",
+            "关系温度",
+            temp_score >= 0.34,
+            7 if temp_score >= 0.7 else 3 if temp_score >= 0.48 else -16,
+            f"{temp_score:.2f}｜{_single_line(temperature.get('label'), 24)}｜{_single_line(temperature.get('detail'), 80)}",
+            blocker=temp_score < 0.24,
+        )
+        planned_impulse = self._planned_proactive_impulse(user)
+        hesitation_count = _safe_int(planned_impulse.get("hesitation_count"), 0, 0, 20) if isinstance(planned_impulse, dict) else 0
+        if hesitation_count > 0:
+            add(
+                "hesitation_memory",
+                "犹豫记忆",
+                True,
+                min(6, 2 + hesitation_count),
+                f"这个念头前面收住过 {hesitation_count} 次｜{_single_line(planned_impulse.get('hesitation_note'), 80)}",
+                blocker=False,
+            )
+        semantics = self._planned_proactive_semantics(user)
+        semantic_score = _safe_float(semantics.get("score"), 0.5)
+        semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
+        semantic_risk = _safe_float(semantics.get("risk"), 0.0)
+        semantic_ok = not bool(semantics.get("blocker")) and semantic_risk < 0.45 and not (semantic_score < 0.32 and semantic_pressure >= 0.58)
+        add(
+            "candidate_semantics",
+            "候选语义",
+            semantic_ok,
+            8 if semantic_score >= 0.68 else 4 if semantic_score >= 0.48 else -18,
+            (
+                f"{_single_line(semantics.get('kind'), 30)}/{_single_line(semantics.get('anchor_type'), 30)}"
+                f"｜语义{semantic_score:.2f} 压力{semantic_pressure:.2f} 风险{semantic_risk:.2f}"
+                f"｜{_single_line(semantics.get('note'), 70)}"
+            ),
+            blocker=not semantic_ok,
+        )
+        persona_alignment = self._planned_proactive_persona_alignment(user, now=now)
+        persona_fit = _safe_float(persona_alignment.get("score"), 0.55)
+        persona_threshold = 0.48 if self._private_user_role(user) == "friend" else 0.42
+        persona_blocked = bool(persona_alignment.get("blocker")) and source != "timer"
+        persona_ok = due_timer_active or source == "timer" or (not persona_blocked and persona_fit >= persona_threshold)
+        add(
+            "persona_fit",
+            "人格/世界观贴合",
+            persona_ok,
+            8 if persona_fit >= 0.78 else 4 if persona_fit >= 0.58 else -18,
+            f"{persona_fit:.2f}｜{_single_line(persona_alignment.get('note'), 110)}",
+            blocker=not persona_ok,
+        )
+        model_signature = self._planned_proactive_model_judge_signature(user)
+        model_judgement = self._cached_proactive_model_judgement(user, signature=model_signature, now=now)
+        if isinstance(model_judgement, dict):
+            model_decision = str(model_judgement.get("decision") or "")
+            model_score = _safe_int(model_judgement.get("score"), 0, 0, 100)
+            model_ok = model_decision in {"send", "rewrite"}
+            add(
+                "model_persona_judge",
+                "模型人格判定",
+                model_ok,
+                8 if model_decision == "send" else 4 if model_decision == "rewrite" else -30,
+                f"{model_decision or 'unknown'}｜{model_score}/100｜{_single_line(model_judgement.get('reason'), 90)}",
+                blocker=not model_ok,
+            )
+        else:
+            add(
+                "model_persona_judge",
+                "模型人格判定",
+                True,
+                0,
+                "未执行；硬规则通过且到点发送前执行",
                 blocker=False,
             )
 
@@ -1162,6 +2830,7 @@ class ProactiveEngineMixin:
     ) -> str:
         now = _now_ts()
         audit_id = uuid.uuid4().hex[:12]
+        semantics = self._planned_proactive_semantics(user)
         item = {
             "id": audit_id,
             "created_ts": now,
@@ -1174,6 +2843,12 @@ class ProactiveEngineMixin:
             "action": _single_line(action or user.get("planned_proactive_action"), 60) or "message",
             "topic": _single_line(user.get("planned_proactive_topic"), 100),
             "motive": _single_line(user.get("planned_proactive_motive"), 180),
+            "semantic_kind": _single_line(user.get("planned_proactive_semantic_kind"), 40) or _single_line(semantics.get("kind"), 40),
+            "semantic_anchor_type": _single_line(user.get("planned_proactive_anchor_type"), 40) or _single_line(semantics.get("anchor_type"), 40),
+            "semantic_score": _safe_int(user.get("planned_proactive_semantic_score"), 0, 0, 100) or int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.0))) * 100),
+            "semantic_pressure": int(max(0.0, min(1.0, _safe_float(semantics.get("pressure"), 0.0))) * 100),
+            "semantic_risk": int(max(0.0, min(1.0, _safe_float(semantics.get("risk"), 0.0))) * 100),
+            "semantic_note": _single_line(user.get("planned_proactive_semantic_note"), 180) or _single_line(semantics.get("note"), 180),
             "scheduled_ts": _safe_float(user.get("next_proactive_at"), 0),
             "candidate_id": _single_line(user.get("planned_candidate_id"), 40),
             "umo": _single_line(user.get("umo"), 180),
@@ -1261,7 +2936,13 @@ class ProactiveEngineMixin:
         planned_source = str(probe.get("planned_proactive_source") or "")
         planned_motive = _single_line(probe.get("planned_proactive_motive"), 48)
         next_at = _safe_float(probe.get("next_proactive_at"), 0)
+        planned_impulse_id = _single_line(probe.get("planned_proactive_impulse_id"), 20)
+        planned_best_until = _safe_float(probe.get("planned_proactive_best_until_at"), 0)
         timer_event = self._get_active_llm_timer(probe)
+        active_impulses = [
+            item for item in self._cleanup_proactive_impulses(probe, now=now)
+            if isinstance(item, dict) and str(item.get("state") or "queued") in {"queued", "deferred"}
+        ]
         next_at_text = (
             self._environment_fromtimestamp(next_at).strftime("%m-%d %H:%M:%S")
             if next_at > 0
@@ -1301,9 +2982,12 @@ class ProactiveEngineMixin:
             f"下次候选：{next_at_text}",
             f"计划：{planned_reason or '未记录'}｜{planned_action}"
             + (f"｜计划源：{planned_source}" if planned_source else "")
+            + (f"｜念头ID：{planned_impulse_id}" if planned_impulse_id else "")
             + (f"｜话题：{_single_line(probe.get('planned_proactive_topic'), 24)}" if _single_line(probe.get("planned_proactive_topic"), 24) else "")
             + (f"｜动机：{planned_motive}" if planned_motive else "")
+            + (f"｜最佳窗口到 {self._environment_fromtimestamp(planned_best_until).strftime('%H:%M:%S')}" if planned_best_until > 0 else "")
             + (f"｜来源：模型预约" if isinstance(timer_event, dict) and _safe_float(timer_event.get("scheduled_ts"), 0) == next_at else ""),
+            f"潜在念头：{len(active_impulses)} 个待选",
             f"今日已发：{sent_today}/{self._effective_user_daily_limit(probe)}｜软目标约 {self._soft_daily_target(probe):.1f}",
             f"今日问候：已发 {', '.join(str(item) for item in sent_greetings) or '无'}｜被用户消息跳过 {', '.join(str(item) for item in suppressed_greetings) or '无'}",
             f"免打扰：{'是' if self._is_quiet_time() else '否'}｜失眠特例：{'可用' if self._can_send_insomnia_night_message(probe) else '不可用'}",
@@ -1375,6 +3059,17 @@ class ProactiveEngineMixin:
         user["planned_proactive_source"] = "simulation"
         user["planned_proactive_motive"] = _single_line(current.get("motive"), 140)
         user["planned_proactive_topic"] = _single_line(current.get("topic"), 60)
+        scheduled_ts = _safe_float(user.get("next_proactive_at"), now)
+        user["planned_proactive_impulse_id"] = ""
+        user["planned_proactive_window_start_at"] = scheduled_ts
+        active_span, grace_span = self._proactive_impulse_default_window_seconds(user["planned_proactive_reason"])
+        user["planned_proactive_best_until_at"] = scheduled_ts + active_span
+        user["planned_proactive_expire_at"] = scheduled_ts + active_span + grace_span
+        semantics = self._planned_proactive_semantics(user)
+        user["planned_proactive_semantic_kind"] = _single_line(semantics.get("kind"), 40)
+        user["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
+        user["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))) * 100)
+        user["planned_proactive_semantic_note"] = _single_line(semantics.get("note"), 180)
         user["planned_event_chain"] = [] if self._private_user_role(user) == "friend" else (
             list(current.get("chain") or []) if isinstance(current.get("chain"), list) else []
         )
@@ -1402,6 +3097,14 @@ class ProactiveEngineMixin:
         user["planned_proactive_source"] = ""
         user["planned_proactive_motive"] = ""
         user["planned_proactive_topic"] = ""
+        user["planned_proactive_impulse_id"] = ""
+        user["planned_proactive_window_start_at"] = 0
+        user["planned_proactive_best_until_at"] = 0
+        user["planned_proactive_expire_at"] = 0
+        user["planned_proactive_semantic_kind"] = ""
+        user["planned_proactive_anchor_type"] = ""
+        user["planned_proactive_semantic_score"] = 0
+        user["planned_proactive_semantic_note"] = ""
         user["planned_event_chain"] = []
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
@@ -1766,8 +3469,8 @@ class ProactiveEngineMixin:
         if not isinstance(proactive_events, list):
             proactive_events = []
         usable = [dict(item) for item in proactive_events if isinstance(item, dict)]
-        segment_start = _safe_int((segment or {}).get("start"), -1)
-        segment_end = _safe_int((segment or {}).get("end"), -1)
+        segment_start = _safe_int((segment or {}).get("start"), -1, -1)
+        segment_end = _safe_int((segment or {}).get("end"), -1, -1)
         if segment_start >= 0 and segment_end > segment_start:
             scoped: list[dict[str, Any]] = []
             for item in usable:
@@ -1829,8 +3532,8 @@ class ProactiveEngineMixin:
         )
         window = ""
         if isinstance(segment, dict):
-            start = _safe_int(segment.get("start"), -1)
-            end = _safe_int(segment.get("end"), -1)
+            start = _safe_int(segment.get("start"), -1, -1)
+            end = _safe_int(segment.get("end"), -1, -1)
             if start >= 0 and end > start:
                 window = f"{self._minutes_to_hhmm(start)}-{self._minutes_to_hhmm(end)}"
         return {

@@ -1314,16 +1314,7 @@ class DailyStateMixin:
         retry_count = previous_count + 1
         if retry_count > 2:
             self._clear_pending_proactive_send_retry(user)
-            user["next_proactive_at"] = 0
-            user["planned_proactive_reason"] = ""
-            user["planned_proactive_action"] = ""
-            user["planned_proactive_source"] = ""
-            user["planned_proactive_motive"] = ""
-            user["planned_proactive_topic"] = ""
-            user["planned_event_chain"] = []
-            user["planned_opener_mode"] = ""
-            user["planned_followup_kind"] = ""
-            user["planned_proactive_quota_exempt"] = False
+            self._clear_pending_proactive_plan(user)
             self._schedule_next_proactive(user, now=current, delay_hours=(12, 24))
             return "待重发内容连续发送失败，已放弃复用并重新排程"
         if extra_components:
@@ -6400,17 +6391,7 @@ class DailyStateMixin:
             return
         if str(user.get("planned_proactive_source") or "") != "timer":
             return
-        user["next_proactive_at"] = 0
-        user["planned_proactive_reason"] = ""
-        user["planned_proactive_action"] = ""
-        user["planned_proactive_source"] = ""
-        user["planned_proactive_motive"] = ""
-        user["planned_proactive_topic"] = ""
-        user["planned_event_chain"] = []
-        user["planned_opener_mode"] = ""
-        user["planned_followup_kind"] = ""
-        user["planned_proactive_quota_exempt"] = False
-        self._clear_planned_proactive_trigger(user)
+        self._clear_pending_proactive_plan(user)
 
     def _clear_llm_timer_event(self, user: dict[str, Any], *, event_id: str = "") -> None:
         raw = user.get("llm_timer_event")
@@ -7711,12 +7692,41 @@ class DailyStateMixin:
         if self._is_sticky_greeting_reason(reason) and self._reschedule_greeting_within_window(user, reason, now=check_now):
             pass
         else:
-            user["next_proactive_at"] = max(check_now + 5 * 60, quiet_until + random.uniform(2 * 60, 8 * 60))
+            delay_minutes = (
+                max(5.0, (quiet_until - check_now) / 60 + 2.0),
+                max(8.0, (quiet_until - check_now) / 60 + 8.0),
+            )
+            replacer = getattr(self, "_defer_or_replace_planned_impulse", None)
+            replaced = False
+            handled_by_replacer = False
+            if callable(replacer):
+                try:
+                    handled_by_replacer = True
+                    replaced = bool(
+                        replacer(
+                            user,
+                            now=check_now,
+                            note=note or "刚聊完，普通主动延后",
+                            delay_minutes=delay_minutes,
+                            block_current=False,
+                        )
+                    )
+                except Exception as exc:
+                    logger.debug("[PrivateCompanion] 刚聊完主动换念头失败,回退延后: %s", _single_line(exc, 120))
+                    replaced = False
+                    handled_by_replacer = False
+            if not replaced:
+                if handled_by_replacer and not _single_line(user.get("planned_proactive_reason"), 40):
+                    self._schedule_next_proactive(user, now=check_now, delay_hours=(max(0.2, delay_minutes[0] / 60), max(0.35, delay_minutes[1] / 60)))
+                else:
+                    user["next_proactive_at"] = max(check_now + 5 * 60, quiet_until + random.uniform(2 * 60, 8 * 60))
             if str(user.get("planned_proactive_source") or "") == "simulation":
                 sim = user.get("simulation_mode")
                 events = sim.get("events") if isinstance(sim, dict) else None
                 if isinstance(events, list) and events and isinstance(events[0], dict):
                     events[0]["_scheduled_ts"] = user["next_proactive_at"]
+            if handled_by_replacer:
+                return
         self._mark_planned_candidate_status(user, "deferred", note or "刚聊完，普通主动延后")
 
     def _is_troubleshooting_proactive_plan(self, user: dict[str, Any]) -> bool:
@@ -7784,14 +7794,49 @@ class DailyStateMixin:
     def _restore_troubleshooting_proactive_plan(self, user: dict[str, Any]) -> None:
         restore = user.get("troubleshooting_proactive_restore")
         if isinstance(restore, dict):
-            for key, value in restore.items():
-                user[key] = deepcopy(value)
+            values = restore.get("values")
+            if isinstance(values, dict):
+                missing = restore.get("missing")
+                if isinstance(missing, list):
+                    for key in missing:
+                        if isinstance(key, str):
+                            user.pop(key, None)
+                for key, value in values.items():
+                    if isinstance(key, str):
+                        user[key] = deepcopy(value)
+            else:
+                for key, value in restore.items():
+                    user[key] = deepcopy(value)
         else:
             self._clear_pending_proactive_plan(user)
         user.pop("troubleshooting_proactive_restore", None)
         user.pop("troubleshooting_proactive_test_id", None)
         user.pop("troubleshooting_proactive_started_at", None)
         user.pop("troubleshooting_proactive_steps", None)
+
+    def _recover_stale_troubleshooting_proactive_plans(self) -> int:
+        users = self.data.get("users")
+        if not isinstance(users, dict):
+            return 0
+        recovered = 0
+        for user_id, user in users.items():
+            if not isinstance(user, dict) or not isinstance(user.get("troubleshooting_proactive_restore"), dict):
+                continue
+            self._append_troubleshooting_proactive_step(user, "启动恢复", "error", "上次排障临时主动未完成，已恢复原计划")
+            self._record_troubleshooting_proactive_result(
+                str(user_id),
+                user,
+                ok=False,
+                detail="上次排障临时主动任务未完成，插件启动时已恢复原主动计划",
+                error="插件重启或任务中断",
+                action=str(user.get("planned_proactive_action") or "message"),
+                reason=str(user.get("planned_proactive_reason") or "check_in"),
+            )
+            user["proactive_sending"] = False
+            user["proactive_sending_started_at"] = 0
+            self._restore_troubleshooting_proactive_plan(user)
+            recovered += 1
+        return recovered
 
     async def _run_proactive_maintenance_tasks(self) -> None:
         for label, task_factory in (
@@ -7866,8 +7911,101 @@ class DailyStateMixin:
                 self._debug_tick_skip(user_id, reason)
                 continue
 
+            expected_model_signature = self._planned_proactive_model_judge_signature(user)
+            if not is_troubleshooting_for_send and not due_timer_id:
+                model_judgement: dict[str, Any] = {}
+                try:
+                    model_judgement = await self._review_planned_proactive_with_model(user, now=now)
+                except Exception as e:
+                    logger.warning(
+                        "[PrivateCompanion] 主动模型人格判定异常,降级本地判定: user=%s error=%s",
+                        user_id,
+                        _single_line(e, 160),
+                    )
+                    model_judgement = {"decision": "send", "score": 0, "reason": "模型判定异常,降级本地"}
+                model_decision = str(model_judgement.get("decision") or "send")
+                if model_decision in {"defer", "drop", "rewrite"}:
+                    async with self._data_lock:
+                        current_for_model = self._get_user(user_id)
+                        current_signature = self._planned_proactive_model_judge_signature(current_for_model)
+                        judged_signature = _single_line(model_judgement.get("signature"), 80) or current_signature
+                        if current_signature != judged_signature:
+                            self._debug_tick_skip(user_id, "模型判定期间计划已变化,本轮重新检查", prefix="跳过")
+                            continue
+                        if model_decision == "rewrite":
+                            changed = self._apply_proactive_model_rewrite(current_for_model, model_judgement)
+                            model_judgement["signature"] = self._planned_proactive_model_judge_signature(current_for_model)
+                            expected_model_signature = _single_line(model_judgement.get("signature"), 80)
+                            self._cache_proactive_model_judgement(current_for_model, model_judgement, now=_now_ts())
+                            if not changed:
+                                note = "模型人格判定要求改写,但未给出有效替换字段"
+                                self._defer_or_replace_planned_impulse(
+                                    current_for_model,
+                                    now=_now_ts(),
+                                    note=note,
+                                    delay_minutes=(60, 150),
+                                    block_current=False,
+                                )
+                                self._save_data_sync()
+                                self._debug_tick_skip(user_id, note, prefix="延后")
+                                continue
+                            if changed:
+                                self._mark_planned_candidate_status(
+                                    current_for_model,
+                                    "accepted",
+                                    "模型人格判定改写计划: " + _single_line(model_judgement.get("reason"), 120),
+                                )
+                                logger.info(
+                                    "[PrivateCompanion] 模型人格判定已改写主动计划: user=%s reason=%s",
+                                    user_id,
+                                    _single_line(model_judgement.get("reason"), 120),
+                                )
+                            user = dict(current_for_model)
+                            self._save_data_sync()
+                        elif model_decision == "defer":
+                            note = "模型人格判定延后: " + _single_line(model_judgement.get("reason"), 120)
+                            delay = _safe_int(model_judgement.get("delay_minutes"), 90, 20, 360)
+                            self._cache_proactive_model_judgement(current_for_model, model_judgement, now=_now_ts())
+                            replaced = self._defer_or_replace_planned_impulse(
+                                current_for_model,
+                                now=_now_ts(),
+                                note=note,
+                                delay_minutes=(delay, delay + 45),
+                                block_current=False,
+                            )
+                            if not replaced and _safe_float(current_for_model.get("next_proactive_at"), 0) <= 0:
+                                self._schedule_next_proactive(current_for_model, now=_now_ts(), delay_hours=(1.5, 4.0))
+                            self._save_data_sync()
+                            self._debug_tick_skip(user_id, note, prefix="延后")
+                            continue
+                        elif model_decision == "drop":
+                            note = "模型人格判定丢弃: " + _single_line(model_judgement.get("reason"), 120)
+                            self._cache_proactive_model_judgement(current_for_model, model_judgement, now=_now_ts())
+                            self._mark_planned_candidate_status(current_for_model, "blocked", note)
+                            self._clear_pending_proactive_plan(current_for_model)
+                            self._schedule_next_proactive(current_for_model, now=_now_ts(), delay_hours=(2.0, 6.0))
+                            self._save_data_sync()
+                            self._debug_tick_skip(user_id, note, prefix="取消")
+                            continue
+                else:
+                    async with self._data_lock:
+                        current_for_model_cache = self._get_user(user_id)
+                        current_signature = self._planned_proactive_model_judge_signature(current_for_model_cache)
+                        judged_signature = _single_line(model_judgement.get("signature"), 80) or current_signature
+                        if current_signature == judged_signature:
+                            self._cache_proactive_model_judgement(current_for_model_cache, model_judgement, now=_now_ts())
+                            self._save_data_sync()
+
             async with self._data_lock:
                 current_for_mark = self._get_user(user_id)
+                if (
+                    not is_troubleshooting_for_send
+                    and not due_timer_id
+                    and expected_model_signature
+                    and self._planned_proactive_model_judge_signature(current_for_mark) != expected_model_signature
+                ):
+                    self._debug_tick_skip(user_id, "模型判定后计划已变化,本轮重新检查", prefix="跳过")
+                    continue
                 if not self._user_enabled_for_proactive(str(user_id), current_for_mark):
                     if is_troubleshooting_for_send:
                         self._append_troubleshooting_proactive_step(current_for_mark, "到点执行", "error", "目标私聊对象已禁用")
@@ -7985,17 +8123,8 @@ class DailyStateMixin:
                         current_for_duplicate_cooldown = self._get_user(user_id)
                         current_for_duplicate_cooldown["proactive_sending"] = False
                         current_for_duplicate_cooldown["proactive_sending_started_at"] = 0
-                        current_for_duplicate_cooldown["next_proactive_at"] = 0
-                        current_for_duplicate_cooldown["planned_proactive_reason"] = ""
-                        current_for_duplicate_cooldown["planned_proactive_action"] = ""
-                        current_for_duplicate_cooldown["planned_proactive_source"] = ""
-                        current_for_duplicate_cooldown["planned_proactive_motive"] = ""
-                        current_for_duplicate_cooldown["planned_proactive_topic"] = ""
-                        current_for_duplicate_cooldown["planned_event_chain"] = []
-                        current_for_duplicate_cooldown["planned_opener_mode"] = ""
-                        current_for_duplicate_cooldown["planned_followup_kind"] = ""
-                        current_for_duplicate_cooldown["planned_proactive_quota_exempt"] = False
                         self._mark_planned_candidate_status(current_for_duplicate_cooldown, "blocked", note)
+                        self._clear_pending_proactive_plan(current_for_duplicate_cooldown)
                         self._update_proactive_audit(audit_id, status="cancelled", note=f"活动分享去重冷却中: {note}")
                         self._schedule_next_proactive(current_for_duplicate_cooldown, now=_now_ts(), delay_hours=(2.0, 5.0))
                         self._save_data_sync()
@@ -8063,18 +8192,9 @@ class DailyStateMixin:
                     if group_share_block_reason:
                         current_for_group_check["proactive_sending"] = False
                         current_for_group_check["proactive_sending_started_at"] = 0
-                        current_for_group_check["next_proactive_at"] = 0
-                        current_for_group_check["planned_proactive_reason"] = ""
-                        current_for_group_check["planned_proactive_action"] = ""
-                        current_for_group_check["planned_proactive_source"] = ""
-                        current_for_group_check["planned_proactive_motive"] = ""
-                        current_for_group_check["planned_proactive_topic"] = ""
-                        current_for_group_check["planned_event_chain"] = []
-                        current_for_group_check["planned_opener_mode"] = ""
-                        current_for_group_check["planned_followup_kind"] = ""
-                        current_for_group_check["planned_proactive_quota_exempt"] = False
-                        current_for_group_check["group_share_context"] = {}
                         self._mark_planned_candidate_status(current_for_group_check, "blocked", group_share_block_reason)
+                        self._clear_pending_proactive_plan(current_for_group_check)
+                        current_for_group_check["group_share_context"] = {}
                         self._update_proactive_audit(audit_id, status="cancelled", note=group_share_block_reason)
                         self._save_data_sync()
                 if group_share_block_reason:
@@ -8157,6 +8277,7 @@ class DailyStateMixin:
                         motive=planned_motive_for_send,
                         topic=planned_topic_for_send,
                         action_summary=action_summary,
+                        image_path=image_path,
                     )
                 except Exception as exc:
                     logger.debug("[PrivateCompanion] 主动消息发送前价值复核失败,按原文继续: %s", _single_line(exc, 120))
@@ -8237,17 +8358,8 @@ class DailyStateMixin:
                         )
                         current_for_dedupe["proactive_sending"] = False
                         current_for_dedupe["proactive_sending_started_at"] = 0
-                        current_for_dedupe["next_proactive_at"] = 0
-                        current_for_dedupe["planned_proactive_reason"] = ""
-                        current_for_dedupe["planned_proactive_action"] = ""
-                        current_for_dedupe["planned_proactive_source"] = ""
-                        current_for_dedupe["planned_proactive_motive"] = ""
-                        current_for_dedupe["planned_proactive_topic"] = ""
-                        current_for_dedupe["planned_event_chain"] = []
-                        current_for_dedupe["planned_opener_mode"] = ""
-                        current_for_dedupe["planned_followup_kind"] = ""
-                        current_for_dedupe["planned_proactive_quota_exempt"] = False
                         self._mark_planned_candidate_status(current_for_dedupe, "blocked", "同一日常碎片刚刚已分享给其他私聊对象")
+                        self._clear_pending_proactive_plan(current_for_dedupe)
                         audit_note = f"跨用户活动分享去重: {duplicate_note}"
                         if removed_can_do:
                             audit_note = f"{audit_note}；已移除候选碎片 {len(removed_can_do)} 条"
@@ -8299,18 +8411,9 @@ class DailyStateMixin:
                         )
                         self._restore_troubleshooting_proactive_plan(current_for_time_guard)
                     else:
-                        current_for_time_guard["next_proactive_at"] = 0
-                        current_for_time_guard["planned_proactive_reason"] = ""
-                        current_for_time_guard["planned_proactive_action"] = ""
-                        current_for_time_guard["planned_proactive_source"] = ""
-                        current_for_time_guard["planned_proactive_motive"] = ""
-                        current_for_time_guard["planned_proactive_topic"] = ""
-                        current_for_time_guard["planned_event_chain"] = []
-                        current_for_time_guard["planned_opener_mode"] = ""
-                        current_for_time_guard["planned_followup_kind"] = ""
-                        current_for_time_guard["planned_proactive_quota_exempt"] = False
+                        self._mark_planned_candidate_status(current_for_time_guard, "blocked", time_mismatch_reason)
+                        self._clear_pending_proactive_plan(current_for_time_guard)
                         self._schedule_next_proactive(current_for_time_guard, now=_now_ts(), delay_hours=(1.5, 4.0))
-                    self._mark_planned_candidate_status(current_for_time_guard, "blocked", time_mismatch_reason)
                     self._update_proactive_audit(audit_id, status="cancelled", note=time_mismatch_reason)
                     self._save_data_sync()
                 self._debug_tick_skip(user_id, "主动消息时间不一致", prefix="取消")
@@ -8425,15 +8528,8 @@ class DailyStateMixin:
                     elif self._simulation_active(current):
                         self._consume_simulation_event(current)
                     else:
-                        current["next_proactive_at"] = 0
-                        current["planned_proactive_reason"] = ""
-                        current["planned_proactive_action"] = ""
-                        current["planned_proactive_source"] = ""
-                        current["planned_proactive_motive"] = ""
-                        current["planned_proactive_topic"] = ""
-                        current["planned_opener_mode"] = ""
-                        current["planned_followup_kind"] = ""
-                        current["planned_proactive_quota_exempt"] = False
+                        self._mark_planned_candidate_status(current, "dropped", "主动行为失败或不适合发送")
+                        self._clear_pending_proactive_plan(current)
                         self._schedule_next_proactive(current, now=_now_ts(), delay_hours=(2, 8))
                     self._update_proactive_audit(audit_id, status="dropped", note="主动行为失败或不适合发送")
                     self._save_data_sync()
@@ -8541,6 +8637,7 @@ class DailyStateMixin:
                         )
                         self._restore_troubleshooting_proactive_plan(current_after_failure)
                     else:
+                        planned_snapshot = self._planned_proactive_status_snapshot(current_after_failure)
                         retry_note = self._store_or_advance_proactive_send_retry(
                             current_after_failure,
                             text=text,
@@ -8552,7 +8649,13 @@ class DailyStateMixin:
                             error_text=error_text,
                             now=_now_ts(),
                         )
-                        self._mark_planned_candidate_status(current_after_failure, "deferred", retry_note)
+                        retry_status = "failed" if "已放弃复用" in retry_note else "deferred"
+                        self._mark_planned_candidate_status(
+                            current_after_failure,
+                            retry_status,
+                            retry_note,
+                            planned_snapshot=planned_snapshot,
+                        )
                     self._update_proactive_audit(audit_id, status="failed", note=f"发送失败: {_single_line(error_text, 140)}")
                     self._save_data_sync()
                 continue
@@ -8745,6 +8848,16 @@ class DailyStateMixin:
                         current["planned_proactive_source"] = "timer"
                         current["planned_proactive_motive"] = _single_line(next_timer.get("motive"), 140)
                         current["planned_proactive_topic"] = _single_line(next_timer.get("topic"), 60)
+                        current["planned_proactive_impulse_id"] = ""
+                        current["planned_proactive_window_start_at"] = current["next_proactive_at"]
+                        active_span, grace_span = self._proactive_impulse_default_window_seconds(current["planned_proactive_reason"])
+                        current["planned_proactive_best_until_at"] = current["next_proactive_at"] + active_span
+                        current["planned_proactive_expire_at"] = current["next_proactive_at"] + active_span + grace_span
+                        semantics = self._planned_proactive_semantics(current)
+                        current["planned_proactive_semantic_kind"] = _single_line(semantics.get("kind"), 40)
+                        current["planned_proactive_anchor_type"] = _single_line(semantics.get("anchor_type"), 40)
+                        current["planned_proactive_semantic_score"] = int(max(0.0, min(1.0, _safe_float(semantics.get("score"), 0.5))) * 100)
+                        current["planned_proactive_semantic_note"] = _single_line(semantics.get("note"), 180)
                         self._set_planned_proactive_trigger(
                             current,
                             message_id=_single_line(next_timer.get("trigger_message_id"), 120),
@@ -8758,17 +8871,7 @@ class DailyStateMixin:
                         current["planned_followup_kind"] = ""
                         current["planned_proactive_quota_exempt"] = False
                     else:
-                        current["next_proactive_at"] = 0
-                        current["planned_proactive_reason"] = ""
-                        current["planned_proactive_action"] = ""
-                        current["planned_proactive_source"] = ""
-                        current["planned_proactive_motive"] = ""
-                        current["planned_proactive_topic"] = ""
-                        current["planned_event_chain"] = []
-                        current["planned_opener_mode"] = ""
-                        current["planned_followup_kind"] = ""
-                        current["planned_proactive_quota_exempt"] = False
-                        self._clear_planned_proactive_trigger(current)
+                        self._clear_pending_proactive_plan(current)
                         schedule_now = _now_ts()
                         next_delay = self._friend_proactive_spread_delay_hours(current, now=schedule_now)
                         self._schedule_next_proactive(current, now=schedule_now, delay_hours=next_delay)

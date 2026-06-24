@@ -1097,6 +1097,15 @@ class ProactiveMessageMixin:
         )
         if specificity_hint:
             prompt = f"{prompt}\n\n{specificity_hint}"
+        intent_hint = self._format_proactive_generation_intent_hint(
+            user,
+            reason=reason,
+            action=action,
+            motive=motive,
+            action_context=action_context,
+        )
+        if intent_hint:
+            prompt = f"{prompt}\n\n{intent_hint}"
         style_fatigue_hint = self._format_proactive_style_fatigue_hint(user)
         if style_fatigue_hint:
             prompt = f"{prompt}\n\n{style_fatigue_hint}"
@@ -1107,6 +1116,92 @@ class ProactiveMessageMixin:
         if media_hint:
             prompt = f"{prompt}\n\n{media_hint}"
         return prompt.strip()
+
+    def _format_proactive_generation_intent_hint(
+        self,
+        user: dict[str, Any],
+        *,
+        reason: str,
+        action: str,
+        motive: str = "",
+        action_context: str = "",
+    ) -> str:
+        semantics: dict[str, Any] = {}
+        semantic_getter = getattr(self, "_planned_proactive_semantics", None)
+        if callable(semantic_getter):
+            try:
+                semantics = semantic_getter(user)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 主动生成语义提示读取失败: %s", _single_line(exc, 120))
+                semantics = {}
+        readiness: dict[str, Any] = {}
+        readiness_getter = getattr(self, "_proactive_inner_readiness", None)
+        if callable(readiness_getter):
+            try:
+                readiness = readiness_getter(user)
+            except Exception as exc:
+                logger.debug("[PrivateCompanion] 主动生成内在状态提示读取失败: %s", _single_line(exc, 120))
+                readiness = {}
+
+        kind = _single_line(semantics.get("kind"), 40)
+        anchor_type = _single_line(semantics.get("anchor_type"), 40)
+        semantic_score = _safe_float(semantics.get("score"), 0.5)
+        semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
+        semantic_risk = _safe_float(semantics.get("risk"), 0.0)
+        semantic_note = _single_line(semantics.get("note"), 140)
+        readiness_label = _single_line(readiness.get("label"), 60)
+        readiness_score = _safe_float(readiness.get("score"), 0.55)
+        temperature = readiness.get("temperature") if isinstance(readiness.get("temperature"), dict) else {}
+        temperature_label = _single_line(temperature.get("label"), 60)
+        temperature_score = _safe_float(temperature.get("score"), 0.55)
+
+        lines = ["【这次主动的内在约束】"]
+        if kind or anchor_type:
+            lines.append(
+                f"候选语义：{kind or 'check_in'}/{anchor_type or 'vague'}；"
+                f"自然度 {semantic_score:.2f}，打扰压力 {semantic_pressure:.2f}，风险 {semantic_risk:.2f}。"
+                + (f" 备注：{semantic_note}。" if semantic_note else "")
+            )
+        if readiness_label or temperature_label:
+            lines.append(
+                f"开口欲：{readiness_label or '平稳'} {readiness_score:.2f}；"
+                f"关系温度：{temperature_label or '平稳'} {temperature_score:.2f}。"
+            )
+        afterglow = user.get("proactive_afterglow") if isinstance(user.get("proactive_afterglow"), dict) else {}
+        if afterglow:
+            afterglow_age = _now_ts() - _safe_float(afterglow.get("ts"), 0)
+            if 0 <= afterglow_age <= 48 * 3600:
+                afterglow_label = _single_line(afterglow.get("label"), 120)
+                afterglow_tendency = _single_line(afterglow.get("next_tendency"), 140)
+                afterglow_status = _single_line(afterglow.get("status"), 40)
+                if afterglow_label or afterglow_tendency:
+                    lines.append(
+                        f"上一条主动回声：{afterglow_status or 'unknown'}｜"
+                        f"{afterglow_label or '仍在等待自然落地'}；{afterglow_tendency or '下一次按关系反馈调整'}。"
+                    )
+
+        if semantic_score < 0.48 or semantic_pressure >= 0.58:
+            lines.append("这次由头不算很硬或打扰压力偏高：正文要更短、更轻，最好像把一句话放下，不追问、不求回应。")
+        elif semantic_score >= 0.68:
+            lines.append("这次有明确由头：正文可以贴着那个由头说一个具体点，但仍然不要解释调度原因。")
+        if kind in {"continuation", "reminder"}:
+            lines.append("这是有来源的续接/提醒：可以顺着来源，但不要写成用户刚刚又发了新消息。")
+        elif kind in {"self_share", "external_share", "observation"}:
+            lines.append("这是分享/观察型主动：只取一个最小切口，不写成报告、推荐文或观察总结。")
+        elif kind in {"care", "check_in", "light_touch"}:
+            lines.append("这是靠近型主动：不要直接说想念、关心或刷存在感，要侧着落到一个小动作或小片段。")
+
+        hesitation_note = _single_line(user.get("last_proactive_hesitation_note"), 100)
+        hesitation_at = _safe_float(user.get("last_proactive_hesitation_at"), 0)
+        if hesitation_note and hesitation_at > 0 and _now_ts() - hesitation_at <= 12 * 3600:
+            lines.append(f"前面有过一次犹豫：{hesitation_note}。如果要用，只能变成很淡的语气底色，不要明说系统延后。")
+
+        if _safe_int(user.get("ignored_streak"), 0, 0) > 0:
+            lines.append("对方最近还没回应：不要连续提问，不要控诉，也不要把沉默写成对方故意不理。")
+        if "message" == str(action or "message") and not _single_line(action_context, 120):
+            lines.append("本轮没有真实媒体或工具结果：不要声称已经看见、拍到、转述、发送或执行了什么。")
+        lines.append("以上只用于决定怎么写，最终正文里不要出现“语义/自然度/压力/风险/开口欲/关系温度/犹豫”等分析词。")
+        return "\n".join(lines) if len(lines) > 2 else ""
 
     def _format_proactive_continuity_hint(self, user: dict[str, Any], *, reason: str, action: str) -> str:
         followup_kind = str(user.get("planned_followup_kind") or "").strip()
@@ -1801,15 +1896,34 @@ class ProactiveMessageMixin:
         source = str(user.get("planned_proactive_source") or "")
         if source in {"timer", "troubleshooting"}:
             return {"decision": "send", "reason": "特殊主动来源不做普通价值复核"}
+        semantics: dict[str, Any] = {}
+        semantic_getter = getattr(self, "_planned_proactive_semantics", None)
+        if callable(semantic_getter):
+            try:
+                semantics = semantic_getter(user)
+            except Exception:
+                semantics = {}
+        semantic_kind = _single_line(semantics.get("kind"), 40)
+        semantic_score = _safe_float(semantics.get("score"), 0.5)
+        semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
+        semantic_risk = _safe_float(semantics.get("risk"), 0.0)
+        if semantic_risk >= 0.45:
+            return {"decision": "drop", "reason": "候选语义风险偏高"}
+        if semantic_score < 0.34 and semantic_pressure >= 0.55:
+            return {"decision": "defer", "reason": "候选由头偏虚且打扰压力高", "delay_minutes": 75}
         reply_like_openers = (
             "好呀", "好啊", "可以呀", "行啊", "那就", "你说呢", "要不", "刚看到", "才看到",
             "你来了", "你叫我", "你问", "我帮你查", "我去问", "我去说",
         )
         if any(cleaned.startswith(token) for token in reply_like_openers):
             return {"decision": "drop", "reason": "像是在回复刚发来的消息"}
-        vague = ("想你了", "来看看你", "你在忙什么", "最近怎么样", "吃了吗", "辛苦了")
+        vague = ("想你了", "来看看你", "你在忙什么", "最近怎么样", "吃了吗", "辛苦了", "在吗", "忙不忙")
         if reason in {"check_in", "quiet_care", "state_share"} and any(token in cleaned for token in vague):
             return {"decision": "defer", "reason": "普通主动过于泛泛", "delay_minutes": 60}
+        if semantic_kind in {"self_share", "external_share", "observation"} and any(token in cleaned for token in vague):
+            return {"decision": "defer", "reason": "生成结果偏离分享型由头", "delay_minutes": 60}
+        if _safe_int(user.get("ignored_streak"), 0, 0) >= 1 and cleaned.count("？") + cleaned.count("?") >= 2:
+            return {"decision": "rewrite", "reason": "未回应状态下问题太多", "text": re.split(r"[？?]", cleaned, maxsplit=1)[0].rstrip("，,。") + "。"}
         if _safe_int(user.get("ignored_streak"), 0, 0) >= 2 and len(cleaned) > 36:
             return {"decision": "rewrite", "reason": "连续未回应时主动偏长", "text": cleaned[:36].rstrip("，,。") + "。"}
         return {"decision": "send", "reason": "本地检查通过"}
@@ -1824,6 +1938,7 @@ class ProactiveMessageMixin:
         motive: str = "",
         topic: str = "",
         action_summary: str = "",
+        image_path: str = "",
     ) -> dict[str, Any]:
         local = self._local_proactive_send_decision(user, text, reason=reason, action=action)
         if local.get("decision") in {"drop", "defer"}:
@@ -1839,6 +1954,16 @@ class ProactiveMessageMixin:
         if source in {"timer", "troubleshooting"}:
             return local
         history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
+        review_context = _single_line(action_summary, 240)
+        if image_path:
+            review_context = _single_line(f"{review_context}\n真实图片文件：{image_path}", 360)
+        intent_hint = self._format_proactive_generation_intent_hint(
+            user,
+            reason=reason,
+            action=action,
+            motive=motive,
+            action_context=review_context,
+        )
         prompt = f"""
 你是主动私聊发送前的价值复核模型。请判断候选主动消息是否值得现在发给用户。
 
@@ -1855,6 +1980,7 @@ class ProactiveMessageMixin:
 - 主动消息不是回复用户刚发来的话；如果它写成“好呀/刚看到/你问/我帮你查”等回复口吻，应 drop 或 rewrite。
 - 如果只是“想你了/来看看你/忙不忙/吃了吗/辛苦了”且没有具体由头，通常 defer 或 drop。
 - 如果最近用户刚刚在聊正事或刚聊完，倾向 defer；如果候选本身没价值，drop。
+- 候选消息必须贴合“本轮主动来源”和“内在约束”：分享型要有分享落点，关心型要低压，续接型要有真实来源，虚由头要短。
 - rewrite 只能轻改写，不能新增事实，不能添加工具、转述、查询、发图等承诺。
 
 【最近私聊记录】
@@ -1862,6 +1988,9 @@ class ProactiveMessageMixin:
 
 【本轮主动来源】
 reason={reason or "check_in"}；action={action or "message"}；topic={_single_line(topic, 80) or "无"}；motive={_single_line(motive, 120) or "无"}；summary={_single_line(action_summary, 80) or "无"}
+
+【内在约束】
+{intent_hint or "（无额外约束）"}
 
 【候选主动消息】
 {text}
@@ -1886,6 +2015,16 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         delay_minutes = _safe_int(payload.get("delay_minutes"), 45, 30, 90)
         note = _single_line(payload.get("reason"), 120)
         if decision == "rewrite":
+            if not reviewed_text:
+                return local
+            reviewed_text = self._sanitize_action_boundaries(
+                self._sanitize_proactive_text(reviewed_text),
+                reason=reason,
+                action=action,
+                action_context=review_context,
+                has_real_image=bool(image_path) or "真实图片文件：" in review_context or "图片路径：" in review_context,
+            )
+            reviewed_text = self._normalize_proactive_sentence_flow(reviewed_text)
             if not reviewed_text:
                 return local
             if len(reviewed_text) > max(len(text) + 60, 240):
@@ -2134,6 +2273,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 _single_line(cleaned, 120),
             )
             return ""
+        intent_hint = self._format_proactive_generation_intent_hint(
+            user,
+            reason=reason,
+            action=action,
+            motive=motive,
+            action_context=action_context,
+        )
         prompt = f"""
 把下面这条主动私聊消息改成真正的主动开口。
 它不是在回复用户刚发来的消息；聊天历史只能当背景。
@@ -2154,11 +2300,15 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 【动作上下文】
 {_single_line(action_context, 260) or "（无）"}
 
+【内在约束】
+{intent_hint or "（无额外约束）"}
+
 要求：
 - 只输出要发送的正文
 - 不要写成“好呀/确实/我也觉得/刚看到/你刚刚问我/你来找我了”
 - 不要把历史消息当成当前正在发生的对话
 - 没有真实图片或工具结果时，不要说已经发图、看图、转述或执行动作
+- 改写后仍要贴合内在约束里的候选语义；不能把分享型改成泛泛问候，也不能把低压关心改成追问
 - 尽量 1 到 2 句，像自然想起对方后随手说一句
 """.strip()
         started = time.perf_counter()
@@ -4545,6 +4695,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         cleaned: list[str] = []
         for segment in segments:
             text = re.sub(r"</?t{2,}s\b[^>]*>", "", str(segment or ""), flags=re.IGNORECASE).strip()
+            text = self._strip_leading_sentence_boundary_artifacts(text)
             if text:
                 cleaned.append(text)
         return cleaned

@@ -103,11 +103,13 @@ from .dreaming import (
 from .helpers import (
     _date_key,
     _flat_get,
+    _flat_get,
     _now_ts,
     _safe_float,
     _safe_int,
     _set_into_config,
     _set_today_key_timezone,
+    _set_into_config,
     _single_line,
     _strip_internal_message_blocks,
     _strip_outbound_control_blocks,
@@ -410,11 +412,16 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "4.7.0",
+    "5.0.0",
 )
 class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationStatusMixin, PrivateImageMixin, ForwardMessageMixin, QzoneMixin, TokenBudgetMixin, WorldbookMixin, UserMemoryMixin, CreativeMixin, ProactiveMixin, ProactiveEngineMixin, ProactiveMessageMixin, DailyStateMixin, StateViewsMixin, InteractionUtilsMixin, LlmToolActionsMixin, CommandHandlersMixin, TtsEnhancementMixin, GroupWakeupMixin, GroupObservationMixin, EventDispatchMixin, PrivateReadingMixin, NewsExplorationMixin, AtRelayMixin, Star):
     @staticmethod
+    def _cfg_raw(config: AstrBotConfig, key: str, default: Any = None) -> Any:
+        return _flat_get(config, key, default)
+
+    @staticmethod
     def _cfg_bool(config: AstrBotConfig, key: str, default: bool = True) -> bool:
+        value = _flat_get(config, key, default)
         value = _flat_get(config, key, default)
         if isinstance(value, str):
             text = value.strip().lower()
@@ -439,6 +446,95 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
     @staticmethod
     def _cfg_float(config: AstrBotConfig, key: str, default: float, minimum: float = 0.0) -> float:
         return _safe_float(_flat_get(config, key, default), default, minimum)
+
+    @staticmethod
+    def _config_root_mapping(config: Any) -> dict[str, Any] | None:
+        if isinstance(config, dict):
+            return config
+        for attr in ("data", "config"):
+            target = getattr(config, attr, None)
+            if isinstance(target, dict):
+                return target
+        return None
+
+    @staticmethod
+    def _schema_group_defaults_for_migration() -> dict[str, tuple[str, Any]]:
+        mapping: dict[str, tuple[str, Any]] = {}
+        try:
+            raw = json.loads(Path(__file__).with_name("_conf_schema.json").read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 读取配置 schema 用于分组迁移失败: %s", exc)
+            return mapping
+        if not isinstance(raw, dict):
+            return mapping
+        for group_key, group in raw.items():
+            if not isinstance(group, dict) or group.get("type") != "object":
+                continue
+            items = group.get("items")
+            if not isinstance(items, dict):
+                continue
+            for key, item in items.items():
+                if isinstance(item, dict):
+                    mapping[str(key)] = (str(group_key), item.get("default"))
+        return mapping
+
+    @staticmethod
+    def _config_value_is_empty(value: Any) -> bool:
+        return value in (None, "", [], {})
+
+    def _migrate_flat_config_into_schema_groups(self, config: AstrBotConfig) -> None:
+        root = self._config_root_mapping(config)
+        if not isinstance(root, dict):
+            return
+        schema_map = self._schema_group_defaults_for_migration()
+        if not schema_map:
+            return
+        changed: list[str] = []
+        for key, (group_key, default) in schema_map.items():
+            if key not in root:
+                continue
+            old_value = root.get(key)
+            if old_value == default:
+                continue
+            group = root.get(group_key)
+            if not isinstance(group, dict):
+                group = {}
+                root[group_key] = group
+            group_value = group.get(key)
+            should_copy = key not in group or group_value == default
+            if not should_copy and self._config_value_is_empty(group_value) and not self._config_value_is_empty(old_value):
+                should_copy = True
+            if not should_copy:
+                continue
+            group[key] = old_value
+            changed.append(key)
+        if not changed:
+            return
+        logger.info("[PrivateCompanion] 已将旧版扁平配置迁移到新版分组配置: %s 项", len(changed))
+        self._save_config_after_schema_migration(config)
+
+    @staticmethod
+    def _save_config_after_schema_migration(config: AstrBotConfig) -> None:
+        for method_name in ("save_config", "save", "save_conf"):
+            save = getattr(config, method_name, None)
+            if not callable(save):
+                continue
+            try:
+                result = save()
+                if asyncio.iscoroutine(result) or hasattr(result, "__await__"):
+                    try:
+                        asyncio.get_running_loop().create_task(result)
+                    except RuntimeError:
+                        close = getattr(result, "close", None)
+                        if callable(close):
+                            close()
+                        logger.debug("[PrivateCompanion] 配置分组迁移已写入运行态，当前无事件循环可异步保存")
+                return
+            except TypeError:
+                continue
+            except Exception as exc:
+                logger.warning("[PrivateCompanion] 保存配置分组迁移结果失败: %s", _single_line(exc, 160))
+                return
 
     def _user_rest_silence_until(self, user: dict[str, Any], *, now: float | None = None) -> float:
         check_now = _now_ts() if now is None else now
@@ -516,6 +612,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             ("planned_proactive_source", ""),
             ("planned_proactive_motive", ""),
             ("planned_proactive_topic", ""),
+            ("planned_proactive_impulse_id", ""),
+            ("planned_proactive_window_start_at", 0),
+            ("planned_proactive_best_until_at", 0),
+            ("planned_proactive_expire_at", 0),
             ("planned_event_chain", []),
             ("planned_opener_mode", ""),
             ("planned_followup_kind", ""),
@@ -570,6 +670,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self._external_proactive_abilities: dict[str, dict[str, Any]] = {}
         self.config = config
         c = config
+        self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.data_file = os.path.join(self.data_dir, "companions.json")
+        self._migrate_flat_config_into_schema_groups(c)
 
         self.enabled = self._cfg_bool(c, "enabled", True)
         self.enable_proactive_only_mode = self._cfg_bool(c, "enable_proactive_only_mode", False)
@@ -597,7 +701,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.recall_message_cache_text_chars = self._cfg_int(c, "recall_message_cache_text_chars", 500, 80, 2000)
         self.recall_cancel_reply_ttl_seconds = self.recall_message_cache_ttl_seconds
         self.enable_forbidden_word_recall = self._cfg_bool(c, "enable_forbidden_word_recall", False)
-        self.recall_forbidden_words = self._parse_text_list_config(c.get("recall_forbidden_words", []), limit=300)
+        self.recall_forbidden_words = self._parse_text_list_config(self._cfg_raw(c, "recall_forbidden_words", []), limit=300)
         self.recall_forbidden_word_case_sensitive = self._cfg_bool(c, "recall_forbidden_word_case_sensitive", False)
         self.recall_forbidden_scope = self._cfg_str(c, "recall_forbidden_scope", "bot_and_group", "bot_and_group").lower()
         if self.recall_forbidden_scope not in {"bot_only", "group_only", "bot_and_group"}:
@@ -611,7 +715,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.smart_message_debounce_model_timeout_seconds = self._cfg_float(c, "smart_message_debounce_model_timeout_seconds", 0.8, 0.2)
         self.smart_message_debounce_learning_window_seconds = self._cfg_float(c, "smart_message_debounce_learning_window_seconds", 8.0, 1.0)
         self.smart_message_debounce_examples_limit = self._cfg_int(c, "smart_message_debounce_examples_limit", 8, 0, 30)
-        self.text_message_debounce_seconds = self._cfg_float(c, "text_message_debounce_seconds", 8.0, 0.0)
+        legacy_semantic_debounce_seconds = self._cfg_float(c, "semantic_message_debounce_seconds", 8.0, 0.0)
+        text_debounce_raw = self._cfg_raw(c, "text_message_debounce_seconds", None)
+        text_debounce_default = legacy_semantic_debounce_seconds if text_debounce_raw in (None, "") else 0.0
+        self.text_message_debounce_seconds = self._cfg_float(c, "text_message_debounce_seconds", text_debounce_default, 0.0)
         self.image_message_debounce_seconds = self._cfg_float(c, "image_message_debounce_seconds", 8.0, 0.0)
         self.forward_message_debounce_seconds = self._cfg_float(c, "forward_message_debounce_seconds", 0.0, 0.0)
         self.text_message_debounce_max_wait_seconds = self._cfg_float(c, "text_message_debounce_max_wait_seconds", 12.0, 0.0)
@@ -633,8 +740,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.worldview_adaptation_prompt = self._cfg_str(c, "worldview_adaptation_prompt", "")
         self.default_nickname = self._cfg_str(c, "default_nickname", "你", "你")
         self.require_private_opt_in = self._cfg_bool(c, "require_private_opt_in", True)
-        self.target_user_ids = c.get("target_user_ids", [])
-        self.private_user_aliases = self._parse_private_user_aliases(c.get("private_user_aliases", ""))
+        self.target_user_ids = self._cfg_raw(c, "target_user_ids", [])
+        self.private_user_aliases = self._parse_private_user_aliases(self._cfg_raw(c, "private_user_aliases", ""))
         self._load_tts_enhancement_config(c)
         self.target_platform = self._cfg_str(c, "target_platform", "aiocqhttp", "aiocqhttp")
         self.default_enable_configured_targets = self._cfg_bool(c, "default_enable_configured_targets", True)
@@ -673,7 +780,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.schedule_worldview_prompt = self._cfg_str(c, "schedule_worldview_prompt", "")
         self.roleplay_user_profile_prompt = self._cfg_str(c, "roleplay_user_profile_prompt", "")
         self.roleplay_knowledge_source_ids = self._normalize_roleplay_knowledge_source_ids(
-            c.get("roleplay_knowledge_source_ids", [])
+            self._cfg_raw(c, "roleplay_knowledge_source_ids", [])
         )
         self.private_image_self_recognition_hint = self._cfg_str(c, "private_image_self_recognition_hint", "")
         self.daily_plan_item_count = self._cfg_int(c, "daily_plan_item_count", 10, 5, 16)
@@ -725,6 +832,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.creative_max_active_projects = self._cfg_int(c, "creative_max_active_projects", 2, 1, 5)
         self.creative_hidden_mode = self._cfg_bool(c, "creative_hidden_mode", True)
         self.enable_llm_proactive_message = self._cfg_bool(c, "enable_llm_proactive_message", True)
+        self.enable_llm_proactive_persona_judge = self._cfg_bool(c, "enable_llm_proactive_persona_judge", True)
+        self.proactive_persona_judge_provider_id = self._cfg_str(c, "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "")
+        self.proactive_persona_judge_send_threshold = self._cfg_int(c, "proactive_persona_judge_send_threshold", 62, 0, 100)
+        self.proactive_persona_judge_cache_minutes = self._cfg_int(c, "proactive_persona_judge_cache_minutes", 180, 5, 720)
         self.enable_llm_timer_scheduling = self._cfg_bool(c, "enable_llm_timer_scheduling", False)
         self.enable_proactive_decorating_hooks = self._cfg_bool(c, "enable_proactive_decorating_hooks", True)
         self.enable_precise_platform_send = self._cfg_bool(c, "enable_precise_platform_send", True)
@@ -750,8 +861,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.segmented_proactive_split_mode = self._cfg_str(c, "segmented_proactive_split_mode", "regex", "regex")
         if self.segmented_proactive_split_mode not in {"regex", "words"}:
             self.segmented_proactive_split_mode = "regex"
-        self.segmented_proactive_regex = str(c.get("segmented_proactive_regex", r".*?[。？！~…\n]+|.+$"))
-        split_words = c.get("segmented_proactive_split_words", ["。", "？", "！", "~", "…", "“"])
+        self.segmented_proactive_regex = str(self._cfg_raw(c, "segmented_proactive_regex", r".*?[。？！~…\n]+|.+$"))
+        split_words = self._cfg_raw(c, "segmented_proactive_split_words", ["。", "？", "！", "~", "…", "“"])
         self.segmented_proactive_split_words = [str(item) for item in split_words] if isinstance(split_words, list) else ["。", "？", "！", "~", "…", "“"]
         if "……" in self.segmented_proactive_split_words and "…" not in self.segmented_proactive_split_words:
             self.segmented_proactive_split_words.append("…")
@@ -759,8 +870,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.segmented_proactive_content_cleanup_scope = self._cfg_str(c, "segmented_proactive_content_cleanup_scope", "all", "all")
         if self.segmented_proactive_content_cleanup_scope not in {"all", "trailing"}:
             self.segmented_proactive_content_cleanup_scope = "all"
-        self.segmented_proactive_content_cleanup_rule = str(c.get("segmented_proactive_content_cleanup_rule", r"[\n]"))
-        cleanup_words = c.get("segmented_proactive_content_cleanup_words", ["\n"])
+        self.segmented_proactive_content_cleanup_rule = str(self._cfg_raw(c, "segmented_proactive_content_cleanup_rule", r"[\n]"))
+        cleanup_words = self._cfg_raw(c, "segmented_proactive_content_cleanup_words", ["\n"])
         self.segmented_proactive_content_cleanup_words = (
             [str(item) for item in cleanup_words if str(item) != ""]
             if isinstance(cleanup_words, list)
@@ -812,22 +923,22 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.daily_diary_time = self._cfg_str(c, "daily_diary_time", "23:10")
         self.max_diary_entries = self._cfg_int(c, "max_diary_entries", 14, 1, 60)
         self.important_date_lookahead_days = self._cfg_int(c, "important_date_lookahead_days", 7, 0, 60)
-        legacy_actions = self._parse_action_list(c.get("enabled_proactive_actions", None))
+        legacy_actions = self._parse_action_list(self._cfg_raw(c, "enabled_proactive_actions", None))
         legacy_photo_enabled = "photo_text" in legacy_actions if legacy_actions else True
         legacy_screen_enabled = "screen_peek" in legacy_actions if legacy_actions else False
         legacy_poke_enabled = "poke" in legacy_actions if legacy_actions else False
         legacy_voice_enabled = "voice" in legacy_actions if legacy_actions else False
         self.enable_photo_text_action = self._cfg_bool(
-            c, "enable_photo_text_action", bool(c.get("allow_photo_text_action", legacy_photo_enabled))
+            c, "enable_photo_text_action", bool(self._cfg_raw(c, "allow_photo_text_action", legacy_photo_enabled))
         )
         self.enable_screen_glance_action = self._cfg_bool(
-            c, "enable_screen_glance_action", bool(c.get("allow_screen_peek_action", legacy_screen_enabled))
+            c, "enable_screen_glance_action", bool(self._cfg_raw(c, "allow_screen_peek_action", legacy_screen_enabled))
         )
         self.enable_poke_action = self._cfg_bool(
-            c, "enable_poke_action", bool(c.get("allow_poke_action", legacy_poke_enabled))
+            c, "enable_poke_action", bool(self._cfg_raw(c, "allow_poke_action", legacy_poke_enabled))
         )
         self.enable_voice_action = self._cfg_bool(
-            c, "enable_voice_action", bool(c.get("allow_voice_action", legacy_voice_enabled))
+            c, "enable_voice_action", bool(self._cfg_raw(c, "allow_voice_action", legacy_voice_enabled))
         )
         self.enable_qq_presence_sync = self._cfg_bool(c, "enable_qq_presence_sync", True)
         self.poke_action_max_times = self._cfg_int(c, "poke_action_max_times", 1, 1, 3)
@@ -884,9 +995,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.group_access_mode = self._cfg_str(c, "group_access_mode", "whitelist", "whitelist").lower()
         if self.group_access_mode not in {"whitelist", "blacklist"}:
             self.group_access_mode = "whitelist"
-        self.target_group_ids = c.get("target_group_ids", [])
-        self.group_whitelist_ids = c.get("group_whitelist_ids", self.target_group_ids)
-        self.group_blacklist_ids = c.get("group_blacklist_ids", [])
+        self.target_group_ids = self._cfg_raw(c, "target_group_ids", [])
+        self.group_whitelist_ids = self._cfg_raw(c, "group_whitelist_ids", self.target_group_ids)
+        self.group_blacklist_ids = self._cfg_raw(c, "group_blacklist_ids", [])
         self.require_target_group = self._cfg_bool(c, "require_target_group", True)
         self.enable_group_slang_learning = self._cfg_bool(c, "enable_group_slang_learning", True)
         self.enable_group_member_profiles = self._cfg_bool(c, "enable_group_member_profiles", True)
@@ -910,13 +1021,13 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.group_scene_recent_limit = self._cfg_int(c, "group_scene_recent_limit", 5, 2, 12)
         self.enable_group_reality_promise_guard = self._cfg_bool(c, "enable_group_reality_promise_guard", True)
         self.enable_group_wakeup_enhancement = self._cfg_bool(c, "enable_group_wakeup_enhancement", True)
-        self.group_wakeup_direct_words = self._parse_text_list_config(c.get("group_wakeup_direct_words", []))
+        self.group_wakeup_direct_words = self._parse_text_list_config(self._cfg_raw(c, "group_wakeup_direct_words", []))
         self.group_wakeup_context_words = self._parse_text_list_config(
-            c.get("group_wakeup_context_words", ["机器人", "bot"])
+            self._cfg_raw(c, "group_wakeup_context_words", ["机器人", "bot"])
         )
         if self.group_wakeup_context_words == ["有人叫你", "提到你", "说到你", "机器人", "AI"]:
             self.group_wakeup_context_words = ["机器人", "bot"]
-        self.group_wakeup_interest_keywords = self._parse_text_list_config(c.get("group_wakeup_interest_keywords", []))
+        self.group_wakeup_interest_keywords = self._parse_text_list_config(self._cfg_raw(c, "group_wakeup_interest_keywords", []))
         self.group_wakeup_interest_probability = self._cfg_int(c, "group_wakeup_interest_probability", 18, 0, 100) / 100
         self.enable_group_wakeup_question = self._cfg_bool(c, "enable_group_wakeup_question", True)
         self.group_wakeup_question_threshold = self._cfg_int(c, "group_wakeup_question_threshold", 65, 0, 100)
@@ -1111,9 +1222,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
                 "jm_cosmos_blocked_tags": "private_reading_blocked_tags",
             }
             for old_key, new_key in legacy_private_reading_keys.items():
-                if old_key in c:
-                    if new_key not in c:
-                        c[new_key] = c.get(old_key)
+                old_value = self._cfg_raw(c, old_key, None)
+                if old_value is not None:
+                    if self._cfg_raw(c, new_key, None) is None:
+                        _set_into_config(c, new_key, old_value)
                     c.pop(old_key, None)
         self.group_episode_refresh_minutes = self._cfg_int(c, "group_episode_refresh_minutes", 180, 30, 1440)
         self.group_slang_summary_minutes = self._cfg_int(c, "group_slang_summary_minutes", 360, 60, 2880)
@@ -1126,11 +1238,8 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         self.allow_poke_action = self.enable_poke_action
         self.allow_voice_action = self.enable_voice_action
 
-        self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
-        os.makedirs(self.data_dir, exist_ok=True)
         self._patch_livingmemory_processor_compat()
         self._report_integrated_feature_conflicts()
-        self.data_file = os.path.join(self.data_dir, "companions.json")
         self._data_lock = asyncio.Lock()
         self._conversation_db_lock = asyncio.Lock()
         self._framework_agent_lock = asyncio.Lock()
@@ -1543,7 +1652,10 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         await self._apply_sqlite_wal_optimizations()
         self._schedule_default_persona_prompt_refresh()
         async with self._data_lock:
-            if self._prime_enabled_user_schedules():
+            recovered_troubleshooting = self._recover_stale_troubleshooting_proactive_plans()
+            if recovered_troubleshooting:
+                logger.info("[PrivateCompanion] 已恢复未完成的排障临时主动任务: %s", recovered_troubleshooting)
+            if self._prime_enabled_user_schedules() or recovered_troubleshooting:
                 self._save_data_sync()
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._scheduler_loop())
@@ -1943,10 +2055,26 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             if not chunk or any(not isinstance(comp, Plain) for comp in chunk):
                 return []
             text = "".join(str(getattr(comp, "text", "") or "") for comp in chunk).strip()
+            text = self._strip_leading_sentence_boundary_artifacts(text)
             if not text:
                 return []
             segments.append(text)
         return segments
+
+    def _clean_segmented_reply_chunks(self, chunks: list[list[Any]]) -> list[list[Any]]:
+        cleaned_chunks: list[list[Any]] = []
+        for chunk in chunks or []:
+            cleaned_chunk: list[Any] = []
+            for comp in chunk or []:
+                if isinstance(comp, Plain):
+                    text = self._strip_leading_sentence_boundary_artifacts(str(getattr(comp, "text", "") or ""))
+                    if text:
+                        cleaned_chunk.append(Plain(text))
+                    continue
+                cleaned_chunk.append(comp)
+            if cleaned_chunk:
+                cleaned_chunks.append(cleaned_chunk)
+        return cleaned_chunks
 
     def _segment_llm_reply_chain(self, event: AstrMessageEvent, chain: list[Any]) -> tuple[list[list[Any]], bool, str]:
         reply_prefix = [comp for comp in chain if self._is_reply_component(comp)]
@@ -1977,8 +2105,9 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
         if not changed:
             return [chain], False, full_text
         if not split_changed:
-            return [flatten_component_chunks(units)], True, full_text
-        return units, True, full_text
+            cleaned = self._clean_segmented_reply_chunks([flatten_component_chunks(units)])
+            return cleaned, True, full_text
+        return self._clean_segmented_reply_chunks(units), True, full_text
 
     async def _send_segmented_llm_chain_remainder(
         self,
@@ -5533,12 +5662,7 @@ class PrivateCompanionPlugin(CoreStoreMixin, AstrBotKnowledgeMixin, IntegrationS
             self._note_private_display_name_observation(user, user_id, sender_display_name, now=received_ts)
             if not is_target_user:
                 user["enabled"] = False
-                user["next_proactive_at"] = 0
-                user["planned_proactive_reason"] = ""
-                user["planned_proactive_action"] = ""
-                user["planned_proactive_source"] = ""
-                user["planned_proactive_motive"] = ""
-                user["planned_proactive_topic"] = ""
+                self._clear_pending_proactive_plan(user)
             user["last_seen"] = _now_ts()
             if text:
                 user["inbound_count"] = _safe_int(user.get("inbound_count"), 0) + 1

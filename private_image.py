@@ -225,7 +225,7 @@ class PrivateImageMixin:
                 request = urllib.request.Request(
                     text,
                     headers={
-                        "User-Agent": "Mozilla/5.0 AstrBot PrivateCompanion/3.3.1",
+                        "User-Agent": "Mozilla/5.0 AstrBot PrivateCompanion/5.0.0",
                         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
                     },
                 )
