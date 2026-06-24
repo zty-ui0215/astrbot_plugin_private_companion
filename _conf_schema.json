@@ -3304,6 +3304,15 @@
         "condition": {
           "enable_worldbook_member_recognition": true
         }
+      },
+      "enable_cross_user_memory_bridge": {
+        "description": "启用跨用户记忆互通",
+       "type": "bool",
+       "hint": "开启后，主人可在私聊中询问 Bot 与某个私聊对象或群聊的近期互动。该功能只读摘要，不会发送消息，默认仅主人用户可用。",
+       "default": false,
+        "condition": {
+           "enable_worldbook_member_recognition": true
+        }
       }
     },
     "condition": {
