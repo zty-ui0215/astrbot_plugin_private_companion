@@ -843,7 +843,130 @@ class AtRelayMixin:
                 return "发送失败：近 10 分钟内已经发送过相同转述，已拦截重复发送。"
         return ""
 
-    def _note_atrelay_send(self, kind: str, target: str, text: str, at_user: str = "") -> None:
+    def _recent_atrelay_contexts(self) -> list[dict[str, Any]]:
+        contexts = self.data.setdefault("recent_atrelay_contexts", [])
+        if not isinstance(contexts, list):
+            contexts = []
+            self.data["recent_atrelay_contexts"] = contexts
+        now = _now_ts()
+        kept = [
+            item for item in contexts
+            if isinstance(item, dict) and now - _safe_float(item.get("ts"), 0) < 2 * 3600
+        ]
+        if len(kept) != len(contexts):
+            contexts[:] = kept
+        return contexts
+
+    def _atrelay_source_snapshot_for_event(self, event: AstrMessageEvent | None) -> tuple[str, str]:
+        if event is None:
+            return "", ""
+        try:
+            source_user = self._canonical_private_user_id(str(event.get_sender_id()))
+        except Exception:
+            try:
+                source_user = str(event.get_sender_id())
+            except Exception:
+                source_user = ""
+        try:
+            source_name = self._atrelay_identity_label(source_user, self._sender_display_name(event))
+        except Exception:
+            source_name = self._atrelay_identity_label(source_user)
+        return _single_line(source_user, 40), _single_line(source_name, 80)
+
+    def _note_atrelay_recent_context(
+        self,
+        *,
+        kind: str,
+        target: str,
+        text: str,
+        at_user: str = "",
+        source_user: str = "",
+        source_name: str = "",
+    ) -> None:
+        target_id = _single_line(target, 40)
+        sent_text = _single_line(text, 300)
+        if not target_id or not sent_text:
+            return
+        contexts = self._recent_atrelay_contexts()
+        item = {
+            "ts": _now_ts(),
+            "kind": _single_line(kind, 20),
+            "target": target_id,
+            "at_user": _single_line(at_user, 40),
+            "source_user": _single_line(source_user, 40),
+            "source_name": _single_line(source_name, 80),
+            "text": sent_text,
+        }
+        signature = self._atrelay_send_signature(kind, target_id, sent_text, at_user)
+        contexts[:] = [
+            old for old in contexts
+            if self._atrelay_send_signature(
+                _single_line(old.get("kind"), 20),
+                _single_line(old.get("target"), 40),
+                _single_line(old.get("text"), 300),
+                _single_line(old.get("at_user"), 40),
+            ) != signature
+        ]
+        contexts.append(item)
+        del contexts[:-80]
+
+    def _format_recent_atrelay_context_for_prompt(
+        self,
+        *,
+        kind: str,
+        target: str,
+        sender_id: str = "",
+        current_text: str = "",
+        limit: int = 2,
+    ) -> str:
+        target_id = _single_line(target, 40)
+        sender = _single_line(sender_id, 40)
+        kind = _single_line(kind, 20)
+        if not target_id:
+            return ""
+        asks_source = bool(re.search(r"(谁|哪位|哪个|谁让|谁叫|谁说|谁托|来源|发起人)", _single_line(current_text, 160)))
+        lines: list[str] = []
+        now = _now_ts()
+        for item in reversed(self._recent_atrelay_contexts()):
+            if _single_line(item.get("kind"), 20) != kind:
+                continue
+            if _single_line(item.get("target"), 40) != target_id:
+                continue
+            at_user = _single_line(item.get("at_user"), 40)
+            if sender and at_user and at_user != sender:
+                continue
+            sent_text = _single_line(item.get("text"), 160)
+            if not sent_text:
+                continue
+            elapsed = self._format_timestamp_elapsed(_safe_float(item.get("ts"), 0))
+            parts = [f"{elapsed}，你通过转述工具发出：{sent_text}"]
+            if at_user:
+                parts.append(f"收话人 QQ:{at_user}")
+            source_name = _single_line(item.get("source_name"), 60) if asks_source else ""
+            if source_name:
+                parts.append(f"发起人:{source_name}")
+            lines.append("｜".join(parts))
+            if len(lines) >= max(1, limit):
+                break
+        if not lines:
+            return ""
+        return (
+            "【刚刚的转述动作】\n"
+            + "\n".join(f"- {line}" for line in lines)
+            + "\n这些只用于理解对方为什么接话或道谢；不要主动复述工具名、内部记录或没必要说明来源。"
+        )
+
+    def _note_atrelay_send(
+        self,
+        kind: str,
+        target: str,
+        text: str,
+        at_user: str = "",
+        *,
+        event: AstrMessageEvent | None = None,
+        source_user: str = "",
+        source_name: str = "",
+    ) -> None:
         log = self._atrelay_send_log()
         log.append(
             {
@@ -855,6 +978,18 @@ class AtRelayMixin:
             }
         )
         del log[:-80]
+        if event is not None and (not source_user or not source_name):
+            event_source_user, event_source_name = self._atrelay_source_snapshot_for_event(event)
+            source_user = source_user or event_source_user
+            source_name = source_name or event_source_name
+        self._note_atrelay_recent_context(
+            kind=kind,
+            target=target,
+            text=text,
+            at_user=at_user,
+            source_user=source_user,
+            source_name=source_name,
+        )
 
     def _atrelay_receipt_tasks(self) -> list[dict[str, Any]]:
         tasks = self.data.setdefault("pending_atrelay_receipts", [])
@@ -1081,7 +1216,14 @@ class AtRelayMixin:
                 continue
             try:
                 await self.context.send_message(target_umo, MessageChain([At(qq=sender_id), Plain(" "), Plain(text)]))
-                self._note_atrelay_send("group", group_id, text, sender_id)
+                self._note_atrelay_send(
+                    "group",
+                    group_id,
+                    text,
+                    sender_id,
+                    source_user=_single_line(task.get("source_user"), 40),
+                    source_name=_single_line(task.get("source_name"), 80),
+                )
                 self._save_data_sync()
             except Exception as exc:
                 logger.warning("[PrivateCompanion] 延迟转述发送失败: group=%s user=%s err=%s", group_id, sender_id, _single_line(exc, 160))

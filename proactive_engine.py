@@ -1120,6 +1120,11 @@ class ProactiveEngineMixin:
         ]
         return "|".join(_single_line(part, 120) for part in parts)
 
+    @staticmethod
+    def _proactive_audit_note_is_obsolete_fixed_error(note: Any) -> bool:
+        text = str(note or "")
+        return "NameError" in text and "name 'topic' is not defined" in text
+
     def _compact_proactive_audit_log(self) -> None:
         log = self._proactive_audit_log()
         compacted: list[dict[str, Any]] = []
@@ -1127,6 +1132,9 @@ class ProactiveEngineMixin:
         for item in log:
             if not isinstance(item, dict):
                 continue
+            if self._proactive_audit_note_is_obsolete_fixed_error(item.get("note")):
+                item["status"] = "obsolete"
+                item["note"] = "旧版本主动发送变量错误，当前版本已修复"
             signature = self._proactive_audit_signature(item)
             previous = seen.get(signature)
             if previous is None:

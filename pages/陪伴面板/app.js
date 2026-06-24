@@ -38,6 +38,10 @@ const state = {
   worldbookLivingMemory: {},
   worldbookLivingMemoryRequestSeq: 0,
   roleplayPersonaDraft: null,
+  configImportPackage: null,
+  configImportPreview: null,
+  configBackups: [],
+  configLastChecks: [],
 };
 
 const hiddenCompatibilityConfigKeys = new Set([
@@ -2195,6 +2199,242 @@ function postJson(path, body) {
   return fetchJson(path, { method: "POST", body: JSON.stringify(body) });
 }
 
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function formatBackupTime(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return "未知时间";
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
+function selectedConfigExportSections() {
+  const sections = [...document.querySelectorAll("[data-export-section]")]
+    .filter((input) => input.checked)
+    .map((input) => input.dataset.exportSection)
+    .filter(Boolean);
+  return sections.length ? sections : ["basic", "relations", "food_skills"];
+}
+
+function migrationDiffText(item) {
+  const added = Number(item?.added || 0);
+  const overwritten = Number(item?.overwritten || 0);
+  const unchanged = Number(item?.unchanged || 0);
+  return `新增 ${added} · 覆盖 ${overwritten} · 不变 ${unchanged}`;
+}
+
+function migrationSectionLabel(value) {
+  return {
+    basic: "基础配置",
+    relations: "关系/群资料",
+    food_skills: "候选菜单/技能",
+    providers: "模型配置",
+    sensitive: "敏感配置",
+  }[value] || value;
+}
+
+function migrationLevelText(level) {
+  return {
+    ok: "正常",
+    warn: "注意",
+    error: "错误",
+    unknown: "未知",
+  }[level] || "提示";
+}
+
+function renderConfigBackups() {
+  const box = $("#configBackupList");
+  if (!box) return;
+  const items = Array.isArray(state.configBackups) ? state.configBackups : [];
+  if (!items.length) {
+    box.innerHTML = "暂无自动备份。";
+    return;
+  }
+  box.innerHTML = items.map((item) => {
+    const sections = Array.isArray(item.included_sections) && item.included_sections.length
+      ? item.included_sections.map(migrationSectionLabel).join("、")
+      : "旧备份";
+    const checksum = item.checksum_ok ? "校验通过" : "未校验";
+    return `
+      <div class="migration-backup-item">
+        <div>
+          <b>${escapeHtml(item.name || item.id)}</b>
+          <span>${escapeHtml(formatBackupTime(item.exported_at || item.mtime))} · ${escapeHtml(item.version || "未知版本")} · ${escapeHtml(checksum)}</span>
+          <small>${escapeHtml(sections)}</small>
+        </div>
+        <button type="button" data-config-restore="${escapeHtml(item.id)}">恢复</button>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderConfigImportChecks() {
+  const box = $("#configImportChecks");
+  if (!box) return;
+  const checks = Array.isArray(state.configLastChecks) ? state.configLastChecks : [];
+  if (!checks.length) {
+    box.innerHTML = "导入后会在这里显示轻量检查结果。";
+    return;
+  }
+  box.innerHTML = checks.map((item) => `
+    <div class="migration-check-item ${escapeHtml(item.level || "ok")}">
+      <b>${escapeHtml(item.title || migrationLevelText(item.level))}</b>
+      <span>${escapeHtml(item.detail || "")}</span>
+    </div>
+  `).join("");
+}
+
+function renderConfigMigrationPreview() {
+  const box = $("#configMigrationPreview");
+  if (!box) return;
+  const conflictSelect = $("#configImportConflict");
+  if (conflictSelect) {
+    conflictSelect.disabled = ($("#configImportMode")?.value || "merge") === "replace";
+  }
+  const preview = state.configImportPreview;
+  if (!state.configImportPackage) {
+    box.innerHTML = "还没有选择备份文件。";
+    $("#previewConfigImportBtn").disabled = true;
+    $("#applyConfigImportBtn").disabled = true;
+    return;
+  }
+  $("#previewConfigImportBtn").disabled = false;
+  $("#applyConfigImportBtn").disabled = !preview;
+  if (!preview) {
+    box.innerHTML = "已选择备份文件，先点“预览导入”看看会改动哪些内容。";
+    return;
+  }
+  const sections = Array.isArray(preview.sections) ? preview.sections : [];
+  const sectionHtml = sections.length
+    ? sections.map((item) => `
+        <span>
+          <b>${escapeHtml(item.label || item.key)}</b>
+          ${Number(item.count || 0)} 条
+          <small>${escapeHtml(migrationDiffText(item))}</small>
+        </span>
+      `).join("")
+    : "<em>没有可迁移资料段</em>";
+  const configDiff = preview.config_diff || {};
+  const compatibility = preview.compatibility || {};
+  const checksumLine = preview.checksum
+    ? (preview.checksum_ok ? "文件校验：通过" : "文件校验：失败")
+    : "文件校验：旧备份未提供";
+  const compatibilityHtml = `
+    <p class="migration-note">
+      备份来自 ${escapeHtml(compatibility.backup_version || preview.version || "未知")}，当前版本 ${escapeHtml(compatibility.current_version || preview.current_version || "未知")}。
+      ${escapeHtml(compatibility.message || "")}
+    </p>
+    <p class="${compatibility.level === "warn" ? "migration-warn" : "migration-note"}">${escapeHtml(checksumLine)}</p>
+  `;
+  const included = Array.isArray(preview.included_sections) && preview.included_sections.length
+    ? `<p class="migration-note">备份包含：${escapeHtml(preview.included_sections.map(migrationSectionLabel).join("、"))}</p>`
+    : "";
+  const ignored = Array.isArray(preview.ignored) && preview.ignored.length
+    ? `<p class="migration-warn">已忽略 ${preview.ignored.length} 个未知字段：${escapeHtml(preview.ignored.slice(0, 8).join("、"))}</p>`
+    : "";
+  box.innerHTML = `
+    <div class="migration-preview-top">
+      <b>备份版本 ${escapeHtml(preview.version || "未知")}</b>
+      <span>${escapeHtml(formatBackupTime(preview.exported_at))}</span>
+    </div>
+    <div class="migration-counts">
+      <span>配置 ${Number(preview.config_count || 0)} 项 <small>${escapeHtml(migrationDiffText(configDiff))}</small></span>
+      <span>开关 ${Number(preview.features_count || 0)} 项</span>
+      <span>模型 ${Number(preview.providers_count || 0)} 项</span>
+    </div>
+    <div class="migration-section-list">${sectionHtml}</div>
+    ${compatibilityHtml}
+    ${included}
+    ${ignored}
+    <p class="migration-note">导入前会自动保存当前可迁移配置；Token、缓存、最近消息、审计日志和临时队列不会导入。</p>
+  `;
+}
+
+async function handleConfigExport() {
+  const params = new URLSearchParams();
+  params.set("sections", selectedConfigExportSections().join(","));
+  const data = await fetchJson(`/config/export?${params.toString()}`);
+  const date = new Date().toISOString().slice(0, 10);
+  downloadJson(`private-companion-config-${date}.json`, data);
+  showToast("配置备份已导出");
+}
+
+async function readConfigImportFile(file) {
+  const text = await file.text();
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch (error) {
+    throw new Error("备份文件不是有效 JSON");
+  }
+  state.configImportPackage = data;
+  state.configImportPreview = null;
+  renderConfigMigrationPreview();
+  showToast("备份文件已读取，请先预览");
+}
+
+async function previewConfigImport() {
+  if (!state.configImportPackage) {
+    showToast("请先选择备份文件", "error");
+    return;
+  }
+  const result = await postJson("/config/import/preview", { package: state.configImportPackage });
+  state.configImportPreview = result;
+  renderConfigMigrationPreview();
+  showToast("预览完成");
+}
+
+async function applyConfigImport() {
+  if (!state.configImportPackage || !state.configImportPreview) {
+    showToast("请先预览备份内容", "error");
+    return;
+  }
+  const mode = $("#configImportMode")?.value || "merge";
+  const conflict = $("#configImportConflict")?.value || "use_backup";
+  const conflictText = {
+    use_backup: "使用备份内容",
+    keep_current: "保留当前内容",
+    fill_empty: "只补当前空字段",
+  }[conflict] || "使用备份内容";
+  const message = mode === "replace"
+    ? "将覆盖可迁移资料段。已确认要继续吗？"
+    : `将合并导入备份内容，字段冲突时：${conflictText}。已确认要继续吗？`;
+  if (!window.confirm(message)) return;
+  const result = await postJson("/config/import/apply", { package: state.configImportPackage, mode, conflict });
+  state.configImportPreview = null;
+  renderConfigMigrationPreview();
+  if (result) {
+    state.overview = result;
+    state.configBackups = result.migration_backups || state.configBackups;
+    state.configLastChecks = result.post_import_checks || [];
+    renderAll();
+  }
+  showToast("配置已导入，已自动备份导入前状态");
+}
+
+async function restoreConfigBackup(id) {
+  const backupId = String(id || "").trim();
+  if (!backupId) return;
+  if (!window.confirm(`将从自动备份恢复：${backupId}\n恢复前也会再次备份当前状态。继续吗？`)) return;
+  const result = await postJson("/config/restore", { id: backupId });
+  if (result) {
+    state.overview = result;
+    state.configBackups = result.migration_backups || state.configBackups;
+    state.configLastChecks = result.post_import_checks || [];
+    renderAll();
+  }
+  showToast("已从备份恢复");
+}
+
 async function loadImageCache() {
   const params = new URLSearchParams();
   params.set("limit", "300");
@@ -2232,13 +2472,14 @@ async function loadTroubleshooting() {
 async function loadAll() {
   $("#subtitle").textContent = "读取运行态中...";
   try {
-    const [overview, users, groups, diagnostics, availableProviders, tokenStats] = await Promise.all([
+    const [overview, users, groups, diagnostics, availableProviders, tokenStats, configBackups] = await Promise.all([
       fetchJson("/overview"),
       fetchJson("/users?limit=300"),
       fetchJson("/groups?limit=300"),
       fetchJson("/diagnostics"),
       fetchJson("/providers/available"),
       fetchJson("/token/stats"),
+      fetchJson("/config/backups").catch(() => ({ items: [] })),
     ]);
     state.overview = overview;
     state.users = users.items || [];
@@ -2246,6 +2487,7 @@ async function loadAll() {
     state.diagnostics = diagnostics.items || [];
     state.availableProviders = availableProviders.items || [];
     state.tokenStats = tokenStats || null;
+    state.configBackups = configBackups.items || [];
     state.featureDraft = featureDraftFromOverview(overview);
     if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
     if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
@@ -6913,10 +7155,11 @@ function proactiveRuntimeHtml(runtime) {
 }
 
 function proactiveAuditHtml(items) {
-  if (!items.length) {
+  const visibleItems = (Array.isArray(items) ? items : []).filter((item) => item?.status !== "obsolete");
+  if (!visibleItems.length) {
     return `<div class="proactive-task-empty"><b>暂无执行审计</b><span>主动真正进入发送链路后，会在这里留下开始、成功、失败、延后或取消记录。</span></div>`;
   }
-  return items.slice(0, 30).map((item) => {
+  return visibleItems.slice(0, 30).map((item) => {
     const status = proactiveAuditStatusLabel(item.status);
     const title = item.topic || item.reason_label || item.reason || item.note || "主动执行记录";
     const meta = [
@@ -6970,6 +7213,7 @@ function proactiveAuditStatusLabel(status) {
     dropped: "已放弃",
     failed: "失败",
     sent: "已发送",
+    obsolete: "旧记录",
   }[status] || status || "未知";
 }
 
@@ -7281,6 +7525,9 @@ function renderConfig() {
   $("#groupBlacklist").value = (group.blacklist || []).join("\n");
   renderAccessManager(group);
   renderFeatureSwitches();
+  renderConfigBackups();
+  renderConfigImportChecks();
+  renderConfigMigrationPreview();
 }
 
 function renderPrivateStrategyOverview(selector, info) {
@@ -11884,6 +12131,41 @@ $("#exportSnapshotBtn").addEventListener("click", () => {
   link.download = `private-companion-snapshot-${new Date().toISOString().slice(0, 10)}.json`;
   link.click();
   URL.revokeObjectURL(url);
+});
+
+$("#exportConfigBtn").addEventListener("click", async () => {
+  await runAction(handleConfigExport, "", $("#exportConfigBtn"));
+});
+
+$("#importConfigFile").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    await readConfigImportFile(file);
+  } catch (error) {
+    state.configImportPackage = null;
+    state.configImportPreview = null;
+    renderConfigMigrationPreview();
+    showToast(`读取失败：${error.message}`, "error");
+  }
+});
+
+$("#previewConfigImportBtn").addEventListener("click", async () => {
+  await runAction(previewConfigImport, "", $("#previewConfigImportBtn"));
+});
+
+$("#applyConfigImportBtn").addEventListener("click", async () => {
+  await runAction(applyConfigImport, "", $("#applyConfigImportBtn"));
+});
+
+$("#configImportMode").addEventListener("change", () => {
+  renderConfigMigrationPreview();
+});
+
+$("#configBackupList").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-config-restore]");
+  if (!button) return;
+  await runAction(() => restoreConfigBackup(button.dataset.configRestore), "", button);
 });
 
 $("#accessForm").addEventListener("submit", async (event) => {

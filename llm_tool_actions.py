@@ -1040,7 +1040,7 @@ class LlmToolActionsMixin:
                 _single_line(error, 240),
             )
             return f"发送失败：{_single_line(error, 180)}"
-        self._note_atrelay_send("group", target_group, text, at_qq or at_user)
+        self._note_atrelay_send("group", target_group, text, at_qq or at_user, event=event)
         self._save_data_sync()
         logger.info(
             "[PrivateCompanion] 跨群转述发送完成: group=%s at=%s umo=%s",
@@ -1100,7 +1100,7 @@ class LlmToolActionsMixin:
                 _single_line(error, 240),
             )
             return f"私聊发送失败：{_single_line(error, 180)}"
-        self._note_atrelay_send("private", target_user, text)
+        self._note_atrelay_send("private", target_user, text, event=event)
         if need_receipt:
             self._note_atrelay_private_receipt_task(
                 event,
@@ -1200,6 +1200,7 @@ class LlmToolActionsMixin:
             return "挂起失败：未找到目标群友"
         now = _now_ts()
         expire_seconds = max(1, min(168, _safe_int(expire_hours, 24, 1, 168))) * 3600
+        source_user, source_name = self._atrelay_source_snapshot_for_event(event)
         async with self._data_lock:
             group = self._get_group(target_group)
             tasks = group.setdefault("pending_atrelay_tasks", [])
@@ -1218,6 +1219,8 @@ class LlmToolActionsMixin:
                     "target_user_id": target_user,
                     "target_name": target_name,
                     "message": text,
+                    "source_user": source_user,
+                    "source_name": source_name,
                     "relay_mode": relay_mode_normalized,
                     "sensitive_confirmed": self._atrelay_bool_flag(sensitive_confirmed) or self._atrelay_event_confirms_sensitive_send(event),
                     "signature": signature,
