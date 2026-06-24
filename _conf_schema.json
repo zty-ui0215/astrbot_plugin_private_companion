@@ -300,16 +300,16 @@
         "_special": "select_provider"
       },
       "RESPONSE_REVIEW_PROVIDER_ID": {
-        "description": "主动消息润色模型（留空用默认）",
+        "description": "回复/主动复核模型（留空用默认）",
         "type": "string",
-        "hint": "主要用于主动消息发送前轻改写，避免把历史消息当成用户刚发来的话来回复。留空会回退到 MAI_STYLE_PROVIDER_ID，再回退到主模型。建议选择便宜、短文本改写稳定的模型。",
+        "hint": "用于被动回复轻量自检，以及主动消息发送前判断是否值得现在发送、是否需要轻改写/延后/取消。留空会回退到 MAI_STYLE_PROVIDER_ID，再回退到主模型。建议选择便宜、短文本判断稳定的模型。",
         "default": "",
         "_special": "select_provider"
       },
       "TROUBLESHOOTING_PROVIDER_ID": {
-        "description": "排障检查模型（留空跟随主动消息润色）",
+        "description": "排障检查模型（留空跟随回复/主动复核）",
         "type": "string",
-        "hint": "用于扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。建议选择便宜、指令遵循稳定、分类判断保守的小模型；留空会先回退到主动消息润色模型，再回退到陪伴通用/主模型。",
+        "hint": "用于扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。建议选择便宜、指令遵循稳定、分类判断保守的小模型；留空会先回退到回复/主动复核模型，再回退到陪伴通用/主模型。",
         "default": "",
         "_special": "select_provider"
       },
@@ -1655,20 +1655,20 @@
     }
   },
   "response_review_config": {
-    "description": "消息润色",
+    "description": "消息复核",
     "type": "object",
     "hint": "“说话前要先过一遍脑子”",
     "items": {
       "enable_response_self_review": {
-        "description": "启用主动消息润色",
+        "description": "启用主动消息复核",
         "type": "bool",
         "hint": "主要用于主动消息发送前复核，避免把历史消息当成用户刚发来的话来回复。普通被动回复只保留本地防漏、防复读等轻量保护。",
         "default": true
       },
       "response_review_mode": {
-        "description": "主动消息润色模式",
+        "description": "主动消息复核模式",
         "type": "string",
-        "hint": "local_only 只做本地识别，命中回复空气风险就丢弃主动；severe_only 默认会尝试用模型重写高风险主动消息；full 同时让普通被动回复恢复较积极的模型改写，可能明显增加延迟。",
+        "hint": "local_only 只做本地识别；severe_only 默认会让主动消息发送前进行模型价值复核，被动回复只复核严重问题；full 会让更多被动回复也参与模型改写，可能明显增加延迟。",
         "default": "severe_only",
         "options": [
           "local_only",
@@ -1682,7 +1682,7 @@
       "response_review_max_chars": {
         "description": "被动 full 模式长度阈值",
         "type": "int",
-        "hint": "仅在主动消息润色模式为 full 时，普通被动回复才会因偏长参与模型改写；默认模式不会因普通偏长而额外调用模型。",
+        "hint": "仅在复核模式为 full 时，普通被动回复才会因偏长参与模型改写；默认模式不会因普通偏长而额外调用模型。",
         "slider": {
           "min": 80,
           "max": 900,
@@ -3698,6 +3698,20 @@
         "type": "bool",
         "hint": "开启后，Bot 可能在合适动机下调用 ComfyUI、SDGen 或在线图片 API 生成图片，拿到图片后再由 LLM 自然写成主动消息并一起发送。生成成功即计入图片额度，即使发送失败也不会立刻继续生图。",
         "default": true
+      },
+      "proactive_photo_text_probability": {
+        "description": "主动带图触发概率",
+        "type": "int",
+        "hint": "在主动拍照/生图可用、每日额度未用完，且本轮主动有生活画面或视觉切口时，把普通文字主动升级为带图的概率。不是每条主动都按这个概率发图。",
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 5
+        },
+        "default": 18,
+        "condition": {
+          "enable_photo_text_action": true
+       }
       },
       "photo_action_max_daily": {
         "description": "每日主动生图最多次数",
