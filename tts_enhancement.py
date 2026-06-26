@@ -1198,6 +1198,66 @@ TTS 朗读文本：
             return
         event.set_result(self._build_result_from_chain(ordered_chunks[0] if ordered_chunks else new_chain))
 
+    async def finalize_outbound_tts_markup_guard(self, event: Any) -> None:
+        """Last-resort guard so raw <tts> tags never reach the chat surface."""
+        if not getattr(self, "enabled", False):
+            return
+        result = event.get_result()
+        chain = list(getattr(result, "chain", []) or []) if result is not None else []
+        if not chain or any(isinstance(comp, Record) for comp in chain):
+            return
+        plain_parts = [str(getattr(comp, "text", "") or "") for comp in chain if isinstance(comp, Plain)]
+        if not plain_parts:
+            return
+        text = self._restore_protected_tts_blocks("".join(plain_parts), event).strip()
+        if not re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", text, flags=re.IGNORECASE):
+            return
+        normalized = self._normalize_tts_tags(text)
+        feature_enabled = getattr(self, "_feature_enabled_or_temp_unlocked", None)
+        tts_enabled = feature_enabled("enable_tts_enhancement") if callable(feature_enabled) else getattr(self, "enable_tts_enhancement", False)
+        new_chain: list[Any] = []
+        if tts_enabled and re.search(r"<tts\b[^>]*>.*?</tts>", normalized, flags=re.IGNORECASE | re.DOTALL):
+            new_chain = await self._process_tts_tags(normalized, event)
+        if not new_chain:
+            fallback_text = self._tts_visible_fallback_text(normalized) or self._strip_any_tts_markup(normalized)
+            new_chain = [Plain(fallback_text)] if fallback_text else []
+        if len(plain_parts) != len(chain):
+            non_plain_tail = [comp for comp in chain if not isinstance(comp, Plain)]
+            if non_plain_tail:
+                new_chain = list(new_chain) + non_plain_tail
+        logger.warning(
+            "[PrivateCompanion] 发送前终检拦截残留 TTS 标签: session=%s preview=%s",
+            _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+            _single_line(self._tts_chain_log_text(new_chain), 160),
+        )
+        event.set_result(self._build_result_from_chain(new_chain))
+
+    async def _sanitize_outbound_tts_chain_without_event(self, chain: list[Any], *, umo: str = "") -> list[Any]:
+        if not chain or any(isinstance(comp, Record) for comp in chain):
+            return chain
+        changed = False
+        cleaned_chain: list[Any] = []
+        for comp in chain:
+            if not isinstance(comp, Plain):
+                cleaned_chain.append(comp)
+                continue
+            original = str(getattr(comp, "text", "") or "")
+            if not re.search(r"</?(?:pc[_-]?tts|t{2,}s)\b", original, flags=re.IGNORECASE):
+                cleaned_chain.append(comp)
+                continue
+            changed = True
+            normalized = self._normalize_tts_tags(original)
+            fallback_text = self._tts_visible_fallback_text(normalized) or self._strip_any_tts_markup(normalized)
+            if fallback_text:
+                cleaned_chain.append(Plain(fallback_text))
+        if changed:
+            logger.warning(
+                "[PrivateCompanion] 外发兜底清理残留 TTS 标签: umo=%s preview=%s",
+                _single_line(umo, 120) or "unknown",
+                _single_line(self._tts_chain_log_text(cleaned_chain), 160),
+            )
+        return cleaned_chain
+
     def _split_tts_chain_for_ordered_send(self, chain: list[Any]) -> list[list[Any]]:
         chunks: list[list[Any]] = []
         current_visible: list[Any] = []

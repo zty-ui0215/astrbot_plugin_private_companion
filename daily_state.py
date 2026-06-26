@@ -5667,10 +5667,64 @@ class DailyStateMixin:
         normalized = _single_line(text, 180)
         if not normalized:
             return False
-        return bool(re.search(r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|做什么|做啥|忙什么|忙啥|弄什么|写什么|玩什么|折腾什么)|你.{0,8}(在)?(干嘛|做什么|忙什么|写什么|弄什么)", normalized))
+        return bool(re.search(r"(最近|刚才|现在|今天|这两天|这会儿).{0,12}(在)?(干嘛|做什么|做啥|忙什么|忙啥|弄什么|写什么|写了什么|创作什么|创作了什么|玩什么|折腾什么)|你.{0,8}(在)?(干嘛|做什么|忙什么|写什么|写了什么|弄什么|创作什么|创作了什么)", normalized))
+
+    def _user_asks_recent_creative_activity(self, text: str) -> bool:
+        normalized = _single_line(text, 220)
+        if not normalized:
+            return False
+        if re.search(r"(最近|刚才|现在|今天|这两天|这会儿|近来).{0,18}(创作|作品|写作|草稿|手稿|写了什么|写什么|诗|小说|随笔|散文|剧本|设定|世界观|歌词)", normalized):
+            return True
+        if re.search(r"你.{0,10}(创作|作品|写作|草稿|手稿|写了什么|写什么|写诗|写小说|写随笔|写剧本|写设定)", normalized):
+            return True
+        if re.search(r"(有什么|写了啥|写了什么|能不能看看|给我看看).{0,14}(创作|作品|草稿|诗|小说|随笔|剧本|设定|片段)", normalized):
+            return True
+        return False
+
+    def _mentioned_creative_project_title(self, text: str) -> str:
+        normalized = _single_line(text, 260)
+        if not normalized:
+            return ""
+        best = ""
+        for project in self._creative_projects():
+            if project.get("status") not in {"drafting", "finished"}:
+                continue
+            chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
+            if not chunks:
+                continue
+            title = _single_line(project.get("title"), 60)
+            if len(title) < 2:
+                continue
+            if title in normalized and len(title) > len(best):
+                best = title
+        return best
+
+    @staticmethod
+    def _creative_query_work_type_score(inbound_text: str, work_type: str, title: str = "") -> int:
+        text = _single_line(inbound_text, 220)
+        target = f"{work_type} {title}"
+        score = 0
+        groups = (
+            (("诗", "短诗", "歌词", "歌"), ("诗", "歌词", "歌")),
+            (("小说", "短篇"), ("小说", "短篇", "故事")),
+            (("随笔", "散文", "札记"), ("随笔", "散文", "札记")),
+            (("剧本", "短剧", "分镜", "对白", "脚本"), ("剧本", "短剧", "分镜", "对白", "脚本")),
+            (("设定", "世界观", "角色", "怪谈", "图鉴"), ("设定", "世界观", "角色", "怪谈", "图鉴")),
+        )
+        for query_tokens, type_tokens in groups:
+            if any(token in text for token in query_tokens) and any(token in target for token in type_tokens):
+                score += 10
+        if title and title in text:
+            score += 20
+        return score
 
     def _format_hidden_creative_context_for_reply(self, inbound_text: str) -> str:
-        if not self.enable_creative_writing or not self._user_asks_recent_bot_activity(inbound_text):
+        if not self.enable_creative_writing:
+            return ""
+        mentioned_title = self._mentioned_creative_project_title(inbound_text)
+        asks_creative = self._user_asks_recent_creative_activity(inbound_text)
+        asks_activity = self._user_asks_recent_bot_activity(inbound_text)
+        if not (mentioned_title or asks_creative or asks_activity):
             return ""
         candidates = []
         for project in reversed(self._creative_projects()):
@@ -5678,26 +5732,43 @@ class DailyStateMixin:
                 continue
             chunks = project.get("draft_chunks") if isinstance(project.get("draft_chunks"), list) else []
             latest = next((item for item in reversed(chunks) if isinstance(item, dict) and _single_line(item.get("text"), 180)), None)
-            candidates.append((project, latest))
-            if len(candidates) >= 2:
+            score = self._creative_query_work_type_score(
+                inbound_text,
+                self._creative_work_type(project),
+                _single_line(project.get("title"), 40),
+            )
+            if mentioned_title and mentioned_title == _single_line(project.get("title"), 60):
+                score += 100
+            candidates.append((score, project, latest))
+            if len(candidates) >= 4 and (not mentioned_title or any(item[0] >= 100 for item in candidates)):
                 break
         if not candidates:
             return ""
-        project, latest = candidates[0]
+        if mentioned_title or asks_creative:
+            candidates.sort(key=lambda item: item[0], reverse=True)
+        _, project, latest = candidates[0]
         work_type = self._creative_work_type(project)
         title = _single_line(project.get("title"), 40)
         premise = _single_line(project.get("premise"), 120)
         progress = f"{_safe_int(project.get('current_chars'), 0, 0)}/{_safe_int(project.get('target_chars'), 2400, 300, 5200)}"
         snippet = _single_line((latest or {}).get("text"), 180) if isinstance(latest, dict) else ""
+        ask_line = (
+            f"用户提到了你私下创作过的作品《{mentioned_title}》。"
+            if mentioned_title
+            else
+            "用户正在明确询问你最近的创作、写作、草稿或某类作品。"
+            if asks_creative
+            else "用户正在询问你最近在做什么。"
+        )
         return (
             "【私下创作近况】\n"
-            "用户正在询问你最近在做什么。你可以选择是否提到：你最近因为生活小事、日记碎片或梦境灵感开了一个自己的文本作品,一直在自己慢慢写。\n"
+            f"{ask_line}你可以提到：你最近因为生活小事、日记碎片或梦境灵感开了一个自己的文本作品,一直在自己慢慢写。\n"
             f"作品类型：{work_type}\n"
             f"标题：{title or '未定标题'}\n"
             f"设定：{premise or '还没完全想清楚'}\n"
             f"进度：约 {progress} 字\n"
             + (f"最近一句/片段：{snippet}\n" if snippet else "")
-            + "这不是必须回答的内容；如果当前聊天语境不适合,可以只含糊说“在弄一点小东西”。如果回答,要像被问到后才松口,不要主动汇报系统进度,不要一次给完整正文。"
+            + "如果用户明确问作品/诗/小说/草稿,可以直接概括并给一小句片段；否则这不是必须回答的内容,可以只含糊说“在弄一点小东西”。不要主动汇报系统进度,不要一次给完整正文。"
         )
 
     @staticmethod

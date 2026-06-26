@@ -381,6 +381,71 @@ class ProactiveMessageMixin:
         lowered = text.lower()
         return any(token in lowered for token in ("ai news", "llm news", "daily ai", "tech news"))
 
+    def _user_asks_web_exploration_context(self, inbound_text: str) -> bool:
+        text = str(inbound_text or "").strip()
+        if not text:
+            return False
+        if re.search(r"(主动搜索|网页探索|搜索记录|浏览记录|上网).{0,16}(什么|啥|哪|记录|看|查|搜|了解|发现)|((最近|刚才|今天|这两天|这会儿).{0,16}(搜|查|上网|浏览|了解|看了啥|看了什么|发现了什么))|你.{0,12}(搜了什么|查了什么|上网看了什么|上网看了啥|发现了什么新东西)", text):
+            return True
+        lowered = text.lower()
+        return any(token in lowered for token in ("web exploration", "recent search", "search history", "browsing history"))
+
+    def _format_recent_web_exploration_context_for_reply(self, inbound_text: str = "") -> str:
+        if not getattr(self, "enable_web_exploration", False):
+            return ""
+        if not self._user_asks_web_exploration_context(inbound_text):
+            return ""
+        state = self.data.get("web_exploration") if isinstance(self.data.get("web_exploration"), dict) else {}
+        digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
+        notes = state.get("notes") if isinstance(state.get("notes"), list) else []
+        latest_results = state.get("latest_results") if isinstance(state.get("latest_results"), list) else []
+        if not digest and not notes and not latest_results:
+            return (
+                "【主动搜索上下文】\n"
+                "用户正在询问你最近主动搜索/上网探索过什么,但当前没有可用的主动搜索记录。请自然说明自己最近还没搜到能说的东西,不要编造搜索内容。"
+            )
+        rows: list[str] = []
+        if digest:
+            rows.append(
+                "最近一次搜索："
+                + "｜".join(
+                    part
+                    for part in (
+                        f"搜索词：{_single_line(digest.get('query'), 90)}" if _single_line(digest.get("query"), 90) else "",
+                        f"主题：{_single_line(digest.get('topic'), 90)}" if _single_line(digest.get("topic"), 90) else "",
+                        f"动机：{_single_line(digest.get('reason'), 140)}" if _single_line(digest.get("reason"), 140) else "",
+                        f"笔记：{_single_line(digest.get('note'), 240)}" if _single_line(digest.get("note"), 240) else "",
+                        f"来源：{_single_line(digest.get('source_title'), 120)}" if _single_line(digest.get("source_title"), 120) else "",
+                    )
+                    if part
+                )
+            )
+        for item in reversed([item for item in notes if isinstance(item, dict)][-4:]):
+            query = _single_line(item.get("query"), 90)
+            topic = _single_line(item.get("topic"), 90)
+            note = _single_line(item.get("note") or item.get("summary") or item.get("impression"), 180)
+            reason = _single_line(item.get("reason"), 100)
+            if query or topic or note:
+                rows.append("- " + "｜".join(part for part in (f"搜索词：{query}" if query else "", topic, reason, note) if part))
+        if latest_results:
+            result_rows = []
+            for item in latest_results[:4]:
+                if not isinstance(item, dict):
+                    continue
+                title = _single_line(item.get("title"), 120)
+                snippet = _single_line(item.get("snippet"), 160)
+                if title:
+                    result_rows.append("- " + "｜".join(part for part in (title, snippet) if part))
+            if result_rows:
+                rows.append("最近一次结果摘录：")
+                rows.extend(result_rows)
+        return (
+            "【主动搜索上下文】\n"
+            "用户正在询问你最近主动搜索/网页探索过什么。下面是真实搜索记录；回答只能基于这些内容,不要编造额外搜索、来源或结论。"
+            "可以用第一人称自然概括“我刚查了/我之前搜到”,但不要说成后台系统日志。\n"
+            + "\n".join(rows[:12])
+        )
+
     def _format_recent_news_context_for_reply(self, inbound_text: str = "") -> str:
         if not self.enable_news_integration:
             return ""
@@ -4606,6 +4671,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         processed_chain = await self._trigger_proactive_decorating_hooks(umo, chain)
         if not processed_chain:
             return
+        tts_chain_guard = getattr(self, "_sanitize_outbound_tts_chain_without_event", None)
+        if callable(tts_chain_guard):
+            processed_chain = await tts_chain_guard(processed_chain, umo=umo)
+            if not processed_chain:
+                return
         hit = self._forbidden_recall_hit(self._chain_text_for_forbidden_recall(processed_chain))
         if hit:
             logger.warning(

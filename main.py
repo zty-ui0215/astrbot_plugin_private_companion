@@ -413,7 +413,7 @@ _PROACTIVE_ONLY_TEMP_UNLOCK_RELATED = {
     PLUGIN_NAME,
     "menglimi",
     "我会永远陪着你：为 AstrBot 提供人格连续性、关系识别、主动行为和可视化管理的陪伴编排插件。",
-    "5.1.0",
+    "5.1.2",
 )
 class PrivateCompanionPlugin(
     CoreStoreMixin,
@@ -1706,6 +1706,15 @@ class PrivateCompanionPlugin(
                     started_at=activity_baseline,
                 )
             )
+
+    @filter.on_decorating_result()
+    async def final_tts_markup_guard_before_send(self, event: AstrMessageEvent):
+        """发送前终检 TTS 标签，避免 <tts> 原样泄漏到聊天。"""
+        if self._proactive_only_blocks_passive_event(event, "enable_tts_enhancement"):
+            return
+        guard = getattr(self, "finalize_outbound_tts_markup_guard", None)
+        if callable(guard):
+            await guard(event)
 
     def _is_reply_component(self, component: Any) -> bool:
         try:
@@ -4510,6 +4519,9 @@ class PrivateCompanionPlugin(
             news_context = self._format_recent_news_context_for_reply(inbound_text)
             if news_context:
                 prompt_surface.add("news.recent", news_context, priority=64, source="news")
+            web_exploration_context = self._format_recent_web_exploration_context_for_reply(inbound_text)
+            if web_exploration_context:
+                prompt_surface.add("web_exploration.recent", web_exploration_context, priority=65, source="web_exploration")
             if self._feature_enabled_or_temp_unlocked("enable_skill_growth_passive_injection"):
                 skill_context = self._format_skill_growth_for_prompt()
                 if skill_context:
@@ -4626,22 +4638,53 @@ class PrivateCompanionPlugin(
             return
         if self._proactive_only_blocks_passive_event(event, "llm_request"):
             return
+        if bool(getattr(event, "private_companion_skip_external_token_stats", False)):
+            return
         prompt = str(getattr(event, "private_companion_external_token_prompt", "") or "")
         started = _safe_float(getattr(event, "private_companion_external_token_start", 0), 0)
-        completion = str(getattr(resp, "completion_text", "") or "")
+        completion = self._completion_text_for_token_stats(resp)
         if not prompt and not completion and resp is None:
             return
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        try:
+            sender_id = str(event.get_sender_id())
+        except Exception:
+            sender_id = ""
+        resp_id = _single_line(getattr(resp, "id", ""), 120) if resp is not None else ""
+        usage = getattr(resp, "usage", None) if resp is not None else None
+        usage_total = _safe_int(getattr(usage, "total", 0), 0)
+        trigger_message_id = self._event_message_id(event)
+        completion_sig = hashlib.sha1(
+            completion[:4000].encode("utf-8", errors="ignore")
+        ).hexdigest()[:16] if completion else ""
+        record_key = "|".join(
+            (
+                resp_id,
+                umo,
+                sender_id,
+                trigger_message_id,
+                str(usage_total),
+                str(len(prompt)),
+                str(len(completion)),
+                completion_sig,
+            )
+        )
+        try:
+            recorded_keys = getattr(event, "private_companion_external_token_recorded_keys", None)
+            if not isinstance(recorded_keys, set):
+                recorded_keys = set()
+                setattr(event, "private_companion_external_token_recorded_keys", recorded_keys)
+            if record_key in recorded_keys:
+                return
+            recorded_keys.add(record_key)
+        except Exception:
+            pass
         try:
             is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
             task = "astrbot_private_reply" if is_private_chat else "astrbot_group_reply"
         except Exception:
             is_private_chat = False
             task = "astrbot_reply"
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
-        try:
-            sender_id = str(event.get_sender_id())
-        except Exception:
-            sender_id = ""
         provider_id = self._provider_id_from_llm_response(resp) or self._default_chat_provider_id(umo)
         self._record_external_llm_usage(
             provider_id=provider_id,

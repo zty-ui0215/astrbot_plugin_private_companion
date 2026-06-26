@@ -60,12 +60,114 @@ class TokenBudgetMixin:
                 return parsed
         return 0
 
+    @classmethod
+    def _llm_text_from_content(cls, value: Any, *, limit: int = 8000) -> str:
+        """Extract printable text from AstrBot/OpenAI-style message content."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value[:limit]
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, dict):
+            item_type = str(value.get("type") or "").strip()
+            if item_type == "text":
+                return str(value.get("text") or "")[:limit]
+            if item_type == "image_url":
+                return "[图片]"
+            if item_type == "audio_url":
+                return "[音频]"
+            parts: list[str] = []
+            for key in ("text", "content", "message", "result", "name"):
+                if key in value:
+                    text = cls._llm_text_from_content(value.get(key), limit=limit)
+                    if text:
+                        parts.append(text)
+            return "\n".join(parts)[:limit]
+        if isinstance(value, (list, tuple)):
+            parts = []
+            remaining = limit
+            for item in value:
+                if remaining <= 0:
+                    break
+                text = cls._llm_text_from_content(item, limit=remaining)
+                if text:
+                    parts.append(text)
+                    remaining -= len(text)
+            return "\n".join(parts)[:limit]
+        dumper = getattr(value, "model_dump_for_context", None)
+        if callable(dumper):
+            try:
+                return cls._llm_text_from_content(dumper(), limit=limit)
+            except Exception:
+                return ""
+        return str(value)[:limit] if value else ""
+
+    @classmethod
+    def _request_prompt_for_token_stats(cls, req: Any) -> str:
+        if req is None:
+            return ""
+        parts: list[str] = []
+        for attr in ("system_prompt", "prompt"):
+            value = getattr(req, attr, None)
+            if value:
+                text = cls._llm_text_from_content(value)
+                if text:
+                    parts.append(text)
+        contexts = getattr(req, "contexts", None)
+        if isinstance(contexts, list):
+            for ctx in contexts:
+                if not isinstance(ctx, dict):
+                    continue
+                role = _single_line(ctx.get("role"), 40)
+                content = cls._llm_text_from_content(ctx.get("content"))
+                if content:
+                    parts.append(f"{role}: {content}" if role else content)
+        extra_parts = getattr(req, "extra_user_content_parts", None)
+        if isinstance(extra_parts, list) and extra_parts:
+            text = cls._llm_text_from_content(extra_parts)
+            if text:
+                parts.append(text)
+        image_count = len(getattr(req, "image_urls", None) or [])
+        audio_count = len(getattr(req, "audio_urls", None) or [])
+        if image_count > 0:
+            parts.append(f"[图片] x{image_count}")
+        if audio_count > 0:
+            parts.append(f"[音频] x{audio_count}")
+        return "\n\n".join(part for part in parts if part).strip()
+
+    @classmethod
+    def _completion_text_for_token_stats(cls, resp: Any) -> str:
+        if resp is None:
+            return ""
+        text = str(getattr(resp, "completion_text", "") or "")
+        if text:
+            return text
+        result_chain = getattr(resp, "result_chain", None)
+        chain = getattr(result_chain, "chain", None)
+        if isinstance(chain, list):
+            parts: list[str] = []
+            for item in chain:
+                item_text = ""
+                if isinstance(item, dict):
+                    item_text = str(item.get("text") or item.get("content") or "")
+                else:
+                    item_text = str(getattr(item, "text", "") or getattr(item, "content", "") or "")
+                if item_text:
+                    parts.append(item_text)
+            if parts:
+                return "\n".join(parts)
+        return cls._llm_text_from_content(result_chain)
+
     def _extract_llm_usage(self, resp: Any, prompt: str, completion: str) -> dict[str, Any]:
         candidates = [
             getattr(resp, "usage", None),
             getattr(resp, "token_usage", None),
             getattr(resp, "raw_usage", None),
         ]
+        raw_completion = getattr(resp, "raw_completion", None)
+        if raw_completion is not None:
+            candidates.append(getattr(raw_completion, "usage", None))
         raw_response = getattr(resp, "raw_response", None)
         if isinstance(raw_response, dict):
             candidates.extend([
@@ -107,14 +209,19 @@ class TokenBudgetMixin:
         )
         if cached_tokens <= 0:
             cached_tokens = cache_read_tokens
+        input_other_tokens = self._usage_value(usage, "input_other")
+        if prompt_tokens <= 0 and (input_other_tokens > 0 or cached_tokens > 0):
+            prompt_tokens = input_other_tokens + cached_tokens
         estimated = False
         if total_tokens <= 0:
-            if prompt_tokens <= 0:
+            prompt_estimated = prompt_tokens <= 0
+            completion_estimated = completion_tokens <= 0
+            if prompt_estimated:
                 prompt_tokens = self._estimate_token_count(prompt)
-            if completion_tokens <= 0:
+            if completion_estimated:
                 completion_tokens = self._estimate_token_count(completion)
             total_tokens = prompt_tokens + completion_tokens
-            estimated = True
+            estimated = (not usage) or prompt_estimated or completion_estimated
         elif prompt_tokens <= 0 and completion_tokens <= 0:
             prompt_tokens = self._estimate_token_count(prompt)
             completion_tokens = max(0, total_tokens - prompt_tokens)
@@ -368,9 +475,15 @@ class TokenBudgetMixin:
         )
         del recent[:-240]
         store["updated_at"] = now_dt.strftime("%Y-%m-%d %H:%M:%S")
-        last_save = _safe_float(getattr(self, "_token_usage_last_save_at", 0), 0)
-        if now_ts - last_save >= 60:
-            self._token_usage_last_save_at = now_ts
+        schedule_save = getattr(self, "_schedule_data_save", None)
+        if callable(schedule_save):
+            try:
+                schedule_save(delay=2.0)
+            except Exception:
+                pass
+        last_save = _safe_float(getattr(self, "_external_token_usage_last_save_at", 0), 0)
+        if now_ts - last_save >= 30:
+            self._external_token_usage_last_save_at = now_ts
             try:
                 self._save_data_sync()
             except Exception:
@@ -397,12 +510,7 @@ class TokenBudgetMixin:
             return
         if bool(getattr(event, "private_companion_skip_external_token_stats", False)):
             return
-        parts = []
-        for attr in ("system_prompt", "prompt"):
-            value = getattr(req, attr, None)
-            if value:
-                parts.append(str(value))
-        prompt = "\n\n".join(parts).strip()
+        prompt = self._request_prompt_for_token_stats(req)
         try:
             setattr(event, "private_companion_external_token_prompt", prompt)
             setattr(event, "private_companion_external_token_start", time.time())

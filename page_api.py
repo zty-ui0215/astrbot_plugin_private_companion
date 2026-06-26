@@ -6950,10 +6950,12 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 limit = 300 if key == "recall_forbidden_words" else 120
                 return parser(value, limit=limit)
             if isinstance(value, list):
-                return [v for v in value if v]
-            if isinstance(value, str):
-                return [v for v in re.split(r"[\n,，、;；]+", value) if v.strip()]
-            return []
+                limit = 300 if key == "recall_forbidden_words" else 120
+                return [str(item).strip() for item in value if str(item or "").strip()][:limit]
+            text = str(value or "").strip()[:1200]
+            if not text:
+                return []
+            return [part.strip() for part in re.split(r"[\n,，、;；]+", text) if part.strip()]
         if key == "recall_forbidden_scope":
             scope = str(value or "bot_and_group").strip().lower()
             return scope if scope in {"bot_only", "group_only", "bot_and_group"} else "bot_and_group"

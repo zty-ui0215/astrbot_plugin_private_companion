@@ -257,6 +257,7 @@ _PROMPT_MODULE_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     "bookshelf.reading": ("阅读上下文", "补充近期阅读/书柜内容对本轮回复的影响。"),
     "private_reading.preference": ("阅读偏好", "让私聊回复更贴近用户已形成的阅读偏好。"),
     "news.recent": ("近期新闻", "用户聊到新闻/时事时，提供近期阅读过的新闻上下文。"),
+    "web_exploration.recent": ("主动搜索近况", "用户询问最近搜索/网页探索时，提供真实搜索词、动机、笔记和来源。"),
     "skill.growth": ("能力成长", "注入角色近期能力变化，帮助回复体现可成长性。"),
     "skill.growth.match": ("本轮相关技能", "用户提到已追踪技能时，只注入命中的能力边界。"),
     "companion.planner": ("陪伴规划", "整合关系画像、互动节奏和回复策略，控制陪伴感与边界。"),
