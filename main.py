@@ -3594,6 +3594,157 @@ class PrivateCompanionPlugin(
             approx_tokens,
         )
 
+    def _tool_name_for_private_passive_guard(self, tool: Any) -> str:
+        if tool is None:
+            return ""
+        if isinstance(tool, dict):
+            for key in ("name", "tool_name"):
+                value = tool.get(key)
+                if value:
+                    return str(value).strip()
+            func = tool.get("function")
+            if isinstance(func, dict) and func.get("name"):
+                return str(func.get("name")).strip()
+        for attr in ("name", "tool_name", "__name__"):
+            value = getattr(tool, attr, None)
+            if value:
+                return str(value).strip()
+        return ""
+
+    @staticmethod
+    def _private_passive_tool_blocklist() -> set[str]:
+        return {
+            "send_message_to_user",
+            "future_task",
+            "astrbot_file_read_tool",
+            "astrbot_file_write_tool",
+            "astrbot_file_edit_tool",
+            "astrbot_grep_tool",
+            "astrbot_execute_shell",
+            "astrbot_execute_python",
+            "launch_application",
+            "screenshot",
+            "move_mouse",
+            "click_mouse",
+            "type_text",
+            "press_key",
+        }
+
+    @staticmethod
+    def _private_passive_tool_leak_text(text: str) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        hard_markers = (
+            "permission denied. send message to another session",
+            "platform_id:message_type:session_id",
+            "you must use the `send_message_to_user` tool",
+            "use `send_message_to_user` to deliver",
+            "image_generation_task_result",
+            "agent 使用工具",
+            "tool `send_message_to_user` result",
+        )
+        if any(marker in lowered for marker in hard_markers):
+            return True
+        tool_markers = (
+            "send_message_to_user",
+            "future_task",
+            "web_search_tavily",
+            "astrbot_file_read_tool",
+            "astrbot_file_write_tool",
+        )
+        if sum(1 for marker in tool_markers if marker in lowered) >= 2:
+            return True
+        return False
+
+    def _sanitize_passive_private_agent_context(self, event: AstrMessageEvent, req: ProviderRequest) -> int:
+        contexts = getattr(req, "contexts", None)
+        if not isinstance(contexts, list) or not contexts:
+            return 0
+        cleaned: list[Any] = []
+        removed = 0
+        for item in contexts:
+            role = ""
+            content: Any = item
+            if isinstance(item, dict):
+                role = str(item.get("role") or "").strip().lower()
+                content = item.get("content")
+            text = self._plain_context_content_for_fast_reply(content)
+            if role in {"assistant", "system", "tool"} and self._private_passive_tool_leak_text(text):
+                removed += 1
+                continue
+            cleaned.append(item)
+        if removed:
+            try:
+                req.contexts = cleaned
+            except Exception:
+                return 0
+            logger.info(
+                "[PrivateCompanion] 私聊被动主链已移除工具代理污染历史: session=%s removed=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                removed,
+            )
+        return removed
+
+    def _sanitize_passive_private_agent_tools(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        if bool(getattr(event, "is_wake", False)):
+            return
+        if "cron" in event.__class__.__name__.lower():
+            return
+        prompt_surface = "\n".join(
+            [
+                str(getattr(req, "system_prompt", "") or ""),
+                str(getattr(req, "prompt", "") or ""),
+            ]
+        )
+        if "image_generation_task_result" in prompt_surface or "send_message_to_user` to deliver" in prompt_surface:
+            return
+        blocklist = self._private_passive_tool_blocklist()
+        toolset = getattr(req, "func_tool", None)
+        removed: list[str] = []
+        if toolset is not None:
+            tools = getattr(toolset, "tools", None)
+            if isinstance(tools, list):
+                kept = []
+                for tool in tools:
+                    name = self._tool_name_for_private_passive_guard(tool)
+                    if name in blocklist:
+                        removed.append(name)
+                        continue
+                    kept.append(tool)
+                if len(kept) != len(tools):
+                    try:
+                        toolset.tools = kept
+                    except Exception:
+                        pass
+            elif isinstance(tools, dict):
+                for name in list(tools.keys()):
+                    clean_name = str(name or "").strip()
+                    if clean_name in blocklist:
+                        removed.append(clean_name)
+                        tools.pop(name, None)
+            elif isinstance(toolset, list):
+                kept = []
+                for tool in toolset:
+                    name = self._tool_name_for_private_passive_guard(tool)
+                    if name in blocklist:
+                        removed.append(name)
+                        continue
+                    kept.append(tool)
+                if len(kept) != len(toolset):
+                    try:
+                        req.func_tool = kept
+                    except Exception:
+                        pass
+        context_removed = self._sanitize_passive_private_agent_context(event, req)
+        if removed:
+            logger.info(
+                "[PrivateCompanion] 私聊被动主链已裁剪高风险工具: session=%s tools=%s context_removed=%s",
+                _single_line(getattr(event, "unified_msg_origin", ""), 120) or "unknown",
+                ",".join(sorted(set(removed))),
+                context_removed,
+            )
+
     def _rest_reply_window_active(self) -> bool:
         raw = str(getattr(self, "rest_reply_active_windows", "") or "").strip()
         if not raw:
@@ -3861,6 +4012,20 @@ class PrivateCompanionPlugin(
         event.set_result(empty_result)
         event.stop_event()
 
+    def _stop_private_reply_after_user_rest_signal(self, event: AstrMessageEvent, user_id: str, text: str) -> None:
+        logger.info(
+            "[PrivateCompanion] 用户休息静默已前置拦截本轮私聊回复: user=%s text=%s",
+            _single_line(user_id, 80),
+            _single_line(text, 120),
+        )
+        empty_result = self._build_result_from_chain([])
+        try:
+            empty_result.stop_event()
+        except Exception:
+            pass
+        event.set_result(empty_result)
+        event.stop_event()
+
     def _proactive_only_unlock_store(self) -> set[str]:
         data = getattr(self, "data", None)
         if not isinstance(data, dict):
@@ -4091,15 +4256,21 @@ class PrivateCompanionPlugin(
                 and bool(private_user.get("enabled", True))
             )
             if not private_user_active:
-                await self._append_non_target_private_identity_guard_to_request(event, req)
                 reason = "private_user_missing" if not isinstance(private_user, dict) else "private_user_disabled"
                 log_bookshelf_secret_skip(reason, private_user if isinstance(private_user, dict) else None)
                 self._release_framework_session_lock_for_event(event, label=reason)
                 logger.info(
-                    "[PrivateCompanion] 非目标/未启用私聊跳过陪伴注入: user=%s reason=%s",
+                    "[PrivateCompanion] 非目标/未启用私聊阻止默认主链接管: user=%s reason=%s",
                     _single_line(private_user_id, 40) or "unknown",
                     reason,
                 )
+                empty_result = self._build_result_from_chain([])
+                try:
+                    empty_result.stop_event()
+                except Exception:
+                    pass
+                event.set_result(empty_result)
+                event.stop_event()
                 return
         rest_allowed, rest_reason = await self._should_reply_during_rest(event, is_private_chat=is_private_chat)
         if not rest_allowed:
@@ -4118,6 +4289,8 @@ class PrivateCompanionPlugin(
                 _single_line(rest_reason, 120),
             )
         self._trim_passive_request_context_if_needed(event, req, is_private_chat=is_private_chat)
+        if is_private_chat:
+            self._sanitize_passive_private_agent_tools(event, req)
         group_id_for_lock = ""
         if not is_private_chat and self._feature_enabled_or_temp_unlocked("enable_group_companion"):
             group_id_for_lock = self._extract_group_id_from_event(event)
@@ -5622,7 +5795,7 @@ class PrivateCompanionPlugin(
             safe_text = self._sanitize_orphan_tts_placeholders(text)
             fast_user["last_user_message"] = safe_text or text
             fast_user["last_user_message_at"] = received_ts
-            self._apply_user_rest_silence_from_message(fast_user, safe_text or text, now=received_ts)
+            rest_silence_applied = self._apply_user_rest_silence_from_message(fast_user, safe_text or text, now=received_ts)
             fast_user["inbound_count"] = _safe_int(fast_user.get("inbound_count"), 0) + 1
             fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
             fast_user["episode_message_count"] = _safe_int(fast_user.get("episode_message_count"), 0, 0) + 1
@@ -5643,9 +5816,14 @@ class PrivateCompanionPlugin(
             if fast_user_is_owner and self._apply_interaction_warmth_to_state(text, fast_user):
                 fast_user["relationship_score"] = _safe_int(fast_user.get("relationship_score"), 0) + 1
             self._schedule_data_save()
+            if rest_silence_applied and _safe_float(fast_user.get("user_rest_until"), 0) > received_ts:
+                self._stop_private_reply_after_user_rest_signal(event, user_id, safe_text or text)
+                return
             await self._acquire_framework_session_lock_for_event(event, label="private_event_pipeline")
             return
 
+        rest_silence_early_block = False
+        rest_silence_early_text = ""
         async with self._data_lock:
             user = self._get_user(user_id)
             is_target_user = self._is_target_private_user(user_id, user) and bool(user.get("enabled", True))
@@ -5898,7 +6076,10 @@ class PrivateCompanionPlugin(
                 safe_text = self._sanitize_orphan_tts_placeholders(text)
                 user["last_user_message"] = safe_text or text
                 user["last_user_message_at"] = received_ts
-                self._apply_user_rest_silence_from_message(user, safe_text or text, now=received_ts)
+                rest_silence_applied = self._apply_user_rest_silence_from_message(user, safe_text or text, now=received_ts)
+                if rest_silence_applied and _safe_float(user.get("user_rest_until"), 0) > received_ts:
+                    rest_silence_early_block = bool(is_target_user)
+                    rest_silence_early_text = safe_text or text
                 self._apply_private_image_vision_negative_feedback(user, safe_text or text)
                 user["episode_message_count"] = _safe_int(user.get("episode_message_count"), 0, 0) + 1
                 self._update_expression_profile_from_message(user, safe_text or text)
@@ -5907,9 +6088,12 @@ class PrivateCompanionPlugin(
                 self._update_action_preferences_from_message(user, safe_text or text)
                 self._update_user_behavior_habits_from_message(user, safe_text or text)
                 if (
-                    self.enable_intent_emotion_analysis
-                    or self.enable_relationship_state_machine
-                    or self.enable_emotion_simulation
+                    not rest_silence_early_block
+                    and (
+                        self.enable_intent_emotion_analysis
+                        or self.enable_relationship_state_machine
+                        or self.enable_emotion_simulation
+                    )
                 ):
                     intent_profile = self._analyze_inbound_intent(text)
                     if self.enable_intent_emotion_analysis:
@@ -5962,6 +6146,23 @@ class PrivateCompanionPlugin(
             self._schedule_data_save()
             user_snapshot = dict(user)
 
+        if not is_target_user:
+            logger.info(
+                "[PrivateCompanion] 非目标/未启用私聊已前置停止默认主链: user=%s text=%s",
+                _single_line(user_id, 80),
+                _single_line(text, 120),
+            )
+            empty_result = self._build_result_from_chain([])
+            try:
+                empty_result.stop_event()
+            except Exception:
+                pass
+            event.set_result(empty_result)
+            event.stop_event()
+            return
+        if is_target_user and rest_silence_early_block:
+            self._stop_private_reply_after_user_rest_signal(event, user_id, rest_silence_early_text or text)
+            return
         if is_target_user and schedule_adjustment_applied:
             asyncio.create_task(self._kick_proactive_loop_once())
         if response:
