@@ -745,6 +745,148 @@ class QzoneMixin(QzoneMediaMixin):
                 result.append(text)
         return result[-max(1, int(limit or 500)) :]
 
+    @staticmethod
+    def _qzone_normalized_comment_text(text: Any) -> str:
+        cleaned = html.unescape(re.sub(r"<[^>]+>", "", str(text or "")))
+        cleaned = re.sub(r"\s+", "", cleaned).lower()
+        cleaned = re.sub(r"[，,。.!！?？~～…·、；;：:\"'“”‘’\[\]（）()\s]+", "", cleaned)
+        return _single_line(cleaned, 160)
+
+    def _qzone_comment_author_key(self, comment: Any) -> str:
+        uin = _safe_int(getattr(comment, "uin", 0), 0, 0)
+        if uin:
+            return f"uin:{uin}"
+        name = re.sub(r"\s+", "", _single_line(getattr(comment, "name", ""), 40).lower())
+        return f"name:{name}" if name else "unknown"
+
+    def _qzone_comment_author_post_key(self, post: Any, comment: Any) -> str:
+        post_tid = _single_line(getattr(post, "tid", ""), 80) or "post"
+        return f"{post_tid}|{self._qzone_comment_author_key(comment)}"
+
+    def _qzone_trim_comment_records(
+        self,
+        values: Any,
+        *,
+        now: float,
+        max_age_seconds: float = 7 * 24 * 3600,
+        limit: int = 160,
+    ) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in values if isinstance(values, list) else []:
+            if not isinstance(item, dict):
+                continue
+            ts = _safe_float(item.get("ts"), 0)
+            if ts and now - ts > max_age_seconds:
+                continue
+            key = _single_line(item.get("key") or item.get("signature"), 160)
+            post_tid = _single_line(item.get("post_tid"), 80)
+            text_norm = _single_line(item.get("text_norm"), 160)
+            if not key and post_tid and text_norm:
+                key = f"{post_tid}|{text_norm}"
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(
+                {
+                    "key": key,
+                    "post_tid": post_tid,
+                    "author_key": _single_line(item.get("author_key"), 80),
+                    "text_norm": text_norm,
+                    "text": _single_line(item.get("text"), 120),
+                    "ts": ts or now,
+                }
+            )
+        return result[-max(1, int(limit or 160)) :]
+
+    def _qzone_recent_sent_comment_records(self, state: dict[str, Any], *, now: float) -> list[dict[str, Any]]:
+        records = self._qzone_trim_comment_records(
+            state.get("comment_inbox_recent_sent_comments") if isinstance(state, dict) else [],
+            now=now,
+            max_age_seconds=7 * 24 * 3600,
+            limit=160,
+        )
+        if isinstance(state, dict):
+            state["comment_inbox_recent_sent_comments"] = records
+        return records
+
+    def _qzone_recent_author_reply_records(self, state: dict[str, Any], *, now: float) -> list[dict[str, Any]]:
+        records = self._qzone_trim_comment_records(
+            state.get("comment_inbox_recent_author_replies") if isinstance(state, dict) else [],
+            now=now,
+            max_age_seconds=24 * 3600,
+            limit=160,
+        )
+        if isinstance(state, dict):
+            state["comment_inbox_recent_author_replies"] = records
+        return records
+
+    def _qzone_comment_matches_recent_sent(self, state: dict[str, Any], post: Any, comment: Any, *, now: float) -> bool:
+        post_tid = _single_line(getattr(post, "tid", ""), 80) or "post"
+        content_norm = self._qzone_normalized_comment_text(getattr(comment, "content", ""))
+        if not content_norm:
+            return False
+        for item in self._qzone_recent_sent_comment_records(state, now=now):
+            if item.get("post_tid") == post_tid and item.get("text_norm") == content_norm:
+                return True
+        return False
+
+    def _qzone_comment_is_self(self, state: dict[str, Any], post: Any, comment: Any, *, own_uin: int, now: float) -> bool:
+        comment_uin = _safe_int(getattr(comment, "uin", 0), 0, 0)
+        if own_uin and comment_uin == int(own_uin):
+            return True
+        comment_name = re.sub(r"\s+", "", _single_line(getattr(comment, "name", ""), 40).lower())
+        post_name = re.sub(r"\s+", "", _single_line(getattr(post, "name", ""), 40).lower())
+        if comment_name and post_name and comment_name == post_name:
+            return True
+        return self._qzone_comment_matches_recent_sent(state, post, comment, now=now)
+
+    def _qzone_author_post_recently_replied(self, state: dict[str, Any], post: Any, comment: Any, *, now: float, cooldown_seconds: float = 6 * 3600) -> bool:
+        key = self._qzone_comment_author_post_key(post, comment)
+        if not key:
+            return False
+        for item in self._qzone_recent_author_reply_records(state, now=now):
+            if item.get("key") == key and now - _safe_float(item.get("ts"), 0) < cooldown_seconds:
+                return True
+        return False
+
+    def _qzone_note_comment_inbox_sent(self, state: dict[str, Any], post: Any, comment: Any, sent_text: str, *, now: float) -> None:
+        if not isinstance(state, dict):
+            return
+        post_tid = _single_line(getattr(post, "tid", ""), 80) or "post"
+        text_norm = self._qzone_normalized_comment_text(sent_text)
+        if text_norm:
+            sent_records = self._qzone_recent_sent_comment_records(state, now=now)
+            sent_records.append(
+                {
+                    "key": f"{post_tid}|{text_norm}",
+                    "post_tid": post_tid,
+                    "author_key": "self",
+                    "text_norm": text_norm,
+                    "text": _single_line(sent_text, 120),
+                    "ts": now,
+                }
+            )
+            state["comment_inbox_recent_sent_comments"] = self._qzone_trim_comment_records(sent_records, now=now, limit=160)
+        author_key = self._qzone_comment_author_post_key(post, comment)
+        author_records = self._qzone_recent_author_reply_records(state, now=now)
+        author_records.append(
+            {
+                "key": author_key,
+                "post_tid": post_tid,
+                "author_key": self._qzone_comment_author_key(comment),
+                "text_norm": self._qzone_normalized_comment_text(getattr(comment, "content", "")),
+                "text": _single_line(getattr(comment, "content", ""), 120),
+                "ts": now,
+            }
+        )
+        state["comment_inbox_recent_author_replies"] = self._qzone_trim_comment_records(
+            author_records,
+            now=now,
+            max_age_seconds=24 * 3600,
+            limit=160,
+        )
+
     def _qzone_comment_reply_leaks_private(self, text: str) -> bool:
         compact = str(text or "")
         if not compact.strip():
@@ -927,7 +1069,7 @@ class QzoneMixin(QzoneMediaMixin):
             recent_posts = _safe_int(getattr(self, "qzone_comment_inbox_recent_posts", 5), 5, 1, 20)
             max_replies = _safe_int(getattr(self, "qzone_comment_inbox_max_replies_per_tick", 1), 1, 1, 5)
             posts = await self._qzone_query_feeds(None, target_id=str(own_uin), pos=0, num=recent_posts, with_detail=True)
-            observed: list[tuple[Any, Any, str, str, list[str]]] = []
+            observed: list[tuple[Any, Any, str, str, list[str], bool, bool]] = []
             for post in posts:
                 for comment in list(getattr(post, "comments", []) or []):
                     comment_id = _single_line(getattr(comment, "comment_id", ""), 120)
@@ -946,7 +1088,19 @@ class QzoneMixin(QzoneMediaMixin):
                     comment_legacy_id = _single_line(getattr(comment, "comment_legacy_id", "") or comment_legacy_id, 120)
                     if comment_id or comment_key:
                         id_candidates = self._qzone_trim_id_list([comment_id, comment_legacy_id, comment_key], limit=5)
-                        observed.append((post, comment, comment_id or comment_key, comment_key or comment_id, id_candidates))
+                        is_self_comment = self._qzone_comment_is_self(state, post, comment, own_uin=own_uin, now=now)
+                        author_recently_replied = self._qzone_author_post_recently_replied(state, post, comment, now=now)
+                        observed.append(
+                            (
+                                post,
+                                comment,
+                                comment_id or comment_key,
+                                comment_key or comment_id,
+                                id_candidates,
+                                is_self_comment,
+                                author_recently_replied,
+                            )
+                        )
             seen_ids = self._qzone_trim_id_list(state.get("comment_inbox_seen_ids"), limit=500)
             replied_ids = self._qzone_trim_id_list(state.get("comment_inbox_replied_ids"), limit=300)
             seen_keys = self._qzone_trim_id_list(state.get("comment_inbox_seen_keys"), limit=500)
@@ -955,8 +1109,8 @@ class QzoneMixin(QzoneMediaMixin):
             replied_set = set(replied_ids)
             seen_key_set = set(seen_keys)
             replied_key_set = set(replied_keys)
-            observed_ids = [candidate_id for _, _, _, _, id_candidates in observed for candidate_id in id_candidates if candidate_id]
-            observed_keys = [comment_key for _, _, _, comment_key, _ in observed if comment_key]
+            observed_ids = [candidate_id for _, _, _, _, id_candidates, _, _ in observed for candidate_id in id_candidates if candidate_id]
+            observed_keys = [comment_key for _, _, _, comment_key, _, _, _ in observed if comment_key]
             first_run = not state.get("comment_inbox_initialized_at")
             if first_run:
                 state["comment_inbox_seen_ids"] = self._qzone_trim_id_list(seen_ids + observed_ids, limit=500)
@@ -967,14 +1121,34 @@ class QzoneMixin(QzoneMediaMixin):
                 self._save_data_sync()
                 logger.info("[PrivateCompanion] QQ 空间评论收件箱首次启用,已记录现有评论: count=%s", len(observed_ids))
                 return
+            history_lost_after_init = bool(
+                state.get("comment_inbox_initialized_at")
+                and observed_ids
+                and not seen_ids
+                and not seen_keys
+                and not replied_ids
+                and not replied_keys
+            )
+            if history_lost_after_init:
+                state["comment_inbox_seen_ids"] = self._qzone_trim_id_list(observed_ids, limit=500)
+                state["comment_inbox_seen_keys"] = self._qzone_trim_id_list(observed_keys, limit=500)
+                state["last_comment_inbox_checked_at"] = now
+                state["last_comment_inbox_status"] = f"reseeded:history_lost:{len(observed_ids)}"
+                self._save_data_sync()
+                logger.warning(
+                    "[PrivateCompanion] QQ 空间评论收件箱历史 key 为空,已重新播种当前可见评论并跳过本轮回复: count=%s",
+                    len(observed_ids),
+                )
+                return
 
             candidates = [
                 (post, comment, comment_id, comment_key)
-                for post, comment, comment_id, comment_key, id_candidates in observed
+                for post, comment, comment_id, comment_key, id_candidates, is_self_comment, author_recently_replied in observed
                 if not any(candidate_id in seen_set or candidate_id in replied_set for candidate_id in id_candidates)
                 and comment_key not in seen_key_set
                 and comment_key not in replied_key_set
-                and (not own_uin or _safe_int(getattr(comment, "uin", 0), 0, 0) != own_uin)
+                and not is_self_comment
+                and not author_recently_replied
             ]
             if observed_ids or observed_keys:
                 state["comment_inbox_seen_ids"] = self._qzone_trim_id_list(seen_ids + observed_ids, limit=500)
@@ -998,6 +1172,7 @@ class QzoneMixin(QzoneMediaMixin):
                 sent_text = await self._qzone_reply_to_comment(None, post, comment, str(decision.get("reply") or ""))
                 replied_set.add(comment_id)
                 replied_key_set.add(comment_key)
+                self._qzone_note_comment_inbox_sent(state, post, comment, sent_text, now=now)
                 replies += 1
                 last_reason = _single_line(decision.get("reason"), 60) or "已回复"
                 state["comment_inbox_replied_ids"] = self._qzone_trim_id_list(list(replied_set), limit=300)

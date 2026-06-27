@@ -133,7 +133,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 refresher = getattr(self.plugin, "_refresh_sleep_runtime_state", None)
                 if callable(refresher):
                     refresher()
-                data = deepcopy(self.plugin.data)
+                data = self._overview_data_snapshot_locked(self.plugin.data)
             users = data.get("users") if isinstance(data.get("users"), dict) else {}
             groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
             enabled_users = sum(1 for item in users.values() if isinstance(item, dict) and item.get("enabled", True))
@@ -201,6 +201,115 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取总览失败: {exc}", exc_info=True)
             return self._error(str(exc))
+
+    def _overview_data_snapshot_locked(self, raw_data: Any) -> dict[str, Any]:
+        """Build a light read-only snapshot for the dashboard.
+
+        The full data store can contain large image/news/bookshelf/history blobs. The
+        overview only needs recent slices and counters, so avoid deepcopying the
+        entire store while holding the data lock.
+        """
+        if not isinstance(raw_data, dict):
+            return {}
+
+        def shallow_dict(value: Any) -> dict[str, Any]:
+            return dict(value) if isinstance(value, dict) else {}
+
+        def list_tail(value: Any, limit: int) -> list[Any]:
+            if not isinstance(value, list):
+                return []
+            if limit <= 0:
+                return []
+            return list(value[-limit:])
+
+        data: dict[str, Any] = {
+            "version": raw_data.get("version"),
+            "users": {str(key): dict(value) for key, value in raw_data.get("users", {}).items() if isinstance(value, dict)}
+            if isinstance(raw_data.get("users"), dict)
+            else {},
+            "groups": {
+                str(key): {
+                    "enabled": bool(value.get("enabled", True)),
+                    "name": value.get("name") or value.get("group_name") or "",
+                }
+                for key, value in raw_data.get("groups", {}).items()
+                if isinstance(value, dict)
+            }
+            if isinstance(raw_data.get("groups"), dict)
+            else {},
+        }
+
+        for key in (
+            "daily_state",
+            "daily_plan",
+            "daily_story_plan",
+            "daily_dream",
+            "daily_outfit_photo",
+            "detail_enhanced_segments",
+            "qq_presence_state",
+            "screen_diary_context",
+            "worldbook_import_state",
+            "worldbook_group_profiles",
+            "qzone_integration",
+            "jm_cosmos_integration",
+            "private_reading_state",
+            "skill_growth",
+            "food_menu",
+            "external_proactive_abilities",
+            "proactive_runtime",
+            "message_debounce",
+            "smart_message_debounce",
+        ):
+            value = raw_data.get(key)
+            if isinstance(value, dict):
+                data[key] = dict(value)
+            elif value is not None:
+                data[key] = value
+
+        for key, limit in (
+            ("proactive_candidate_pool", 240),
+            ("proactive_audit_log", 120),
+            ("bot_diaries", 8),
+            ("dream_fragments", 40),
+            ("schedule_adjustments", 24),
+            ("bookshelf_items", 60),
+            ("creative_projects", 24),
+            ("external_event_pool", 80),
+        ):
+            data[key] = list_tail(raw_data.get(key), limit)
+
+        image_cache = raw_data.get("private_image_vision_cache")
+        data["private_image_vision_cache"] = image_cache if isinstance(image_cache, dict) else {}
+
+        profiles = raw_data.get("worldbook_member_profiles")
+        data["worldbook_member_profiles"] = profiles if isinstance(profiles, dict) else {}
+        entries = raw_data.get("worldbook_entries")
+        data["worldbook_entries"] = list_tail(entries, 300) if isinstance(entries, list) else []
+
+        news_state = shallow_dict(raw_data.get("news_integration"))
+        if news_state:
+            news_state["latest_items"] = list_tail(news_state.get("latest_items"), 12)
+            news_state["digests"] = list_tail(news_state.get("digests"), 40)
+            ai_daily = shallow_dict(news_state.get("ai_daily"))
+            if ai_daily:
+                ai_digest = shallow_dict(ai_daily.get("last_digest"))
+                if ai_digest:
+                    ai_digest["items"] = list_tail(ai_digest.get("items"), 3)
+                    ai_daily["last_digest"] = ai_digest
+                news_state["ai_daily"] = ai_daily
+            data["news_integration"] = news_state
+
+        web_state = shallow_dict(raw_data.get("web_exploration"))
+        if web_state:
+            web_state["notes"] = list_tail(web_state.get("notes"), 40)
+            web_state["latest_results"] = list_tail(web_state.get("latest_results"), 8)
+            data["web_exploration"] = web_state
+
+        bilibili_state = shallow_dict(raw_data.get("bilibili_integration"))
+        if bilibili_state:
+            data["bilibili_integration"] = bilibili_state
+
+        return data
 
     def _daily_outfit_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         item = data.get("daily_outfit_photo") if isinstance(data.get("daily_outfit_photo"), dict) else {}
@@ -671,9 +780,10 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     async def get_diagnostics(self) -> dict[str, Any]:
         try:
             async with self.plugin._data_lock:
-                data = deepcopy(self.plugin.data)
-            users = data.get("users") if isinstance(data.get("users"), dict) else {}
-            groups = data.get("groups") if isinstance(data.get("groups"), dict) else {}
+                raw_users = self.plugin.data.get("users") if isinstance(self.plugin.data.get("users"), dict) else {}
+                raw_groups = self.plugin.data.get("groups") if isinstance(self.plugin.data.get("groups"), dict) else {}
+                users = {str(key): dict(value) for key, value in raw_users.items() if isinstance(value, dict)}
+                groups = {str(key): dict(value) for key, value in raw_groups.items() if isinstance(value, dict)}
             items = self._build_diagnostics(users, groups)
             return self._ok({"items": items})
         except Exception as exc:
@@ -9975,15 +10085,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         diaries = data.get("bot_diaries") if isinstance(data.get("bot_diaries"), list) else []
         fragments = data.get("dream_fragments") if isinstance(data.get("dream_fragments"), list) else []
         plan = data.get("daily_plan") if isinstance(data.get("daily_plan"), dict) else {}
-        try:
-            live_plan = self.plugin.data.get("daily_plan") if isinstance(self.plugin.data.get("daily_plan"), dict) else {}
-            if live_plan and self.plugin._sanitize_daily_plan_inplace(live_plan):
-                self.plugin._refresh_daily_state_location_from_plan(plan=live_plan)
-                self.plugin._save_data_sync()
-                plan = deepcopy(live_plan)
-                data["daily_plan"] = plan
-        except Exception:
-            pass
         story = data.get("daily_story_plan") if isinstance(data.get("daily_story_plan"), dict) else {}
         current_item = {}
         try:

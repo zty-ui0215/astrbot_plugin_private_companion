@@ -4533,6 +4533,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         *,
         session_key: str,
         reference_image_path: str = "",
+        image_size: str = "",
     ) -> tuple[str, str]:
         endpoint = self._external_image_endpoint()
         if not endpoint:

@@ -5901,6 +5901,21 @@ class PrivateCompanionPlugin(
         except Exception:
             sender_id = ""
         sender_name = self._sender_display_name(event)
+        try:
+            signals = self._event_scene_signals(event)
+        except Exception:
+            signals = {}
+        at_bot = any(
+            isinstance(item, dict) and bool(item.get("is_bot"))
+            for item in (signals.get("at_targets") if isinstance(signals, dict) else []) or []
+        )
+        reply_to_bot = bool(
+            isinstance(signals, dict)
+            and _single_line(signals.get("self_id"), 80)
+            and _single_line(signals.get("reply_to_id"), 80) == _single_line(signals.get("self_id"), 80)
+        )
+        if (at_bot or reply_to_bot or getattr(event, "is_at_or_wake_command", False) or getattr(event, "is_wake", False)) and await self._maybe_handle_natural_language_photo_request(event, sender_id, text):
+            return
         registration_payload = None
         continuation: bool | None = False
         resting_mention_notice = ""

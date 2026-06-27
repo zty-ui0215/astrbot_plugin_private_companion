@@ -68,7 +68,7 @@ class CommandHandlersMixin:
         except Exception:
             return ""
 
-    async def _photo_reference_source_to_stable_path(self, source: str, *, stem: str = "reference") -> str:
+    async def _photo_reference_source_to_stable_path(self, source: str, *, stem: str = "reference", event: AstrMessageEvent | None = None) -> str:
         text = str(source or "").strip()
         if not text:
             return ""
@@ -87,9 +87,20 @@ class CommandHandlersMixin:
             return ""
         local_text = text[len("file://"):] if text.startswith("file://") else text
         try:
-            return self._photo_reference_copy_local_file(Path(local_text), stem=stem)
+            copied = self._photo_reference_copy_local_file(Path(local_text), stem=stem)
+            if copied:
+                return copied
         except (OSError, ValueError):
-            return ""
+            pass
+        resolver = getattr(self, "_qzone_resolve_onebot_image_source", None)
+        if callable(resolver) and event is not None:
+            try:
+                resolved = await resolver(event, text)
+            except Exception:
+                resolved = ""
+            if resolved and resolved != text:
+                return await self._photo_reference_source_to_stable_path(resolved, stem=stem, event=event)
+        return ""
 
     async def _photo_reference_sources_from_current_event(self, event: AstrMessageEvent, user_id: str) -> list[str]:
         sources: list[str] = []
@@ -164,6 +175,26 @@ class CommandHandlersMixin:
                 add(source)
         return sources
 
+    async def _photo_reference_sources_from_reply_event(self, event: AstrMessageEvent) -> list[str]:
+        cached = getattr(event, "_private_companion_photo_reply_sources", None)
+        if isinstance(cached, list):
+            return [str(item).strip() for item in cached if str(item or "").strip()]
+        sources: list[str] = []
+        finder = getattr(self, "_find_reply_image_sources_for_event", None)
+        if callable(finder):
+            try:
+                for source in await finder(event):
+                    text = str(source or "").strip()
+                    if text and text not in sources:
+                        sources.append(text)
+            except Exception:
+                sources = []
+        try:
+            setattr(event, "_private_companion_photo_reply_sources", list(sources))
+        except Exception:
+            pass
+        return sources
+
     async def _photo_reference_image_from_command_context(
         self,
         event: AstrMessageEvent,
@@ -172,12 +203,17 @@ class CommandHandlersMixin:
         saw_image = False
         for source in await self._photo_reference_sources_from_current_event(event, user_id):
             saw_image = True
-            path = await self._photo_reference_source_to_stable_path(source, stem="message")
+            path = await self._photo_reference_source_to_stable_path(source, stem="message", event=event)
             if path:
                 return path, "随消息发送的图片", True
         for source in self._photo_reference_sources_from_reply_cache(event):
             saw_image = True
-            path = await self._photo_reference_source_to_stable_path(source, stem="reply")
+            path = await self._photo_reference_source_to_stable_path(source, stem="reply", event=event)
+            if path:
+                return path, "引用消息里的图片", True
+        for source in await self._photo_reference_sources_from_reply_event(event):
+            saw_image = True
+            path = await self._photo_reference_source_to_stable_path(source, stem="reply", event=event)
             if path:
                 return path, "引用消息里的图片", True
         return "", "", saw_image
@@ -259,6 +295,9 @@ class CommandHandlersMixin:
 
     def _natural_language_photo_intent(self, text: str, *, has_reference: bool = False) -> dict[str, Any]:
         raw = re.sub(r"\[CQ:image,[^\]]+\]", "", str(text or ""))
+        raw = re.sub(r"\[CQ:at,[^\]]+\]", "", raw)
+        raw = re.sub(r"\[(?:At|@):[^\]]+\]", "", raw, flags=re.I)
+        raw = re.sub(r"\[(?:引用消息|回复消息|reply)\]", "", raw, flags=re.I)
         raw = _single_line(raw, 800)
         if not raw:
             return {}
@@ -351,6 +390,8 @@ class CommandHandlersMixin:
             return False
         has_reference = bool(self._private_event_has_image(event) if callable(getattr(self, "_private_event_has_image", None)) else False)
         has_reference = has_reference or bool(self._photo_reference_sources_from_reply_cache(event))
+        if not has_reference:
+            has_reference = bool(await self._photo_reference_sources_from_reply_event(event))
         intent = self._natural_language_photo_intent(text, has_reference=has_reference)
         if not intent:
             return False
@@ -363,7 +404,7 @@ class CommandHandlersMixin:
             if not self._is_target_private_user(user_id, user) or not bool(user.get("enabled", True)):
                 return False
             if self._private_user_role(user, user_id) == "friend":
-                await self._reply(event, "这个自然语言生图入口只给主人私聊开放。")
+                await self._reply(event, "这个自然语言生图/改图入口只给主人开放。")
                 event.stop_event()
                 return True
             if self._natural_language_photo_quota_left(user) <= 0:

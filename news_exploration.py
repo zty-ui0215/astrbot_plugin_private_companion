@@ -430,6 +430,122 @@ class NewsExplorationMixin:
         compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", title)
         return "|".join(part for part in (_single_line(source_type, 24).lower(), source[:24], compact[:64], link[:96]) if part)
 
+    def _external_event_title_fingerprint(self, payload: dict[str, Any], *, source_type: str = "") -> str:
+        title = _single_line(payload.get("headline") or payload.get("topic") or payload.get("title") or payload.get("source_title"), 140).lower()
+        if not title:
+            return ""
+        title = re.sub(r"https?://\S+", "", title)
+        title = re.sub(r"\b\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?\b", "", title)
+        title = re.sub(r"\b\d{1,2}:\d{2}\b", "", title)
+        title = re.sub(r"(?:第?\d+[期条]|今日|今天|昨夜|昨天|早报|日报|周报|速览|合集|汇总)", "", title)
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", title)
+        if len(compact) < 8:
+            return ""
+        digest = hashlib.sha1(compact.encode("utf-8", "ignore")).hexdigest()[:20]
+        return f"{_single_line(source_type, 24).lower()}:title:{digest}"
+
+    def _external_event_self_link_cache(self) -> dict[str, Any]:
+        raw = self.data.setdefault("external_event_self_link_cache", {})
+        if not isinstance(raw, dict):
+            raw = {}
+            self.data["external_event_self_link_cache"] = raw
+        return raw
+
+    def _cleanup_external_event_self_link_cache(self, *, now: float | None = None) -> dict[str, Any]:
+        now = _now_ts() if now is None else now
+        cache = self._external_event_self_link_cache()
+        kept: dict[str, Any] = {}
+        ranked: list[tuple[float, str, dict[str, Any]]] = []
+        for key, item in cache.items():
+            if not isinstance(item, dict):
+                continue
+            created = _safe_float(item.get("created_ts"), 0)
+            if created <= 0 or now - created > 72 * 3600:
+                continue
+            ranked.append((_safe_float(item.get("last_hit_ts"), created), str(key), item))
+        ranked.sort(key=lambda row: row[0])
+        for _, key, item in ranked[-240:]:
+            kept[key] = item
+        self.data["external_event_self_link_cache"] = kept
+        return kept
+
+    def _external_event_self_link_cache_keys(self, payload: dict[str, Any], *, source_type: str = "") -> list[str]:
+        keys: list[str] = []
+        for key in (
+            self._external_event_signature(payload, source_type=source_type),
+            self._external_event_title_fingerprint(payload, source_type=source_type),
+        ):
+            key = _single_line(key, 220)
+            if key and key not in keys:
+                keys.append(key)
+        return keys
+
+    def _cached_external_event_wish(self, payload: dict[str, Any], *, source_type: str = "") -> dict[str, Any]:
+        keys = self._external_event_self_link_cache_keys(payload, source_type=source_type)
+        if not keys:
+            return {}
+        now = _now_ts()
+        cache = self._cleanup_external_event_self_link_cache(now=now)
+        for key in keys:
+            item = cache.get(key)
+            if not isinstance(item, dict):
+                continue
+            wish = item.get("wish")
+            if not isinstance(wish, dict):
+                continue
+            item["hit_count"] = _safe_int(item.get("hit_count"), 0, 0) + 1
+            item["last_hit_ts"] = now
+            result = dict(wish)
+            result["cache_hit"] = True
+            result["cache_key"] = key
+            logger.info(
+                "[PrivateCompanion] 外界信息自我关联命中缓存: source=%s key=%s hit=%s",
+                source_type,
+                key,
+                item["hit_count"],
+            )
+            return result
+        return {}
+
+    def _remember_external_event_wish_cache(self, payload: dict[str, Any], wish: dict[str, Any], *, source_type: str = "") -> None:
+        if not isinstance(wish, dict) or not wish:
+            return
+        keys = self._external_event_self_link_cache_keys(payload, source_type=source_type)
+        if not keys:
+            return
+        now = _now_ts()
+        cache = self._cleanup_external_event_self_link_cache(now=now)
+        stored_wish = {
+            key: value
+            for key, value in dict(wish).items()
+            if key
+            in {
+                "relevance",
+                "desire",
+                "should_share",
+                "share_probability",
+                "self_link",
+                "motive",
+                "tone",
+                "boundary",
+                "source_type",
+                "boost_reason",
+            }
+        }
+        stored_wish["created_ts"] = now
+        stored_wish["source_type"] = _single_line(source_type, 24)
+        title = _single_line(payload.get("headline") or payload.get("topic") or payload.get("title") or payload.get("source_title"), 120)
+        for key in keys:
+            cache[key] = {
+                "wish": stored_wish,
+                "title": title,
+                "source_type": _single_line(source_type, 24),
+                "created_ts": now,
+                "last_hit_ts": now,
+                "hit_count": _safe_int((cache.get(key) or {}).get("hit_count") if isinstance(cache.get(key), dict) else 0, 0, 0),
+            }
+        self._cleanup_external_event_self_link_cache(now=now)
+
     def _external_event_recently_seen(self, payload: dict[str, Any], *, source_type: str = "", now: float | None = None) -> bool:
         now = _now_ts() if now is None else now
         signature = self._external_event_signature(payload, source_type=source_type)
@@ -2293,12 +2409,7 @@ class NewsExplorationMixin:
     def _external_event_self_link_provider_id(self) -> str:
         return self._task_provider(self.news_provider_id, self.web_exploration_provider_id, self.narration_provider_id, self.llm_provider_id)
 
-    def _format_external_event_self_context(self) -> str:
-        state = self.data.get("daily_state", {}) if isinstance(self.data.get("daily_state"), dict) else {}
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
-        mood = _single_line(state.get("mood_bias"), 40)
-        energy = _safe_int(state.get("energy"), 70, 0, 100)
-        activity = _single_line((current_item or {}).get("activity"), 120)
+    def _format_external_event_stable_self_context(self) -> str:
         model_lines = []
         plugin_main = self._task_provider(self.llm_provider_id)
         if plugin_main:
@@ -2311,14 +2422,32 @@ class NewsExplorationMixin:
             part
             for part in (
                 f"Bot 名称：{self.bot_name}",
-                f"当前状态：{mood or '平稳'}，心理能量 {energy}/100",
-                f"当前日程：{activity}" if activity else "",
                 "当前模型环境：" + "；".join(model_lines) if model_lines else "",
                 f"人格：{_single_line(self._get_default_persona_prompt(), 900)}",
                 self._format_worldview_adaptation_prompt(),
             )
             if part
         )
+
+    def _format_external_event_current_self_context(self) -> str:
+        state = self.data.get("daily_state", {}) if isinstance(self.data.get("daily_state"), dict) else {}
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        mood = _single_line(state.get("mood_bias"), 40)
+        energy = _safe_int(state.get("energy"), 70, 0, 100)
+        activity = _single_line((current_item or {}).get("activity"), 120)
+        return "\n".join(
+            part
+            for part in (
+                f"当前状态：{mood or '平稳'}，心理能量 {energy}/100",
+                f"当前日程：{activity}" if activity else "",
+            )
+            if part
+        )
+
+    def _format_external_event_self_context(self) -> str:
+        stable = self._format_external_event_stable_self_context()
+        current = self._format_external_event_current_self_context()
+        return "\n".join(part for part in (stable, current) if part)
 
     def _external_event_fallback_wish(self, payload: dict[str, Any], *, source_type: str) -> dict[str, Any]:
         title = _single_line(payload.get("headline") or payload.get("topic") or payload.get("source_title"), 100)
@@ -2373,15 +2502,22 @@ class NewsExplorationMixin:
     async def _build_external_event_wish(self, payload: dict[str, Any], *, source_type: str) -> dict[str, Any]:
         if not self.enable_external_event_self_link or not isinstance(payload, dict):
             return {}
+        cached = self._cached_external_event_wish(payload, source_type=source_type)
+        if cached:
+            return cached
         provider_id = self._external_event_self_link_provider_id()
         fallback = self._external_event_fallback_wish(payload, source_type=source_type)
         life_wish = self._external_event_life_opportunity_wish(payload, source_type=source_type)
         if not provider_id:
-            return life_wish or fallback
+            result = life_wish or fallback
+            self._remember_external_event_wish_cache(payload, result, source_type=source_type)
+            return result
         title = _single_line(payload.get("headline") or payload.get("topic") or payload.get("source_title"), 120)
         impression = _single_line(payload.get("impression") or payload.get("note") or payload.get("summary"), 360)
         source = _single_line(payload.get("selected_source") or payload.get("source_title") or payload.get("source"), 80)
         link = _single_line(payload.get("selected_link") or payload.get("source_url") or payload.get("link"), 420)
+        stable_self_context = self._format_external_event_stable_self_context()
+        current_self_context = self._format_external_event_current_self_context()
         prompt = f"""
 请判断 Bot 刚读到的一条外界信息,是否会在它心里产生“和我自己有关,想找用户说说”的主动意愿。
 
@@ -2405,6 +2541,9 @@ class NewsExplorationMixin:
   "boundary": "主动时要避开的表达,80字内"
 }}
 
+【Bot 稳定自我上下文】
+{stable_self_context}
+
 【来源类型】
 {source_type}
 
@@ -2414,13 +2553,15 @@ class NewsExplorationMixin:
 链接：{link}
 内部印象：{impression}
 
-【Bot 当前自我上下文】
-{self._format_external_event_self_context()}
+【Bot 当前短时状态】
+{current_self_context}
 """.strip()
         raw = await self._llm_call(prompt, max_tokens=360, provider_id=provider_id, task="external_event_self_link")
         parsed = self._parse_json_object(raw)
         if not isinstance(parsed, dict):
-            return life_wish or fallback
+            result = life_wish or fallback
+            self._remember_external_event_wish_cache(payload, result, source_type=source_type)
+            return result
         relevance = _safe_int(parsed.get("relevance"), fallback["relevance"], 0, 10)
         desire = _safe_int(parsed.get("desire"), fallback["desire"], 0, 10)
         probability = _safe_float(parsed.get("share_probability"), fallback["share_probability"])
@@ -2450,6 +2591,7 @@ class NewsExplorationMixin:
                     "boundary": life_wish["boundary"],
                     "boost_reason": life_wish["boost_reason"],
                 }
+        self._remember_external_event_wish_cache(payload, result, source_type=source_type)
         return result
 
     def _bot_currently_bored_enough_for_news(self) -> bool:
