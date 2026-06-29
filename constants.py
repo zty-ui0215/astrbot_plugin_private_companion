@@ -32,25 +32,6 @@ DEFAULT_HUMANIZED_STATE = {
     "note": "今天状态超好，开开心心过一天啦",
 }
 
-# 聊天风格模板 - 纯JK日常聊天，无AI感
-STYLE_TEMPLATES = {
-    "温柔": [
-        "{name},刚刚停了一下,就顺手把这句放你这。",
-        "{name},桌边那点水快见底了。你也记得喝一口。",
-        "{name},没什么大事,就是刚好路过你这边。",
-    ],
-    "活泼": [
-        "{name},我晃过来一下。你忙你的。",
-        "{name},给你塞一个三分钟摸鱼许可。",
-        "{name},我就冒一下头,不吵你。",
-    ],
-    "校园风": [
-        "{name},课间那点风还挺凉的。",
-        "{name},我先把这句夹在书页里。",
-        "{name},别一直绷着,等会儿再继续也行。",
-    ],
-}
-
 # 语音兜底文案 - 自然不生硬
 VOICE_FALLBACK_TEMPLATES = [
     "喂喂～在不在呀",
@@ -79,6 +60,7 @@ _DATA_STORE_KEYS = (
     "bot_diaries",
     "dream_fragments",
     "diary_generated_day",
+    "recent_photo_generations",
     "daily_story_plan",
     "detail_enhanced_day",
     "detail_enhanced_segments",
@@ -101,30 +83,30 @@ _DATA_STORE_KEYS = (
 # 触发原因 - 真人化表达
 _REASON_TEXT = {
     "morning_greeting": "早上跟你说早安",
-    "noon_greeting": "中午跟你聊聊天",
-    "evening_greeting": "晚上跟你道晚安",
-    "check_in": "关心一下你的状态",
-    "quiet_care": "安安静静陪你一会儿",
-    "activity_share": "跟你分享我的小日常",
-    "diary_share": "跟你说说我今天的小事",
-    "state_share": "告诉你我现在的心情",
-    "important_date_share": "提醒你重要的日子",
-    "background_schedule": "看看现在该做什么啦",
-    "insomnia_night": "睡不着，想跟你说说话",
-    "group_share": "跟你分享群里的有趣片段",
-    "bili_video_share": "跟你分享刚刷到的 B 站视频",
-    "creative_share": "跟你分享刚写到的小说片段",
-    "jm_cosmos_share": "跟你提起刚翻到的漫画本子",
+    "noon_greeting": "午间问候",
+    "evening_greeting": "晚上跟{name}道晚安",
+    "check_in": "关心一下{name}的状态",
+    "quiet_care": "安静地问候一下",
+    "activity_share": "跟{name}分享小日常",
+    "diary_share": "跟{name}说说今天的小事",
+    "state_share": "说说当前状态",
+    "important_date_share": "提醒{name}重要的日子",
+    "background_schedule": "提一句当前日程",
+    "insomnia_night": "睡不着，想跟{name}说说话",
+    "group_share": "跟{name}分享群里的有趣片段",
+    "bili_video_share": "跟{name}分享刚刷到的 B 站视频",
+    "creative_share": "跟{name}分享刚写到的小说片段",
+    "jm_cosmos_share": "提起刚翻到的漫画本子",
 }
 
 # 动作描述 - 生活化
 _ACTION_TEXT = {
-    "message": "发了条消息给你",
+    "message": "发了条消息给{name}",
     "screen_peek": "看了眼本机屏幕",
-    "photo_text": "拍了张照片发给你",
-    "poke": "轻轻戳了戳你",
-    "voice": "发了段语音跟你说",
-    "jm_cosmos_read": "偷偷翻了会儿漫画本子",
+    "photo_text": "拍了张照片发给{name}",
+    "poke": "戳了一下",
+    "voice": "发了段语音跟{name}说",
+    "jm_cosmos_read": "私下翻了会儿漫画本子",
 }
 
 # 主动能力注册表 - 给提示词和调试输出共用
@@ -134,7 +116,7 @@ PROACTIVE_ABILITY_REGISTRY = [
         "name": "message",
         "label": "文字私聊",
         "when": "没有明确媒介契机,或只需要很轻地接一句话",
-        "use_for": "早安、午间碰一下、轻关心、顺手分享、承接用户上一句",
+        "use_for": "早安、午间问候、轻关心、顺手分享、承接用户上一句",
         "avoid": "把生活状态写成汇报,或为了发消息硬编动作",
     },
     {
@@ -193,20 +175,20 @@ _SIMULATION_FALLBACK_EVENTS = [
     {
         "reason": "activity_share",
         "action": "message",
-        "why": "碰到好玩的事，想分享给你",
-        "topic": "日常小碎片",
-        "scene": "闲下来的时候",
-        "tone": "开心的",
-        "impulse": "忍不住想跟你唠唠嗑",
+        "why": "日常里碰到一点有意思的事，想和用户说一句",
+        "topic": "日常小事",
+        "scene": "闲下来时",
+        "tone": "轻快",
+        "impulse": "想把刚碰到的小事告诉用户",
     },
     {
         "reason": "evening_greeting",
         "action": "message",
-        "why": "要睡觉啦，跟你说声晚安",
-        "topic": "晚安啦",
+        "why": "准备睡觉前，想和用户说声晚安",
+        "topic": "睡前晚安",
         "scene": "准备休息的时候",
-        "tone": "轻轻的",
-        "impulse": "睡前最后一个想找的人是你",
+        "tone": "安静",
+        "impulse": "想在睡前和用户说声晚安",
     },
 ]
 
@@ -225,6 +207,7 @@ _DEFAULT_USER_TEMPLATE = {
     "style": "",
     "umo": "",
     "last_seen": 0,
+    "last_activity_at": 0,
     "last_sent": 0,
     "sent_day": "",
     "sent_today": 0,

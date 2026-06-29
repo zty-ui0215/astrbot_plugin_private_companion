@@ -68,6 +68,18 @@ def recent_diary_context(plugin, count: int = 3) -> str:
     diaries = plugin.data.get("bot_diaries", [])
     if not isinstance(diaries, list) or not diaries:
         return "（暂无）"
+    recent = [diary for diary in diaries[-max(count * 2, count):] if isinstance(diary, dict)]
+    repeated_food_tokens: set[str] = set()
+    food_seen: dict[str, int] = {}
+    for diary in recent:
+        text = " ".join(
+            _single_line(diary.get(key), 160)
+            for key in ("summary", "share_seed", "body")
+            if _single_line(diary.get(key), 160)
+        )
+        for token in _diary_food_motif_tokens(text):
+            food_seen[token] = food_seen.get(token, 0) + 1
+    repeated_food_tokens = {token for token, total in food_seen.items() if total >= 2}
     lines = []
     for diary in diaries[-count:]:
         if not isinstance(diary, dict):
@@ -75,9 +87,55 @@ def recent_diary_context(plugin, count: int = 3) -> str:
         tags = diary.get("tags", [])
         tag_text = "、".join(str(tag) for tag in tags[:4]) if isinstance(tags, list) else ""
         summary = _single_line(diary.get("summary"), 120)
+        if repeated_food_tokens:
+            summary = _soften_repeated_diary_food_motifs(summary, repeated_food_tokens)
         if summary:
-            lines.append(f"- {diary.get('date', '')}：{summary} {tag_text}".strip())
+            date_text = _single_line(diary.get("date"), 16)
+            age_text = _diary_age_label(plugin, date_text)
+            suffix = f"（{age_text},只作余味和避重）" if age_text else "（只作余味和避重）"
+            lines.append(f"- {date_text} {suffix}：{summary} {tag_text}".strip())
     return "\n".join(lines) if lines else "（暂无）"
+
+
+def _diary_age_label(plugin, date_text: str) -> str:
+    if not date_text:
+        return ""
+    try:
+        diary_date = datetime.strptime(date_text[:10], "%Y-%m-%d").date()
+        today = plugin._environment_now().date() if hasattr(plugin, "_environment_now") else datetime.now().date()
+        days = max(0, (today - diary_date).days)
+    except Exception:
+        return ""
+    if days <= 0:
+        return "今天"
+    if days == 1:
+        return "昨天"
+    return f"{days}天前"
+
+
+def _diary_food_motif_tokens(text: Any) -> list[str]:
+    cleaned = _single_line(text, 500)
+    if not cleaned:
+        return []
+    food_tokens = (
+        "糖醋排骨", "排骨", "螺蛳粉", "锅包肉", "烤肠", "豆花", "冰粉", "奶茶",
+        "豆浆", "夜宵", "便当", "饭团", "甜口", "软糖",
+    )
+    return [token for token in food_tokens if token in cleaned]
+
+
+def _soften_repeated_diary_food_motifs(text: str, repeated_tokens: set[str]) -> str:
+    softened = _single_line(text, 140)
+    if not softened:
+        return ""
+    changed = False
+    for token in sorted(repeated_tokens, key=len, reverse=True):
+        if token and token in softened:
+            softened = softened.replace(token, "近期重复食物意象")
+            changed = True
+    if changed:
+        softened += "（不要复刻具体菜名）"
+    return _single_line(softened, 140)
 
 
 def _compact_diary_text(text: Any, limit: int = 220) -> str:

@@ -16,10 +16,11 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         try:
             limit = self._query_int("limit", 80, 1, 300)
             async with self.plugin._data_lock:
-                users = deepcopy(self.plugin.data.get("users", {}))
-            if not isinstance(users, dict):
-                users = {}
-            items = [self._user_summary(user_id, user) for user_id, user in users.items() if isinstance(user, dict)]
+                users = self.plugin.data.get("users", {})
+                if not isinstance(users, dict):
+                    users = {}
+                user_items = [(user_id, dict(user)) for user_id, user in users.items() if isinstance(user, dict)]
+            items = [self._user_summary(user_id, user) for user_id, user in user_items]
             items.sort(key=lambda item: item.get("last_seen_ts") or 0, reverse=True)
             return self._ok({"items": items[:limit], "total": len(items)})
         except Exception as exc:
@@ -39,7 +40,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             detail.update(
                 {
                     "memory": user.get("companion_memory") if isinstance(user.get("companion_memory"), dict) else {},
-                    "expression_profile": user.get("expression_profile") if isinstance(user.get("expression_profile"), dict) else {},
+                    "expression_profile": self._expression_profile_summary(user),
                     "intent_profile": user.get("intent_profile") if isinstance(user.get("intent_profile"), dict) else {},
                     "relationship_state": user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {},
                     "behavior_habits": self._behavior_habit_summary(user),
@@ -66,6 +67,7 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         if not user_id:
             return self._error("缺少 user_id")
         try:
+            action_message = ""
             async with self.plugin._data_lock:
                 user = self.plugin._get_user(user_id)
                 if "enabled" in payload:
@@ -139,9 +141,25 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     user["episode_message_count"] = 0
                     user["last_episode_refresh_at"] = 0
                     user["last_memory_refresh_at"] = 0
+                if payload.get("clear_open_loops"):
+                    action_message = self.plugin._remove_open_loop_entry(user, "全部")
+                remove_open_loop_text = self._single_line(payload.get("remove_open_loop_text"), 120)
+                if remove_open_loop_text:
+                    action_message = self.plugin._remove_open_loop_entry(user, remove_open_loop_text)
+                expression_action = self._single_line(payload.get("expression_action"), 40)
+                if expression_action:
+                    action_message = self._apply_expression_profile_action(user, payload)
                 self.plugin._save_data_sync()
                 snapshot = deepcopy(user)
-            return self._ok(self._user_summary(user_id, snapshot))
+            result = self._user_summary(user_id, snapshot)
+            result.update(
+                {
+                    "expression_profile": self._expression_profile_summary(snapshot),
+                }
+            )
+            if action_message:
+                result["message"] = action_message
+            return self._ok(result)
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新用户失败: {exc}", exc_info=True)
             return self._error(str(exc))
@@ -149,15 +167,15 @@ class PrivateCompanionPageApiUsersGroupsMixin:
         try:
             limit = self._query_int("limit", 80, 1, 300)
             async with self.plugin._data_lock:
-                groups = deepcopy(self.plugin.data.get("groups", {}))
-            if not isinstance(groups, dict):
-                groups = {}
-            visible_groups = [
-                (group_id, group)
-                for group_id, group in groups.items()
-                if isinstance(group, dict) and not self._looks_like_member_shadow_group(str(group_id), group)
-            ]
-            shadow_count = len(groups) - len(visible_groups)
+                groups = self.plugin.data.get("groups", {})
+                if not isinstance(groups, dict):
+                    groups = {}
+                visible_groups = [
+                    (group_id, dict(group))
+                    for group_id, group in groups.items()
+                    if isinstance(group, dict) and not self._looks_like_member_shadow_group(str(group_id), group)
+                ]
+                shadow_count = len(groups) - len(visible_groups)
             items = [self._group_summary(group_id, group) for group_id, group in visible_groups]
             items.sort(key=lambda item: item.get("last_seen_ts") or 0, reverse=True)
             return self._ok({"items": items[:limit], "total": len(items), "shadow_total": shadow_count})
@@ -271,6 +289,56 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             return self._ok(self._group_summary(group_id, snapshot))
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 更新群失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def delete_group(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        group_id = str(payload.get("group_id", "")).strip()
+        if not group_id:
+            return self._error("缺少 group_id")
+        try:
+            async with self.plugin._data_lock:
+                groups = self.plugin.data.get("groups")
+                if not isinstance(groups, dict):
+                    groups = {}
+                    self.plugin.data["groups"] = groups
+                removed_group = groups.pop(group_id, None) is not None
+
+                whitelist = [
+                    str(item).strip()
+                    for item in (getattr(self.plugin, "group_whitelist_ids", []) or [])
+                    if str(item).strip() and str(item).strip() != group_id
+                ]
+                blacklist = [
+                    str(item).strip()
+                    for item in (getattr(self.plugin, "group_blacklist_ids", []) or [])
+                    if str(item).strip() and str(item).strip() != group_id
+                ]
+                removed_whitelist = len(whitelist) != len(getattr(self.plugin, "group_whitelist_ids", []) or [])
+                removed_blacklist = len(blacklist) != len(getattr(self.plugin, "group_blacklist_ids", []) or [])
+                self._apply_config_value("group_whitelist_ids", whitelist, {"group_whitelist_ids": whitelist, "group_blacklist_ids": blacklist})
+                self._apply_config_value("group_blacklist_ids", blacklist, {"group_whitelist_ids": whitelist, "group_blacklist_ids": blacklist})
+                self.plugin._save_data_sync()
+
+            config_saved = await self._save_config_if_possible()
+            message_parts = []
+            if removed_group:
+                message_parts.append("已删除群聊观测")
+            if removed_whitelist or removed_blacklist:
+                message_parts.append("已移出群聊名单")
+            message = "，".join(message_parts) if message_parts else "没有找到可删除的群聊记录"
+            return self._ok(
+                {
+                    "group_id": group_id,
+                    "removed_group": removed_group,
+                    "removed_whitelist": removed_whitelist,
+                    "removed_blacklist": removed_blacklist,
+                    "config_saved": config_saved,
+                    "message": message,
+                }
+            )
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 删除群失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def update_group_slang(self) -> dict[str, Any]:

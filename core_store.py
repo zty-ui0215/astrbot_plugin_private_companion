@@ -78,7 +78,6 @@ from .constants import (
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
-    STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
@@ -293,6 +292,8 @@ class CoreStoreMixin:
             "daily_diary_failed_at": 0,
             "daily_diary_last_error": "",
             "daily_diary_postprocess_error": "",
+            "daily_outfit_photo": {},
+            "recent_photo_generations": [],
             "daily_story_plan": {},
             "skill_growth": {},
             "detail_enhanced_day": "",
@@ -341,6 +342,8 @@ class CoreStoreMixin:
         data.setdefault("daily_diary_failed_at", 0)
         data.setdefault("daily_diary_last_error", "")
         data.setdefault("daily_diary_postprocess_error", "")
+        data.setdefault("daily_outfit_photo", {})
+        data.setdefault("recent_photo_generations", [])
         data.setdefault("daily_story_plan", {})
         data.setdefault("skill_growth", {})
         data.setdefault("detail_enhanced_day", "")
@@ -549,6 +552,15 @@ class CoreStoreMixin:
                 if isinstance(story_plan, dict):
                     self.data["daily_story_plan"] = story_plan
                 self._save_data_sync()
+            outfit_generator = getattr(self, "_ensure_daily_outfit_photo", None)
+            if callable(outfit_generator):
+                try:
+                    await outfit_generator(diary)
+                except Exception as exc:
+                    logger.warning(
+                        "[PrivateCompanion] 重建今日日记已保存,但每日穿搭照片生成失败: %s",
+                        _single_line(exc, 180),
+                    )
         return state, plan, diary
 
     def _parse_private_user_aliases(self, raw: Any) -> dict[str, str]:
@@ -690,6 +702,66 @@ class CoreStoreMixin:
     def _private_user_role_label(role: str) -> str:
         return "主人" if role == "owner" else "朋友"
 
+    def _protected_owner_nickname_tokens(self) -> set[str]:
+        tokens: set[str] = set()
+        generic = {
+            "你",
+            "妳",
+            "您",
+            "我",
+            "他",
+            "她",
+            "它",
+            "大家",
+            "群友",
+            "朋友",
+            "主人",
+            "主用户",
+            "目标用户",
+        }
+
+        def add(value: Any) -> None:
+            text = _single_line(value, 24)
+            text = text.strip("「」『』“”\"'`[]()（）<>《》:：,，.。!！?？")
+            if not text or text.isdigit() or text in generic:
+                return
+            if len(text) < 2 or len(text) > 12:
+                return
+            tokens.add(text)
+            compact = re.sub(r"\s+", "", text)
+            if compact and compact != text and 2 <= len(compact) <= 12 and compact not in generic:
+                tokens.add(compact)
+
+        add(getattr(self, "default_nickname", ""))
+        target_ids = set()
+        try:
+            target_ids = set(self._configured_target_ids())
+        except Exception:
+            target_ids = set()
+        users = self.data.get("users", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        if isinstance(users, dict):
+            for user_id, user in users.items():
+                if not isinstance(user, dict):
+                    continue
+                role = self._private_user_role(user, str(user_id or ""))
+                if role != "owner" and str(user_id or "") not in target_ids:
+                    continue
+                add(user.get("nickname"))
+                add(user.get("name"))
+        profiles = self.data.get("worldbook_member_profiles", {}) if isinstance(getattr(self, "data", None), dict) else {}
+        if isinstance(profiles, dict):
+            for user_id in target_ids:
+                profile = profiles.get(str(user_id))
+                if not isinstance(profile, dict):
+                    continue
+                add(profile.get("name"))
+                for key in ("aliases", "observed_names"):
+                    raw = profile.get(key)
+                    if isinstance(raw, list):
+                        for item in raw:
+                            add(item)
+        return tokens
+
     def _private_user_default_role(self, user_id: str, user: dict[str, Any] | None = None) -> str:
         clean_id = self._canonical_private_user_id(str(user_id or "").strip())
         if clean_id and clean_id in set(self._configured_target_ids()):
@@ -745,6 +817,16 @@ class CoreStoreMixin:
         if not user.get("style"):
             user["style"] = self.default_style
         return user
+
+    def _latest_user_activity_ts(self, user: dict[str, Any] | None) -> float:
+        if not isinstance(user, dict):
+            return 0.0
+        return max(
+            _safe_float(user.get("last_activity_at"), 0),
+            _safe_float(user.get("last_seen"), 0),
+            _safe_float(user.get("last_user_message_at"), 0),
+            _safe_float(user.get("last_reply_at"), 0),
+        )
 
     def _is_target_private_user(self, user_id: str, user: dict[str, Any] | None = None) -> bool:
         user_id = self._canonical_private_user_id(str(user_id or "").strip())

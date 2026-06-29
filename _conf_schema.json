@@ -11,9 +11,9 @@
     "hint": "插件的基础设置，在启用前请确认这些项",
     "items": {
       "enable_proactive_only_mode": {
-        "description": "主动消息专用模式",
+        "description": "仅保留主动能力",
         "type": "bool",
-        "hint": "默认关闭。开启后只保留插件主动私聊的日程、生成和发送；普通私聊/群聊消息不再进入本插件的被动增强、图片/转发处理、防抖、群聊观察或提示词注入。用户回复主动消息时仍会轻量记录为已回应。",
+        "hint": "默认关闭。开启后，本插件只保留主动私聊的日程、生成和发送链路；普通私聊/群聊消息不会再进入本插件的被动增强、图片/转发处理、防抖、群聊观察、TTS 后处理或提示词注入，但不会阻止 AstrBot 默认回复或其他插件处理。用户回复本插件主动消息时仍会轻量记录为已回应。适合只想使用主动陪伴，或担心本插件被动链路误接管、误识别的场景。",
         "default": false
       },
       "bot_name": {
@@ -53,6 +53,12 @@
         "description": "私聊身份别名归并",
         "type": "text",
         "hint": "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射,例如：688C2CE7...=100012345。留空则不归并。",
+        "default": ""
+      },
+      "private_user_delivery_aliases": {
+        "description": "私聊主动发送目标映射",
+        "type": "text",
+        "hint": "只改变主动消息/主动测试的发送出口,不改变记忆归属。每行一个映射,例如：大号QQ=小号QQ。配合“私聊身份别名归并”里的 小号QQ=大号QQ 使用,即可小号收消息、大号保留记忆。",
         "default": ""
       },
       "target_platform": {
@@ -3472,7 +3478,7 @@
       "photo_generation_backend": {
         "description": "主动生图后端",
         "type": "string",
-        "hint": "可填：auto、comfyui、sdgen、external。auto 会优先尝试本地 ComfyUI，再尝试 astrbot_plugin_SDGen，最后回退到在线图片 API。",
+        "hint": "可填：auto、comfyui、sdgen、external。auto 会在在线图片 API 配置完整时优先尝试在线 API，失败后回退本地 ComfyUI/astrbot_plugin_SDGen；未配置在线 API 时使用本地后端。",
         "default": "auto",
         "condition": {
           "enable_photo_text_action": true
@@ -3490,10 +3496,62 @@
       "COMFYUI_SELFIE_WORKFLOW_NAME": {
         "description": "主动自拍工作流名",
         "type": "string",
-        "hint": "用于自拍/人像类 photo_text 主动行为。适合使用已在工作流里预置人设图的 ComfyUI 工作流；需要从文本提示词生成输出图片。",
+        "hint": "用于自拍/人像类 photo_text 主动行为。若配置了人设参考图，会优先寻找 images=1、texts>=1、videos=0 的 ComfyUI 工作流；找不到则回退到纯文生图工作流。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
+        }
+      },
+      "photo_persona_reference_image_path": {
+        "description": "人设参考图路径或图片 URL",
+        "type": "string",
+        "hint": "可填 png/jpg/jpeg/webp 本地文件路径，也可填 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。仅在自拍/人像类主动生图时使用。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口，不支持时回退纯文生图；SDGen 仍按提示词生成。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "enable_daily_outfit_photo": {
+        "description": "每日穿搭照片",
+        "type": "bool",
+        "hint": "默认关闭。开启后，每天日程生成并保存后会额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，用作拓展页左上角 Logo。失败会记录当天结果，不会因刷新页面反复请求。",
+        "default": false,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "daily_outfit_photo_prompt": {
+        "description": "每日穿搭额外提示词",
+        "type": "string",
+        "hint": "可选。补充角色今天穿搭的偏好，例如校服、便服、季节感、配色或固定饰品；留空则优先根据当天日程里的上课、出门、居家、雨天、换衣和饰品线索自动组织。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_daily_outfit_photo": true
+        }
+      },
+      "enable_natural_language_photo_generation": {
+        "description": "自然语言生图/改图",
+        "type": "bool",
+        "hint": "默认关闭，避免和独立生图插件抢触发。开启后，只有私聊里明确说“帮我画一张/生成图片/来张图”等图片请求才会调用生图；普通“生成/画/改成”不会触发。随消息带图或引用图片并明确要求改图、修图、重绘，或说“改成/加上/去掉……”时才会尝试改图。该入口只对主人私聊开放。",
+        "default": false,
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "natural_language_photo_generation_max_daily": {
+        "description": "自然语言生图/改图每日上限",
+        "type": "int",
+        "hint": "独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭自然语言生图/改图。",
+        "slider": {
+          "min": 0,
+          "max": 10,
+          "step": 1
+        },
+        "default": 2,
+        "condition": {
+          "enable_photo_text_action": true,
+          "enable_natural_language_photo_generation": true
         }
       },
       "comfyui_photo_wait_seconds": {
@@ -3564,10 +3622,19 @@
           "enable_local_photo_load_guard": true
         }
       },
+      "external_image_api_platform": {
+        "description": "在线生图模型平台",
+        "type": "string",
+        "hint": "可填：auto、openai、bailian。openai 适用于 OpenAI 兼容 /images/generations；bailian 适用于阿里云百炼 / DashScope 原生生图接口；auto 会按地址和模型名自动识别。",
+        "default": "auto",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
       "EXTERNAL_IMAGE_API_BASE_URL": {
         "description": "在线图片 API 地址",
         "type": "string",
-        "hint": "用于 OpenAI 兼容的在线生图接口。可填写完整的 /images/generations 地址，或只填 API 根地址；插件会自动补齐。",
+        "hint": "当平台为 openai 时，可填写完整的 /images/generations 地址，或只填 API 根地址；插件会自动补齐。平台为 bailian 时，可填写百炼 / DashScope 的 API 根地址（如 /api/v1），也可直接填写多模态或异步生图完整接口地址。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -3585,7 +3652,7 @@
       "EXTERNAL_IMAGE_API_MODEL": {
         "description": "在线图片模型",
         "type": "string",
-        "hint": "例如某个平台提供的图片模型名。插件会按 OpenAI 兼容 images/generations 请求格式提交 prompt。",
+        "hint": "必须填写该平台的图片模型名。openai 平台按 OpenAI 兼容 images/generations 请求；bailian 平台可填 qwen-image、wan 系列等百炼图片模型，并按模型能力自动走多模态同步或任务轮询。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -3594,7 +3661,7 @@
       "external_image_api_size": {
         "description": "在线生图尺寸",
         "type": "string",
-        "hint": "格式如 1024x1024、768x1344。用于在线图片 API 请求。",
+        "hint": "格式如 1024x1024、768x1344。openai 平台会原样使用；bailian 平台会自动转换为百炼常用的 1024*1024 格式。",
         "default": "1024x1024",
         "condition": {
           "enable_photo_text_action": true
@@ -3627,6 +3694,24 @@
         "description": "主动生图自定义风格说明",
         "type": "string",
         "hint": "当主动生图风格设为“其他”时，会把这里的内容作为额外风格要求注入提示词，例如：胶片感、像素风、轻复古插画。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_fixed_prompt": {
+        "description": "生图固定附加提示词",
+        "type": "string",
+        "hint": "可选。所有生图提交后端前都会追加这段固定提示词，包括主动随手拍、每日穿搭、自然语言文生图和引用/携带图片改图。适合放固定画质、角色细节、安全区或负面约束；留空不追加。",
+        "default": "",
+        "condition": {
+          "enable_photo_text_action": true
+        }
+      },
+      "photo_generation_scene_presets": {
+        "description": "生图场景预设",
+        "type": "string",
+        "hint": "可选。格式参考通用生图插件，一行一个：预设名:提示词。内置已有角色自拍、COS自拍、镜前穿搭、头像特写、房间日常、可拍画面、表情包场景；自定义同名会覆盖内置。主动拍照、每日穿搭和自然语言生图会按请求自动套用匹配预设，并写入最近生图日志。",
         "default": "",
         "condition": {
           "enable_photo_text_action": true
@@ -3887,10 +3972,10 @@
       "tts_trigger_probability": {
         "description": "TTS全局触发概率(%)",
         "type": "int",
-        "default": 20,
+        "default": 25,
         "min": 0,
         "max": 100,
-        "hint": "仅全局频控生效。作为私聊/群聊未覆盖时的默认触发概率；概率未命中时会提示 LLM 在没有用户明确语音请求时必须纯文字，不主动输出 <pc_tts>、<tts> 或等价语音内容；弱约束不会剥离 LLM 已输出的语音标签。",
+        "hint": "仅全局频控生效。作为私聊/群聊未覆盖时的默认触发概率；概率未命中时本轮不注入 TTS 提示词，也不进入后处理语音判断；弱约束不会剥离 LLM 自发输出的语音标签。",
         "condition": {
           "enable_tts_enhancement": true,
           "tts_frequency_control_mode": "global"
@@ -4197,7 +4282,7 @@
       "segmented_proactive_split_words": {
         "description": "主动分段词列表",
         "type": "list",
-        "hint": "仅在分段模式为 words 时生效；检测到列表中的任意词或换行时切分，并保留分隔符。建议一行一个分段词；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部会自动保护，完整网址结束处可作为自然断点；括号和引号内容会自动保护。",
+        "hint": "仅在分段模式为 words 时生效；检测到列表中的任意词或换行时切分，并保留分隔符。建议一行一个分段词；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部会自动保护，完整网址结束处可作为自然断点；括号、标题引号和 <image>/<video> 这类尖括号媒体块内容会自动保护。",
         "condition": {
           "enable_segmented_proactive_reply": true,
           "segmented_proactive_split_mode": "words"

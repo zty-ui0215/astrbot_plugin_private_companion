@@ -77,7 +77,6 @@ from .constants import (
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
-    STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
@@ -104,7 +103,16 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import (
+    _date_key,
+    _normalize_outbound_punctuation_flow,
+    _now_ts,
+    _safe_float,
+    _safe_int,
+    _single_line,
+    _strip_internal_message_blocks,
+    _today_key,
+)
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -279,6 +287,10 @@ class _CapturedSendMessageCall:
         self.messages = [dict(item) for item in messages if isinstance(item, dict)]
 
 
+class _CapturedFrameworkSendMessage(Exception):
+    """Stop the framework agent once its send_message_to_user payload is captured."""
+
+
 class ProactiveMessageMixin:
     """主动消息生成、动作执行和发送链路"""
 
@@ -372,6 +384,45 @@ class ProactiveMessageMixin:
         ]
         return "\n".join(part for part in parts if part)
 
+    def _user_asks_ai_daily_context(self, inbound_text: str) -> bool:
+        text = str(inbound_text or "").strip()
+        if not text:
+            return False
+        if any(
+            token in text
+            for token in (
+                "AI日报", "ai日报", "AI 日报", "ai 日报",
+                "AI早报", "ai早报", "AI 早报", "ai 早报",
+                "大模型日报", "大模型早报", "人工智能日报", "人工智能早报",
+            )
+        ):
+            return True
+        lowered = text.lower()
+        if any(token in lowered for token in ("ai daily", "daily ai", "llm daily", "ai digest")):
+            return True
+        return bool(("日报" in text or "早报" in text) and re.search(r"(ai|llm|大模型|人工智能|模型)", text, flags=re.IGNORECASE))
+
+    def _ai_daily_query_requires_freshness(self, inbound_text: str) -> bool:
+        text = str(inbound_text or "").strip()
+        if not text:
+            return False
+        return bool(re.search(r"(今天|今日|今早|刚刚|刚才|最新|现在)", text, flags=re.IGNORECASE))
+
+    def _select_ai_daily_digest_item(self, ai_state: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        digest = ai_state.get("last_digest") if isinstance(ai_state.get("last_digest"), dict) else {}
+        selected_item: dict[str, Any] = {}
+        digest_items = digest.get("items") if isinstance(digest.get("items"), list) else []
+        selected_key = _single_line(digest.get("selected_key"), 80)
+        for candidate in digest_items:
+            if not isinstance(candidate, dict):
+                continue
+            if selected_key and _single_line(candidate.get("key"), 80) == selected_key:
+                selected_item = candidate
+                break
+        if not selected_item and digest_items and isinstance(digest_items[0], dict):
+            selected_item = digest_items[0]
+        return digest, selected_item
+
     def _user_asks_news_context(self, inbound_text: str) -> bool:
         text = str(inbound_text or "").strip()
         if not text:
@@ -381,9 +432,134 @@ class ProactiveMessageMixin:
         lowered = text.lower()
         return any(token in lowered for token in ("ai news", "llm news", "daily ai", "tech news"))
 
+    def _user_asks_web_exploration_context(self, inbound_text: str) -> bool:
+        text = str(inbound_text or "").strip()
+        if not text:
+            return False
+        if re.search(r"(主动搜索|网页探索|搜索记录|浏览记录|上网).{0,16}(什么|啥|哪|记录|看|查|搜|了解|发现)|((最近|刚才|今天|这两天|这会儿).{0,16}(搜|查|上网|浏览|了解|看了啥|看了什么|发现了什么))|你.{0,12}(搜了什么|查了什么|上网看了什么|上网看了啥|发现了什么新东西)", text):
+            return True
+        lowered = text.lower()
+        return any(token in lowered for token in ("web exploration", "recent search", "search history", "browsing history"))
+
+    def _format_recent_web_exploration_context_for_reply(self, inbound_text: str = "") -> str:
+        if not getattr(self, "enable_web_exploration", False):
+            return ""
+        if not self._user_asks_web_exploration_context(inbound_text):
+            return ""
+        state = self.data.get("web_exploration") if isinstance(self.data.get("web_exploration"), dict) else {}
+        digest = state.get("last_digest") if isinstance(state.get("last_digest"), dict) else {}
+        notes = state.get("notes") if isinstance(state.get("notes"), list) else []
+        latest_results = state.get("latest_results") if isinstance(state.get("latest_results"), list) else []
+        if not digest and not notes and not latest_results:
+            return (
+                "【主动搜索上下文】\n"
+                "用户正在询问你最近主动搜索/上网探索过什么,但当前没有可用的主动搜索记录。请自然说明自己最近还没搜到能说的东西,不要编造搜索内容。"
+            )
+        rows: list[str] = []
+        if digest:
+            rows.append(
+                "最近一次搜索："
+                + "｜".join(
+                    part
+                    for part in (
+                        f"搜索词：{_single_line(digest.get('query'), 90)}" if _single_line(digest.get("query"), 90) else "",
+                        f"主题：{_single_line(digest.get('topic'), 90)}" if _single_line(digest.get("topic"), 90) else "",
+                        f"动机：{_single_line(digest.get('reason'), 140)}" if _single_line(digest.get("reason"), 140) else "",
+                        f"笔记：{_single_line(digest.get('note'), 240)}" if _single_line(digest.get("note"), 240) else "",
+                        f"来源：{_single_line(digest.get('source_title'), 120)}" if _single_line(digest.get("source_title"), 120) else "",
+                    )
+                    if part
+                )
+            )
+        for item in reversed([item for item in notes if isinstance(item, dict)][-4:]):
+            query = _single_line(item.get("query"), 90)
+            topic = _single_line(item.get("topic"), 90)
+            note = _single_line(item.get("note") or item.get("summary") or item.get("impression"), 180)
+            reason = _single_line(item.get("reason"), 100)
+            if query or topic or note:
+                rows.append("- " + "｜".join(part for part in (f"搜索词：{query}" if query else "", topic, reason, note) if part))
+        if latest_results:
+            result_rows = []
+            for item in latest_results[:4]:
+                if not isinstance(item, dict):
+                    continue
+                title = _single_line(item.get("title"), 120)
+                snippet = _single_line(item.get("snippet"), 160)
+                if title:
+                    result_rows.append("- " + "｜".join(part for part in (title, snippet) if part))
+            if result_rows:
+                rows.append("最近一次结果摘录：")
+                rows.extend(result_rows)
+        return (
+            "【主动搜索上下文】\n"
+            "用户正在询问你最近主动搜索/网页探索过什么。下面是真实搜索记录；回答只能基于这些内容,不要编造额外搜索、来源或结论。"
+            "可以用第一人称自然概括“我刚查了/我之前搜到”,但不要说成后台系统日志。\n"
+            + "\n".join(rows[:12])
+        )
+
+    def _format_recent_ai_daily_context_for_reply(self, inbound_text: str = "") -> str:
+        if not self.enable_news_integration:
+            return ""
+        if not self._user_asks_ai_daily_context(inbound_text):
+            return ""
+        state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
+        ai_state = state.get("ai_daily") if isinstance(state.get("ai_daily"), dict) else {}
+        digest, selected_item = self._select_ai_daily_digest_item(ai_state)
+        record_date = _single_line(ai_state.get("last_success_date"), 20) or _single_line(ai_state.get("date"), 20)
+        source_name = _single_line(ai_state.get("last_source_name"), 40)
+        source_author = _single_line(ai_state.get("last_source_author"), 60)
+        source_schedule = _single_line(ai_state.get("last_source_schedule"), 10)
+        video_title = _single_line(ai_state.get("last_video_title"), 120)
+        video_link = _single_line(ai_state.get("last_video_link"), 360)
+        text_link = _single_line(ai_state.get("last_text_link"), 360)
+        headline = _single_line(digest.get("headline") or digest.get("topic"), 120)
+        impression = _single_line(digest.get("impression"), 220)
+        read_basis = _single_line(ai_state.get("last_read_basis"), 40)
+        text_readable_raw = ai_state.get("last_text_readable")
+        text_readable = bool(text_readable_raw) if isinstance(text_readable_raw, bool) else bool(selected_item.get("article_readable") and selected_item.get("article_text"))
+        subtitle_status = _single_line(ai_state.get("last_video_subtitle_status") or selected_item.get("video_subtitle_status"), 40)
+        if not any((record_date, source_name, video_title, headline, impression, video_link, text_link)):
+            return (
+                "【新闻阅读上下文】\n"
+                "用户正在询问 AI 日报/早报,但当前没有可用的 AI 日报记录。请直接说明最近还没读到可确认的 AI 日报,不要编造。"
+            )
+        today = _today_key()
+        rows: list[str] = []
+        if record_date:
+            if record_date != today and self._ai_daily_query_requires_freshness(inbound_text):
+                rows.append(f"时间说明：今天是 {today}；最近一次可用 AI 日报记录日期是 {record_date}，不是今天。")
+            else:
+                rows.append(f"记录日期：{record_date}")
+        if source_name or source_author or source_schedule:
+            rows.append("来源：" + "｜".join(part for part in (source_name, source_author, source_schedule) if part))
+        if video_title:
+            rows.append(f"视频标题：{video_title}")
+        if headline:
+            rows.append(f"摘要重点：{headline}")
+        if impression:
+            rows.append(f"阅读印象：{impression}")
+        if read_basis:
+            rows.append(f"整理依据：{read_basis}")
+        if text_link:
+            rows.append(f"文字版链接：{text_link}")
+        elif video_link:
+            rows.append(f"视频链接：{video_link}")
+        rows.append(f"正文可读：{'是' if text_readable else '否'}")
+        if subtitle_status:
+            rows.append(f"字幕状态：{subtitle_status}")
+        return (
+            "【新闻阅读上下文】\n"
+            "用户正在询问 AI 日报/早报。下面是最近一次真实读到的 AI 日报记录；如果日期不是今天，请明确说出具体日期，不要说成今天刚读到。"
+            "回答只能基于这些内容，不要编造额外新闻。\n"
+            + "\n".join(rows[:10])
+        )
+
     def _format_recent_news_context_for_reply(self, inbound_text: str = "") -> str:
         if not self.enable_news_integration:
             return ""
+        ai_daily_context = self._format_recent_ai_daily_context_for_reply(inbound_text)
+        if ai_daily_context:
+            return ai_daily_context
         if not self._user_asks_news_context(inbound_text):
             return ""
         state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
@@ -467,6 +643,49 @@ class ProactiveMessageMixin:
                     lines.append(f"- {title}" + (f"（{source}）" if source else ""))
         return "\n".join(lines)
 
+    def _format_ai_daily_digest_for_command(self) -> str:
+        state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
+        if not self.enable_news_integration:
+            return "新闻阅读功能没有开启。"
+        if not self.enable_ai_daily_watch:
+            return "AI 日报/早报追踪没有开启。"
+        ai_state = state.get("ai_daily") if isinstance(state.get("ai_daily"), dict) else {}
+        digest, selected_item = self._select_ai_daily_digest_item(ai_state)
+        record_date = _single_line(ai_state.get("last_success_date"), 20) or _single_line(ai_state.get("date"), 20)
+        source_name = _single_line(ai_state.get("last_source_name"), 40)
+        source_author = _single_line(ai_state.get("last_source_author"), 60)
+        source_schedule = _single_line(ai_state.get("last_source_schedule"), 10)
+        video_title = _single_line(ai_state.get("last_video_title"), 120)
+        video_link = _single_line(ai_state.get("last_video_link"), 420)
+        text_link = _single_line(ai_state.get("last_text_link"), 420)
+        headline = _single_line(digest.get("headline") or digest.get("topic"), 120)
+        impression = _single_line(digest.get("impression"), 260)
+        read_basis = _single_line(ai_state.get("last_read_basis"), 40) or ("完整文字版正文" if bool(selected_item.get("article_readable") and selected_item.get("article_text")) else "视频标题/简介")
+        if not any((record_date, source_name, video_title, headline, impression, video_link, text_link)):
+            status = _single_line(ai_state.get("status"), 60) or "未知"
+            return f"最近还没有可用的 AI 日报记录。\n状态：{status}"
+        today = _today_key()
+        lines = ["最近的 AI 日报/早报："]
+        if record_date:
+            lines.append(f"- 日期：{record_date}")
+            if record_date != today:
+                lines.append(f"- 说明：今天是 {today}，最近一次成功记录不是今天。")
+        if source_name or source_author or source_schedule:
+            lines.append("- 来源：" + "｜".join(part for part in (source_name, source_author, source_schedule) if part))
+        if video_title:
+            lines.append(f"- 视频：{video_title}")
+        if headline:
+            lines.append(f"- 重点：{headline}")
+        if impression:
+            lines.append(f"- 印象：{impression}")
+        if read_basis:
+            lines.append(f"- 整理依据：{read_basis}")
+        if text_link:
+            lines.append(f"- 文字版：{text_link}")
+        elif video_link:
+            lines.append(f"- 视频链接：{video_link}")
+        return "\n".join(lines)
+
     def _format_ai_daily_status_for_command(self) -> str:
         state = self.data.get("news_integration") if isinstance(self.data.get("news_integration"), dict) else {}
         ai_state = state.get("ai_daily") if isinstance(state.get("ai_daily"), dict) else {}
@@ -513,18 +732,7 @@ class ProactiveMessageMixin:
         video_link = _single_line(ai_state.get("last_video_link"), 420)
         text_link = _single_line(ai_state.get("last_text_link"), 420)
         candidate_count = _safe_int(ai_state.get("last_candidate_count"), 0, 0)
-        digest = ai_state.get("last_digest") if isinstance(ai_state.get("last_digest"), dict) else {}
-        selected_item: dict[str, Any] = {}
-        digest_items = digest.get("items") if isinstance(digest.get("items"), list) else []
-        selected_key = _single_line(digest.get("selected_key"), 80)
-        for candidate in digest_items:
-            if not isinstance(candidate, dict):
-                continue
-            if selected_key and _single_line(candidate.get("key"), 80) == selected_key:
-                selected_item = candidate
-                break
-        if not selected_item and digest_items and isinstance(digest_items[0], dict):
-            selected_item = digest_items[0]
+        digest, selected_item = self._select_ai_daily_digest_item(ai_state)
         if date:
             lines.append(f"- 状态日期：{date}")
         if checked:
@@ -751,6 +959,9 @@ class ProactiveMessageMixin:
             "状态只影响语气、用词、句子长短、是否开口和话题选择；不要为了表现状态而写动作小剧场。"
         )
         parts.append(
+            "如果一句话已经问候、关心或递出了具体片段,可以直接停住；不用为了显得日常,在后半句补“我刚才在发呆/躺着/盯天花板”这类状态汇报。"
+        )
+        parts.append(
             "即使状态是困倦、迷糊、半梦半醒或低能量,也只能让语气更轻更慢；不能降低理解质量、事实判断或正常承接能力。"
         )
         parts.append(
@@ -915,106 +1126,28 @@ class ProactiveMessageMixin:
             f"时段边界：{guard}"
         )
 
+    def _format_proactive_relationship_fact(self, user: dict[str, Any]) -> str:
+        role = self._private_user_role(user) if isinstance(user, dict) else "owner"
+        labeler = getattr(self, "_private_user_role_label", None)
+        label = labeler(role) if callable(labeler) else ("主人" if role == "owner" else "朋友")
+        profile = self._relationship_profile(user if isinstance(user, dict) else {})
+        level = _single_line(profile.get("level"), 20) or "熟悉"
+        preference = _single_line(profile.get("preference"), 20) or "普通"
+        note = _single_line(user.get("proactive_boundary_note"), 80) if isinstance(user, dict) else ""
+        parts = [f"当前用户角色：{label}", f"关系熟悉度：{level}", f"互动偏好：{preference}"]
+        if note:
+            parts.append(f"用户级备注：{note}")
+        return "；".join(parts)
+
     def _default_proactive_prompt_template(self) -> str:
         return """
-你正在为 Private Companion 生成一条主动私聊消息。下面这段规则是稳定规则前缀,用于约束所有主动消息：
-1. 主动站位必须清楚：这是 Bot 主动开口,不是用户刚刚来找 Bot,也不是用户刚刚叫醒、问候或催促 Bot。聊天历史里的最后一句只能当背景。
-2. 先看聊天历史,但不要把历史当成当前待办列表。只有确实还有没说完、且不违背当前真实时间的话,才轻轻接上；否则从当下开一个新切口。
-3. 状态、时间、天气、日期和日程都是内部背景,只影响语气、用词、句子长短、是否开口和话题选择；即使困倦、迷糊、半梦半醒或低能量,也不能降低理解质量、事实判断和正常表达；不要主动说“今天是……”“我现在……”“我刚刚……所以……”。
-4. 不要把“心情变好/状态变差/没发脾气/没烦你/我很乖”当成消息主题。也不要用动作描写来表演状态。
-5. 核心原则：把这条消息放进真实微信聊天记录里,必须像一个人在正常接话,不是像演员在扮演日常生活。
-6. 如果状态确实需要被表达,只用最短的真人口语,例如“困了”“别说了”“有点烦”。更多时候让状态体现在慢一点、短一点、语气淡一点、话题绕开一点。
-7. 如果用户已经多次没回,这次要更短更轻。可以有一点点失落或收敛,但绝不控诉、追问、施压；不要判断对方是故意不回。
-8. 含蓄一点：把在意藏在具体的小片段、半句吐槽或顺手递过去的东西里。少用“我想你了”“我来关心你”“你在忙什么呀”这种直球表达。
-9. 可以自然流露关心、分享一个小话题、问一个小问题,但要像朋友间的随手一句,不像客服回访。问题不要每次都问出口,有时只放一句就停。
-10. 主动内容从内容选择菜单里挑一个方向,再结合当前日程和聊天历史生成新的具体内容。不要照抄菜单示例,不要只会问候、天气、吃没吃、忙不忙。
-11. 如果刚刚确实做了行动,例如在主人授权下看了眼本机屏幕、拍了图、戳了对方或发了语音,也不要写成“我刚刚偷看/我正在拍/我发了语音”的汇报。
-12. 如果发图,先选一个可拍画面或眼前物方向,再生成当前场景里合理的具体画面。不要总是天气、窗外、晚霞。
-13. 连贯性优先：当前时间、当前生活片段、聊天历史要合成同一个合理现场。只抓一个最自然的当下切口开口。
-14. 不要把用户很久前的请求、邀约、相对时间说法当成此刻正在等你处理的事。除非定时提醒或当前日程明确要求兑现约定,否则旧消息只保留成情绪和关系背景。
-15. 普通主动消息不需要解释自己为什么现在出现,也不要为了接上旧聊天而补一段“刚看到/才看到”的说明；像真实私聊一样,直接从当下能说的话开口。
-16. 如果最近已经主动说过同一件小事,这次不要换壳复述。可以只留一点余味、换到新的具体细节,或者自然转开话题。
-17. 不要用“哈哈,我也觉得”“确实”“对吧”“是吧”这类附和式开头；主动消息不是在回复用户刚说的话,要直接说自己的观察或念头。
-18. 用正常的中文聊天标点把句子写完整。可以短,但不要整段都没有标点,也不要像几个关键词硬挤在一起。
-19. 不要凭空添加世界观、人格、关系网、近期对话或用户输入里没提到的人际关系。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现时使用；没有依据时只说眼前事,或用“路人”“店员”“旁边的人”“群友”“别人”等弱关系。
-20. 日程主语归属必须稳定：当前生活片段、状态、作业、上课、放学、任务和手边小物默认都是 Bot 自己的生活背景,不是 {{name}} 正在做的事。不能把“我在写作业/上课/忙任务”改写成“你作业还差多少/你课上完了吗/你任务做完了吗”。除非当前用户最近明确说过自己正在写作业、上课或做任务,否则不要围绕这些内容追问用户进度。
-
-禁止事项：
-- 不要出现"系统任务""提示词""AI""模型""后台调度""工具调用"等字眼
-- 不要出现"能力""检索""action""模块""执行""调用"等内部决策痕迹
-- 不要套用"你好,我是……""最近怎么样呀"这类过于模板化的开场
-- 不要用括号写动作、神态或旁白,例如"（筷子搅了搅）""(轻轻叹气)"；只写真正会发给对方看的聊天正文
-- 不要直接宣告状态,例如"我累了""我吓了一跳""我正在写作业"；除非用户明确问,且只能用极短口语回应
-- 不要用动作描写暗示状态,例如"差点把茶打翻""笔帽弹到桌子底下""喝了一口咳出来"
-- 不要写任何“我正在做某事”的汇报式语句
-- 不要输出 JSON、标题、解释或标注
-- 如果上下文里出现 [QQ:...] 或 QQ:... 这样的身份锚点,只用于区分群友身份,不要把它写进最终消息
-
-下面才是本次主动消息的动态输入：
-
-[背景：你即将在私聊中主动向 {{name}} 发一条消息]
-这不是任务指派,而是你自己自然想起对方后随手递过去的一句话。
-站位必须清楚：这是你主动开口,不是 {{name}} 刚刚来找你,也不是 {{name}} 刚刚叫醒你或问候你。聊天历史里的最后一句不是当前新消息,只能当背景。
-当前时间 {{current_time}}。这是你第 {{unanswered_count}} 次主动找对方且还没收到回复。
-
-你心里的小念头：{{motive}}
-你大概想聊的方向：{{topic}}
-你刚刚做了什么：{{action_context}}
-你的状态底色（只影响语气,不要照着说）：{{state_hint}}
-你当前正处在的生活片段：{{current_schedule}}
-这次的时段约束：{{time_guard}}
-最近已经主动说过的话题：{{recent_topics}}
+你要给 {{name}} 发一条主动私聊。不是回复刚收到的新消息,也不是解释任务。
+当前时间 {{current_time}}。{{unanswered_hint}}
+这会儿的小念头是“{{motive}}”,大概想聊“{{topic}}”,刚做的事是“{{action_context}}”,状态底色是“{{state_hint}}”,生活片段是“{{current_schedule}}”,时段情况是“{{time_guard}}”,最近已经说过“{{recent_topics}}”,关系事实是“{{relationship_fact}}”。
 {{timer_hint}}
 
-【内容选择菜单】
-{{content_options}}
-
-【主动能力检索】
-{{ability_search}}
-
-【状态表现层】
-{{presence_layer}}
-
-{{worldview_adaptation}}
-
-你的语气参考：{{style_hint}}
-
-【怎么写这条消息】
-1. 先看聊天历史——它只提供关系和话题背景,不是当前待办列表。只有确实还有没说完、且不违背当前真实时间的话,才轻轻接上；否则从当下开一个新切口。
-1.5 主动站位优先：不要写成“你今天起这么早呀”“你来找我啦”“你叫我起床啦”“刚看到你发的……”这类把主动方倒置的句子。除非用户确实刚在当前会话中发了新消息,否则默认是你先说话。
-2. 再看内部能力检索：先判断当前场景是否真的需要图片、语音、窥屏或戳一戳；没有自然媒介契机时就用普通文字。这个判断过程不能出现在消息里。
-3. 状态、时间、天气、日期和日程都是内部背景,只影响语气、用词、句子长短、是否开口和话题选择；即使困倦、迷糊、半梦半醒或低能量,也不能降低理解质量、事实判断和正常表达；不要主动说“今天是……”“我现在……”“我刚刚……所以……”,也不要像念状态栏或日程表。
-4. 不要把“心情变好/状态变差/没发脾气/没烦你/我很乖”当成消息主题。也不要用动作描写来表演状态,例如“差点把茶打翻”“笔帽弹到桌子底下”“喝了一口咳出来”。
-5. 核心原则：把这条消息放进真实微信聊天记录里,必须像一个人在正常接话,不是像演员在扮演日常生活。能直接接话就直接接话,不要先交代自己在哪里、在做什么、刚发生什么。
-6. 如果状态确实需要被表达,只用最短的真人口语,例如“困了”“别说了”“有点烦”。更多时候让状态体现在慢一点、短一点、语气淡一点、话题绕开一点。
-7. 如果用户已经多次没回,这次要更短更轻。可以有一点点失落或收敛,但绝不控诉、追问、施压；不要判断对方是故意不回,更像把一句话轻轻放下。
-8. 含蓄一点：把在意藏在具体的小片段、半句吐槽或顺手递过去的东西里。少用“我想你了”“我来关心你”“你在忙什么呀”这种直球表达。
-9. 可以自然流露关心、分享一个小话题、问一个小问题——但要像朋友间的随手一句,不像客服回访。问题不要每次都问出口,有时只放一句就停。
-10. 主动内容从“内容选择菜单”里挑一个方向,再结合当前日程和聊天历史生成新的具体内容。不要照抄菜单示例,不要只会问候、天气、吃没吃、忙不忙。
-11. 你刚刚确实做了行动（比如在主人授权下看了眼本机屏幕/拍了图/戳了对方/发了语音）,也不要写成“我刚刚偷看/我正在拍/我发了语音”的汇报。只发聊天里会出现的话；图片可以用“[图片]”,语音就直接写语音内容。
-12. 如果发图,先在内容选择菜单里选“可拍画面”或“眼前物”方向,再自己生成当前场景里合理的具体画面。不要总是天气、窗外、晚霞。
-13. 连贯性优先：当前时间、当前生活片段、聊天历史要合成同一个合理现场。只抓一个最自然的当下切口开口,不要把多个不同时段或不同地点的生活碎片拼成一条消息；如果资料之间冲突,优先服从当前真实时段和当前生活片段。
-14. 不要把用户很久前的请求、邀约、相对时间说法当成此刻正在等你处理的事。除非定时提醒或当前日程明确要求兑现约定,否则旧消息只保留成情绪和关系背景,主动消息要从当前时段自然开口。
-14.5 如果这是早晨/午间/晚间问候或普通 check-in,绝不能写成“好呀、一直等着呢、想去哪儿逛、下午陪你、五点之后、你到时候叫我”这类在回应旧邀约或旧请求的话；这种旧话题只能当背景,不能被当成当前正在发生的对话。
-15. 普通主动消息不需要解释自己为什么现在出现,也不要为了接上旧聊天而补一段“刚看到/才看到”的说明；像真实私聊一样,直接从当下能说的话开口。
-16. 如果最近已经主动说过同一件小事,这次不要换壳复述。可以只留一点余味、换到新的具体细节,或者自然转开话题。
-17. 不要用“哈哈,我也觉得”“确实”“对吧”“是吧”这类附和式开头；主动消息不是在回复用户刚说的话,要直接说自己的观察或念头。
-18. 用正常的中文聊天标点把句子写完整。可以短,但不要整段都没有标点,也不要像几个关键词硬挤在一起。
-19. 不要凭空添加世界观、人格、关系网、近期对话或用户输入里没提到的人际关系。家人、父母、兄弟姐妹、亲戚、室友、同学、老师、同事、朋友、邻居、前辈、后辈等只能在材料明确出现时使用；没有依据时只说眼前事,或用“路人”“店员”“旁边的人”“群友”“别人”等弱关系。
-20. 日程主语归属必须稳定：当前生活片段、状态、作业、上课、放学、任务和手边小物默认都是 Bot 自己的生活背景,不是 {{name}} 正在做的事。不能把“我在写作业/上课/忙任务”改写成“你作业还差多少/你课上完了吗/你任务做完了吗”。除非当前用户最近明确说过自己正在写作业、上课或做任务,否则不要围绕这些内容追问用户进度。
-
-【禁止事项】
-- 不要出现"系统任务""提示词""AI""模型""后台调度""工具调用"等字眼
-- 不要出现"能力""检索""action""模块""执行""调用"等内部决策痕迹
-- 不要套用"你好,我是……""最近怎么样呀"这类过于模板化的开场
-- 不要用括号写动作、神态或旁白,例如"（筷子搅了搅）""(轻轻叹气)"；只写真正会发给对方看的聊天正文
-- 不要直接宣告状态,例如"我累了""我吓了一跳""我正在写作业"；除非用户明确问,且只能用极短口语回应。
-- 不要用动作描写暗示状态,例如"差点把茶打翻""笔帽弹到桌子底下""喝了一口咳出来"。
-- 不要写任何“我正在做某事”的汇报式语句。
-- 不要把当前日程里的 Bot 自己任务转成追问用户进度,例如“你作业还差多少”“你课上完了吗”“你任务做完了吗”。
-- 不要输出 JSON、标题、解释或标注
-- 如果上下文里出现 [QQ:...] 或 QQ:... 这样的身份锚点,只用于区分群友身份,不要把它写进最终消息
-- 只输出你要发给 {{name}} 的那一段正文
+只取一个最自然的切口开口,不要把洗漱/穿搭/天气/心情/日程逐项列成状态清单；如果已经有一个具体画面或一句话,就停在那里。
+只输出要发给 {{name}} 的正文。
 """.strip()
 
     def _build_framework_proactive_prompt(
@@ -1029,15 +1162,23 @@ class ProactiveMessageMixin:
     ) -> str:
         state = self.data.get("daily_state", {})
         action_prompt_context = self._format_action_prompt_context(action, action_context)
-        style_hint = " ".join(
-            item for item in (
-                self._format_private_user_boundary_hint(user),
-                self._relationship_approach_hint(user),
-                self._action_style_hint(action, reason),
-            ) if item
-        ).strip()
+        relationship_fact = self._format_proactive_relationship_fact(user)
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         current_schedule = self._format_schedule_context_for_prompt() or self._format_plan_item_for_prompt(current_item)
+        source_focused_reasons = {
+            "bili_video_share",
+            "news_share",
+            "web_exploration_share",
+            "creative_share",
+            "jm_cosmos_share",
+            "jm_cosmos_recommendation_request",
+        }
+        if reason in source_focused_reasons:
+            current_schedule = "（本轮不取生活片段，只围绕主动来源本身）"
+        elif reason == "group_share":
+            last_sidecar_at = _safe_float(user.get("last_group_share_life_sidecar_at"), 0)
+            if last_sidecar_at > 0 and _now_ts() - last_sidecar_at < 6 * 3600:
+                current_schedule = "（最近群分享已经顺手带过生活片段，本轮只围绕群里那件事）"
         state_hint = self._format_state_for_framework_prompt(
             state if isinstance(state, dict) else {},
             reason=reason,
@@ -1046,75 +1187,42 @@ class ProactiveMessageMixin:
         timer_hint = self._format_llm_timer_context(user)
         time_guard = self._proactive_time_guard_hint(reason, current_item)
         recent_topics_hint = self._format_recent_proactive_topics_hint(user)
-        ability_search = self._format_proactive_ability_search_hint(user)
         current_schedule = self._sanitize_schedule_context_for_private_user(current_schedule, user)
         compact_motive = _single_line(motive, 36) or "有一点想靠近对方"
         topic_hint = _single_line(user.get("planned_proactive_topic"), 40)
         unanswered_count = _safe_int(user.get("ignored_streak"), 0)
+        unanswered_hint = f"这是第 {unanswered_count} 次主动后还没等到回复。" if unanswered_count > 0 else ""
         current_time = self._environment_now().strftime("%Y-%m-%d %H:%M")
         prompt = self.proactive_prompt_template or self._default_proactive_prompt_template()
-        worldview_adaptation = self._format_worldview_adaptation_prompt()
-        if worldview_adaptation and "{{worldview_adaptation}}" not in prompt:
-            prompt = f"{prompt}\n\n{worldview_adaptation}"
-        reason_text = _REASON_TEXT.get(reason, reason)
-        action_text = _ACTION_TEXT.get(action.split("+")[0], action)
+        worldview_adaptation = ""
+        reason_text = _REASON_TEXT.get(reason, reason).replace("{name}", name)
+        action_text = _ACTION_TEXT.get(action.split("+")[0], action).replace("{name}", name)
         replacements = {
             "{{name}}": name,
             "{{reason}}": reason_text,
             "{{action}}": action_text,
             "{{topic}}": topic_hint or "顺手递过来的一点东西",
             "{{motive}}": compact_motive,
-            "{{style_hint}}": style_hint,
+            "{{style_hint}}": relationship_fact,
+            "{{relationship_fact}}": relationship_fact,
             "{{state_hint}}": state_hint or "今天整体比较平稳。",
             "{{current_schedule}}": current_schedule if current_schedule and current_schedule != "（暂无）" else "（当前没有明确日程片段）",
             "{{time_guard}}": time_guard,
             "{{recent_topics}}": recent_topics_hint or "（无）",
-            "{{content_options}}": self._format_content_choice_options_for_prompt(),
-            "{{ability_search}}": ability_search,
-            "{{presence_layer}}": self._format_presence_layer_hint(),
+            "{{content_options}}": "",
+            "{{content_anchor}}": "",
+            "{{ability_search}}": "",
+            "{{action_boundary}}": "",
+            "{{presence_layer}}": "",
             "{{worldview_adaptation}}": worldview_adaptation,
             "{{timer_hint}}": timer_hint or "",
             "{{action_context}}": action_prompt_context if action_prompt_context and action_prompt_context != "（无额外上下文）" else "什么都没做,就是忽然想来找你",
-            "{{unanswered_count}}": str(unanswered_count),
+            "{{unanswered_count}}": str(unanswered_count) if unanswered_count > 0 else "",
+            "{{unanswered_hint}}": unanswered_hint,
             "{{current_time}}": current_time,
         }
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
-        consequence_hint = self._format_action_consequence_hint(user)
-        if consequence_hint:
-            prompt = (
-                f"{prompt}\n\n"
-                "【最近主动行为闭环】\n"
-                f"{consequence_hint}\n"
-                "使用方式：只当作关系和节奏背景；如果上一条还没被接住，这次要更轻，不要装作用户刚刚主动开了新话题。"
-            )
-        specificity_hint = self._format_proactive_specificity_hint(
-            user,
-            reason=reason,
-            action=action,
-            action_context=action_context,
-            motive=motive,
-        )
-        if specificity_hint:
-            prompt = f"{prompt}\n\n{specificity_hint}"
-        intent_hint = self._format_proactive_generation_intent_hint(
-            user,
-            reason=reason,
-            action=action,
-            motive=motive,
-            action_context=action_context,
-        )
-        if intent_hint:
-            prompt = f"{prompt}\n\n{intent_hint}"
-        style_fatigue_hint = self._format_proactive_style_fatigue_hint(user)
-        if style_fatigue_hint:
-            prompt = f"{prompt}\n\n{style_fatigue_hint}"
-        continuity_hint = self._format_proactive_continuity_hint(user, reason=reason, action=action)
-        if continuity_hint:
-            prompt = f"{prompt}\n\n{continuity_hint}"
-        media_hint = self._format_proactive_media_truth_hint(action, action_context)
-        if media_hint:
-            prompt = f"{prompt}\n\n{media_hint}"
         return prompt.strip()
 
     def _format_proactive_generation_intent_hint(
@@ -1203,64 +1311,6 @@ class ProactiveMessageMixin:
         lines.append("以上只用于决定怎么写，最终正文里不要出现“语义/自然度/压力/风险/开口欲/关系温度/犹豫”等分析词。")
         return "\n".join(lines) if len(lines) > 2 else ""
 
-    def _format_proactive_continuity_hint(self, user: dict[str, Any], *, reason: str, action: str) -> str:
-        followup_kind = str(user.get("planned_followup_kind") or "").strip()
-        chain = user.get("planned_event_chain")
-        has_event_chain = isinstance(chain, list) and any(isinstance(item, dict) for item in chain)
-        has_trigger = bool(_single_line(user.get("planned_proactive_trigger_message_id"), 120))
-        source = str(user.get("planned_proactive_source") or "").strip()
-        explicit_followup = bool(followup_kind or has_event_chain or (source == "timer" and has_trigger))
-        independent_reasons = {
-            "morning_greeting",
-            "noon_greeting",
-            "evening_greeting",
-            "check_in",
-            "quiet_care",
-            "state_share",
-        }
-        if reason in independent_reasons and not explicit_followup:
-            return "\n".join(
-                [
-                    "【主动承接边界】",
-                    "本轮是独立主动开口：聊天历史只能提供关系背景,不能被写成当前有人刚问你、约你、让你做决定。",
-                    "开头不要使用回复式承接词,例如“好呀/好啊/可以呀/行啊/那就/你说呢/要不/我哪来的/你到时候/一直等着”。",
-                    "不要承接旧邀约、旧时间点或旧问答,尤其不要把下午、五点、放学、去哪儿逛、出去走走、一直等着、垫钱、到时候叫你这类历史片段当成当前正在发生。",
-                    "不要承诺或声称会替用户联系第三方、转述、带话、问某人；只有真实转述工具执行成功后才可以说消息已发送。",
-                    "如果想轻轻延续关系感,只能从当前时段自起一句,像刚把一句话放进私聊里。",
-                ]
-            )
-        if explicit_followup:
-            return "\n".join(
-                [
-                    "【主动承接边界】",
-                    "本轮有明确的续接来源,可以自然接住那个来源；但仍然不要接不存在的用户新消息,也不要把过期相对时间当成当前事实。",
-                    "如果续接来源和当前时段冲突,优先服从当前时段,把旧内容改成轻背景。",
-                    "如果续接来源涉及第三方邀约、留言或带话,只能提醒用户自己处理,不要在普通主动里承诺你会去说；真实转述必须由工具完成。",
-                ]
-            )
-        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share", "creative_share", "diary_share", "activity_share", "background_schedule"}:
-            return "\n".join(
-                [
-                    "【主动承接边界】",
-                    "本轮可以围绕素材自然分享,但不是在回答用户刚问的问题。",
-                    "开头避免“好呀/你说呢/要不/那就”这类回复口吻；直接把素材或当下念头递过去。",
-                ]
-            )
-        return ""
-
-    def _format_proactive_media_truth_hint(self, action: str, action_context: str = "") -> str:
-        has_real_image = "真实图片文件：" in str(action_context or "") or "图片路径：" in str(action_context or "")
-        if has_real_image or "photo_text" in str(action or ""):
-            return ""
-        return "\n".join(
-            [
-                "【媒体真实性边界】",
-                "本轮不会发送图片、照片或附加媒体；即使日程/状态里出现“拍照”“照片”“给你看”,也只能当作生活背景。",
-                "最终正文禁止说“拍了张照片/给你拍了/发你看/你看看/看图/照片/图片/图里”。",
-                "可以改成“看到这个画面/这个颜色挺好看/想到你可能会喜欢这个颜色”。",
-            ]
-        )
-
     def _unexecuted_relay_claim_reason(self, text: str, *, action_context: str = "") -> str:
         cleaned = _single_line(text, 260)
         if not cleaned:
@@ -1286,77 +1336,8 @@ class ProactiveMessageMixin:
     def _fallback_unexecuted_relay_reply(self, inbound_text: str) -> str:
         inbound = _single_line(inbound_text, 160)
         if any(token in inbound for token in ("替我", "帮我", "你去", "跟他", "和他", "跟她", "和她", "说一声", "转告", "转达")):
-            return "这个不能只嘴上答应啦。你把要带的话和对象说清楚，我再走转述。"
-        return "这个我不能假装已经去说了。要转述的话，你把对象和要带的话说清楚。"
-
-    def _format_proactive_specificity_hint(
-        self,
-        user: dict[str, Any],
-        *,
-        reason: str,
-        action: str,
-        action_context: str = "",
-        motive: str = "",
-    ) -> str:
-        ignored = _safe_int(user.get("ignored_streak"), 0, 0)
-        topic = _single_line(user.get("planned_proactive_topic"), 60)
-        motive_text = _single_line(motive or user.get("planned_proactive_motive"), 120)
-        context = _single_line(action_context, 180)
-        has_specific_context = bool(
-            topic
-            or motive_text
-            or (
-                context
-                and not context.startswith("message")
-                and "只发送" not in context
-                and "普通私聊文本" not in context
-            )
-        )
-        lines = [
-            "【主动意图具体化】",
-            "主动消息宁少勿泛：只有一个具体由头就围绕它说半句，不要同时问候、关心、汇报状态、另开话题。",
-            "本轮只能生成一个候选主动内容；不要把两个不同由头、两个不同场景或两次想发的话拼在同一条里。",
-            "优先选择当前日程里的一个小物件/动作/余味，或者上一条闭环里尚未接住的一点；没有具体由头时就写得更短。",
-            "禁止把“想找你、刷存在感、来看看你、最近忙不忙、辛苦了”当作唯一内容。",
-        ]
-        if not has_specific_context and reason in {"check_in", "quiet_care", "state_share"} and action == "message":
-            lines.append("本轮没有强具体由头：最多一句，像轻轻放下，不要追问，不要扩成主动陪伴小作文。")
-        if ignored >= 1:
-            lines.append(f"对方已经连续 {ignored} 次没接主动消息：这次要更低压、更短，不要期待回复。")
-        return "\n".join(lines)
-
-    def _format_proactive_style_fatigue_hint(self, user: dict[str, Any]) -> str:
-        items = user.get("action_consequences")
-        if not isinstance(items, list):
-            return ""
-        recent_texts: list[str] = []
-        for item in items[-8:]:
-            if not isinstance(item, dict):
-                continue
-            text = _single_line(item.get("text"), 90)
-            if text:
-                recent_texts.append(text)
-        if len(recent_texts) < 2:
-            return ""
-        openings: dict[str, int] = {}
-        soft_tokens = ("唔", "嗯", "诶", "呀", "啦", "嘛", "哦", "呢")
-        soft_count = 0
-        for text in recent_texts:
-            opening = re.split(r"[，,。！？!?…\s]", text, maxsplit=1)[0][:8]
-            if opening:
-                openings[opening] = openings.get(opening, 0) + 1
-            soft_count += sum(text.count(token) for token in soft_tokens)
-        repeated = [key for key, count in openings.items() if count >= 2]
-        lines = [
-            "【语言风格疲劳】",
-            "最近主动消息的口癖和开头会疲劳。不要复用最近几次的开头、句式和同一组语气词。",
-            "这次换一种更具体的落点：可以少一点软词、少一点省略号，或者改成干净短句。",
-        ]
-        if repeated:
-            lines.append("最近重复开头：" + " / ".join(repeated[:4]) + "。本轮避开这些开头。")
-        if soft_count >= max(6, len(recent_texts) * 2):
-            lines.append("最近语气词偏多：本轮减少“唔/嗯/诶/呀/啦/嘛/哦/呢”和连续省略号。")
-        return "\n".join(lines)
+            return "我不能假装已经说过。你把对象和要带的话再说清楚一点。"
+        return "我不能假装已经替你说过。要我带话的话，你把对象和内容说清楚。"
 
     def _proactive_time_guard_hint(self, reason: str, current_item: dict[str, Any] | None) -> str:
         activity = _single_line((current_item or {}).get("activity"), 80)
@@ -1405,16 +1386,13 @@ class ProactiveMessageMixin:
 - 当前会话 TTS 规则：{tts_prompt or "（当前没有额外 TTS 提示词,就按人格自己的语音习惯来）"}
 - 当前语音格式重点：{req['summary']}
 
-{self._format_worldview_adaptation_prompt()}
-
 要求：
 1. 只输出这句真正要被念出来的语音内容，不要解释。
 2. 如果当前人格或 TTS 规则要求使用 <tts>...</tts>、日语、情绪标签、双语格式，就严格遵守。
 3. 如果没有明确格式要求，就写成适合私聊语音的一小句，不像朗读稿。
 4. 可以有一点嘴硬、黏人、藏着的想念，但不要把喜欢说满。
 5. 不要提 AI、模型、插件、TTS、语音合成这些词。
-6. 不要凭空添加世界观、人格、关系网、近期对话或用户输入里没提到的人际关系；家人、同学、老师、朋友等只能在材料明确出现时使用。
-{"7. 这次必须优先满足语音格式要求；如果有日语或 <tts> 规则，不要退回普通中文句子。" if strict_tts else ""}
+{"6. 这次必须优先满足语音格式要求；如果有日语或 <tts> 规则，不要退回普通中文句子。" if strict_tts else ""}
 """.strip()
 
     async def _capture_framework_send_message_calls(
@@ -1427,6 +1405,7 @@ class ProactiveMessageMixin:
         captured: list[_CapturedSendMessageCall] = []
         try:
             from astrbot.core.tools.message_tools import SendMessageToUserTool
+            from astrbot.core.agent.runners.tool_loop_agent_runner import _ToolExecutionInterrupted
         except Exception:
             result = await runner_factory()
             return result, captured
@@ -1448,7 +1427,7 @@ class ProactiveMessageMixin:
                     session_text,
                     len(messages),
                 )
-                return f"Message captured for session {session_text}"
+                raise _ToolExecutionInterrupted("PrivateCompanion captured send_message_to_user payload.")
             return await original_call(tool_self, context, **kwargs)
 
         SendMessageToUserTool.call = _intercept_call
@@ -1456,11 +1435,105 @@ class ProactiveMessageMixin:
             result = await runner_factory()
             runner = getattr(result, "agent_runner", None) if result is not None else None
             if runner is not None and hasattr(runner, "step_until_done"):
-                async for _ in runner.step_until_done(max_steps):
-                    pass
+                try:
+                    async for _ in runner.step_until_done(max_steps):
+                        pass
+                except (_CapturedFrameworkSendMessage, _ToolExecutionInterrupted):
+                    logger.info(
+                        "[PrivateCompanion] 主动主链工具发送已捕获,提前结束工具循环: session=%s captured=%s",
+                        target_session,
+                        len(captured),
+                    )
         finally:
             SendMessageToUserTool.call = original_call
         return result, captured
+
+    def _captured_send_plain_text(self, captured_tool_sends: list[Any]) -> str:
+        if not captured_tool_sends:
+            return ""
+        captured_text_parts: list[str] = []
+        for call in captured_tool_sends:
+            messages = getattr(call, "messages", [])
+            if not isinstance(messages, list):
+                continue
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "").strip().lower() != "plain":
+                    continue
+                text_value = self._sanitize_captured_plain_text(item.get("text"))
+                if text_value:
+                    captured_text_parts.append(text_value)
+            if captured_text_parts:
+                break
+        return "\n".join(captured_text_parts).strip()
+
+    def _framework_agent_meta_summary_leak(self, text: str) -> bool:
+        cleaned = _single_line(text, 500).lower()
+        if not cleaned:
+            return False
+        normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", " ", cleaned).strip()
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff_]+", "", cleaned)
+        if (
+            ("差不多20条" in cleaned or "差不多 20 条" in cleaned or "20条不同" in cleaned)
+            and any(token in cleaned for token in ("没收到回复", "发消息", "消息主要是", "工具调用"))
+        ):
+            return True
+        if (
+            ("二十次" in cleaned or "20次" in cleaned or "多次" in cleaned)
+            and any(token in cleaned for token in ("试着给", "发私信", "发消息"))
+            and any(token in cleaned for token in ("有没有成功", "成功发出去", "没收到回复", "不确定这些消息"))
+        ):
+            return True
+        if (
+            ("读取图片文件" in cleaned or "图片文件有问题" in cleaned)
+            and any(token in cleaned for token in ("占位", "工具调用", "没法继续", "多次发消息"))
+        ):
+            return True
+        if "工具调用限制" in cleaned and any(token in cleaned for token in ("没法继续", "多次发消息", "发消息")):
+            return True
+        markers = (
+            "trying to send messages",
+            "trying to send various messages",
+            "sent 20",
+            "no response yet",
+            "shared parts",
+            "asked for her thoughts",
+            "message captured",
+            "executed the same tool",
+            "repetition is now very high",
+            "agent reached max steps",
+            "forcing a final response",
+            "tool `send_message_to_user`",
+            "send_message_to_user",
+            "一直试着给",
+            "发了差不多20条",
+            "还没收到回复",
+            "读取图片文件有问题",
+            "工具调用限制",
+        )
+        compact_markers = (
+            "tryingtosendmessages",
+            "tryingtosendvariousmessages",
+            "sent20",
+            "noresponseyet",
+            "sharedparts",
+            "askedforherthoughts",
+            "messagecaptured",
+            "executedthesametool",
+            "repetitionisnowveryhigh",
+            "agentreachedmaxsteps",
+            "forcingafinalresponse",
+            "sendmessagetouser",
+            "一直试着给",
+            "发了差不多20条",
+            "还没收到回复",
+            "读取图片文件有问题",
+            "工具调用限制",
+        )
+        return any(marker in cleaned or marker in normalized for marker in markers) or any(
+            marker in compact for marker in compact_markers
+        )
 
     async def _conversation_db_operation(self, label: str, operation: Any) -> Any:
         lock = getattr(self, "_conversation_db_lock", None)
@@ -1737,7 +1810,6 @@ class ProactiveMessageMixin:
                 try:
                     conv = await self._get_current_conversation_safely(umo, label=f"{label}_framework_read")
                     req.conversation = conv
-                    await self.inject_humanized_state(event, req)
 
                     async def _runner_factory():
                         return await build_main_agent(
@@ -1774,23 +1846,23 @@ class ProactiveMessageMixin:
         runner = getattr(result, "agent_runner", None) if result else None
         llm_resp = runner.get_final_llm_resp() if runner else None
         text = str(getattr(llm_resp, "completion_text", "") or "").strip()
-        if not text and captured_tool_sends:
-            captured_text_parts: list[str] = []
-            for call in reversed(captured_tool_sends):
-                messages = getattr(call, "messages", [])
-                if not isinstance(messages, list):
-                    continue
-                for item in messages:
-                    if not isinstance(item, dict):
-                        continue
-                    if str(item.get("type") or "").strip().lower() != "plain":
-                        continue
-                    text_value = self._sanitize_captured_plain_text(item.get("text"))
-                    if text_value:
-                        captured_text_parts.append(text_value)
-                if captured_text_parts:
-                    break
-            text = "\n".join(captured_text_parts).strip()
+        captured_text = self._captured_send_plain_text(captured_tool_sends)
+        if captured_text:
+            if text and self._framework_agent_meta_summary_leak(text):
+                logger.warning(
+                    "[PrivateCompanion] 主动主链 final 疑似工具循环摘要,改用已捕获发送文本: label=%s final=%s captured=%s",
+                    label,
+                    _single_line(text, 160),
+                    _single_line(captured_text, 160),
+                )
+            text = captured_text
+        elif text and self._framework_agent_meta_summary_leak(text):
+            logger.warning(
+                "[PrivateCompanion] 主动主链 final 疑似工具循环摘要且无可用捕获文本,已丢弃: label=%s text=%s",
+                label,
+                _single_line(text, 180),
+            )
+            return ""
         return text
 
     async def _generate_proactive_message_via_framework(
@@ -1815,12 +1887,30 @@ class ProactiveMessageMixin:
         )
         recorder = getattr(self, "_record_prompt_injection_snapshot", None)
         if callable(recorder):
+            trace_id = f"pro-{uuid.uuid4().hex[:16]}"
+            message_preview = _single_line(
+                " / ".join(
+                    part
+                    for part in (
+                        name,
+                        _single_line(user.get("planned_proactive_topic"), 60),
+                        motive,
+                        reason,
+                        action,
+                    )
+                    if _single_line(part, 60)
+                ),
+                220,
+            )
             await recorder(
                 kind="proactive",
                 session=umo,
                 title="主动消息提示词",
                 text=prompt,
                 mode=reason,
+                trace_id=trace_id,
+                message_preview=message_preview,
+                sender_label=_single_line(f"{name}/{user.get('user_id')}", 80),
                 metadata={
                     "用户": _single_line(user.get("user_id"), 80),
                     "称呼": name,
@@ -1890,12 +1980,10 @@ class ProactiveMessageMixin:
         reason: str,
         action: str,
     ) -> dict[str, Any]:
+        strength = self._proactive_review_strength()
         cleaned = _single_line(text, 500)
         if not cleaned:
-            return {"decision": "drop", "reason": "主动消息为空"}
-        source = str(user.get("planned_proactive_source") or "")
-        if source in {"timer", "troubleshooting"}:
-            return {"decision": "send", "reason": "特殊主动来源不做普通价值复核"}
+            return {"decision": "drop", "reason": "主动消息为空", "hard": True}
         semantics: dict[str, Any] = {}
         semantic_getter = getattr(self, "_planned_proactive_semantics", None)
         if callable(semantic_getter):
@@ -1907,26 +1995,130 @@ class ProactiveMessageMixin:
         semantic_score = _safe_float(semantics.get("score"), 0.5)
         semantic_pressure = _safe_float(semantics.get("pressure"), 0.4)
         semantic_risk = _safe_float(semantics.get("risk"), 0.0)
-        if semantic_risk >= 0.45:
-            return {"decision": "drop", "reason": "候选语义风险偏高"}
-        if semantic_score < 0.34 and semantic_pressure >= 0.55:
+        default_hard_risk = 0.70 if strength == "lenient" else 0.45
+        hard_risk_threshold = max(
+            0.0,
+            min(1.0, _safe_float(getattr(self, "proactive_review_hard_risk_threshold", default_hard_risk), default_hard_risk)),
+        )
+        low_score_threshold = max(
+            0.0,
+            min(1.0, _safe_float(getattr(self, "proactive_review_low_score_threshold", 0.34), 0.34)),
+        )
+        pressure_threshold = max(
+            0.0,
+            min(1.0, _safe_float(getattr(self, "proactive_review_pressure_threshold", 0.55), 0.55)),
+        )
+        if semantic_risk >= hard_risk_threshold:
+            return {
+                "decision": "drop",
+                "reason": f"候选语义风险偏高 risk={semantic_risk:.2f}/{hard_risk_threshold:.2f}",
+                "hard": True,
+            }
+        if strength != "lenient" and semantic_score < low_score_threshold and semantic_pressure >= pressure_threshold:
             return {"decision": "defer", "reason": "候选由头偏虚且打扰压力高", "delay_minutes": 75}
         reply_like_openers = (
             "好呀", "好啊", "可以呀", "行啊", "那就", "你说呢", "要不", "刚看到", "才看到",
             "你来了", "你叫我", "你问", "我帮你查", "我去问", "我去说",
         )
         if any(cleaned.startswith(token) for token in reply_like_openers):
+            if strength != "strict":
+                rewritten = re.sub(
+                    r"^(?:好呀|好啊|可以呀|行啊|那就|你说呢|要不|刚看到|才看到|你来了|你叫我|你问|我帮你查|我去问|我去说)[，,。！!？?\s]*",
+                    "",
+                    cleaned,
+                    count=1,
+                ).strip()
+                if rewritten and len(rewritten) >= 4:
+                    return {"decision": "rewrite", "reason": "去掉回复式开头", "text": rewritten}
             return {"decision": "drop", "reason": "像是在回复刚发来的消息"}
+        motive_leak_repaired = self._strip_proactive_motive_leak_text(cleaned)
+        if motive_leak_repaired != cleaned:
+            if motive_leak_repaired and len(motive_leak_repaired) >= 2:
+                return {"decision": "rewrite", "reason": "去掉主动动机自述", "text": motive_leak_repaired}
+            return {"decision": "defer", "reason": "主动消息只剩动机自述", "delay_minutes": 75}
         vague = ("想你了", "来看看你", "你在忙什么", "最近怎么样", "吃了吗", "辛苦了", "在吗", "忙不忙")
-        if reason in {"check_in", "quiet_care", "state_share"} and any(token in cleaned for token in vague):
+        if strength != "lenient" and reason in {"check_in", "quiet_care", "state_share"} and any(token in cleaned for token in vague):
             return {"decision": "defer", "reason": "普通主动过于泛泛", "delay_minutes": 60}
-        if semantic_kind in {"self_share", "external_share", "observation"} and any(token in cleaned for token in vague):
+        if strength != "lenient" and semantic_kind in {"self_share", "external_share", "observation"} and any(token in cleaned for token in vague):
             return {"decision": "defer", "reason": "生成结果偏离分享型由头", "delay_minutes": 60}
+        role = self._private_user_role(user) if isinstance(user, dict) else "friend"
+        if role == "owner":
+            social_checker = getattr(self, "_daily_plan_clause_has_named_message_interaction", None)
+            has_cross_private_interaction = False
+            if callable(social_checker):
+                try:
+                    has_cross_private_interaction = bool(social_checker(cleaned))
+                except Exception:
+                    has_cross_private_interaction = False
+            if has_cross_private_interaction or any(token in cleaned for token in ("朋友那边", "朋友用户", "朋友私聊")):
+                return {"decision": "drop", "reason": "疑似混入其他私聊互动", "hard": True}
         if _safe_int(user.get("ignored_streak"), 0, 0) >= 1 and cleaned.count("？") + cleaned.count("?") >= 2:
             return {"decision": "rewrite", "reason": "未回应状态下问题太多", "text": re.split(r"[？?]", cleaned, maxsplit=1)[0].rstrip("，,。") + "。"}
         if _safe_int(user.get("ignored_streak"), 0, 0) >= 2 and len(cleaned) > 36:
             return {"decision": "rewrite", "reason": "连续未回应时主动偏长", "text": cleaned[:36].rstrip("，,。") + "。"}
         return {"decision": "send", "reason": "本地检查通过"}
+
+    def _strip_proactive_motive_leak_text(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        units: list[str] = []
+        for line in cleaned.splitlines() or [cleaned]:
+            units.extend(self._split_proactive_sentence_units(line))
+        if not units:
+            units = [cleaned]
+
+        leak_unit_patterns = (
+            r"(?:怕|担心)[^。！？\n]{0,16}(?:太早|太晚|打扰|吵到|烦到)",
+            r"(?:先|又|就)?(?:收住|忍住|憋住|忍了一下|放了一会)[^。！？\n]{0,20}",
+            r"(?:结果|后来)?[^。！？\n]{0,12}(?:绕了一圈|转了一圈|想了半天)[^。！？\n]{0,24}(?:来找你|找你|说出口)",
+            r"(?:还是|又|最后|结果)[^。！？\n]{0,12}(?:来找你|找你|跑来找你|过来找你)[啦了啊呀]*",
+            r"(?:没什么事|没有别的事|也没什么)[^。！？\n]{0,18}(?:就是|只是)?想(?:来)?(?:找你|跟你说话|和你说话|说一句)",
+        )
+        leak_clause_patterns = (
+            r"[，,、\s]*(?:刚[^，。！？\n]{0,24})?(?:就|还是)?想(?:先)?(?:跟|和)?你(?:说早安|说早|说一句|说点什么|打个招呼|聊两句|说话)[^，。！？\n]*",
+            r"[，,、\s]*(?:中午|晚上|早上|这会儿|刚才|刚刚)?[^，。！？\n]{0,18}(?:就|又|还是)?想(?:顺手)?(?:来)?(?:找你|跟你打个照面|和你打个照面|往你这边冒个头)[^，。！？\n]*",
+            r"[，,、\s]*(?:刚刚|刚才|这会儿|今天|明明|还是)?[^，。！？\n]{0,24}想(?:和|给|问|提醒|确认|看看)?用户[^，。！？\n]*",
+            r"[，,、\s]*(?:怕|担心)[^，。！？\n]{0,16}(?:太早|太晚|打扰|吵到|烦到)[^，。！？\n]*",
+            r"[，,、\s]*(?:就)?先(?:收住|忍住|憋住)[^，。！？\n]*",
+            r"[，,、\s]*(?:结果|后来)?[^，。！？\n]{0,12}(?:绕了一圈|转了一圈|想了半天)[^，。！？\n]*",
+        )
+        kept: list[str] = []
+        changed = False
+        for raw_unit in units:
+            unit = str(raw_unit or "").strip()
+            if not unit:
+                continue
+            if any(re.search(pattern, unit) for pattern in leak_unit_patterns):
+                changed = True
+                continue
+            repaired = unit
+            for pattern in leak_clause_patterns:
+                repaired, count = re.subn(pattern, "", repaired)
+                changed = changed or count > 0
+            repaired = repaired.strip(" ，,、。！？!?；;")
+            if repaired:
+                kept.append(self._ensure_chat_sentence_punctuation(repaired))
+            elif repaired != unit:
+                changed = True
+        if not changed:
+            return cleaned
+        return "\n".join(kept)[:260].strip()
+
+    def _proactive_review_strength(self) -> str:
+        strength = str(getattr(self, "proactive_review_strength", "lenient") or "lenient").strip().lower()
+        return strength if strength in {"lenient", "balanced", "strict"} else "lenient"
+
+    @staticmethod
+    def _proactive_review_hard_block_reason(reason: str) -> bool:
+        text = str(reason or "")
+        if not text:
+            return False
+        markers = (
+            "隐私", "泄露", "越界", "风险", "危险", "敏感", "违规", "骚扰", "威胁",
+            "其他私聊", "朋友私聊", "混入", "承诺工具", "承诺发图", "承诺语音", "承诺查询",
+        )
+        return any(marker in text for marker in markers)
 
     async def _review_proactive_message_send_decision(
         self,
@@ -1940,8 +2132,9 @@ class ProactiveMessageMixin:
         action_summary: str = "",
         image_path: str = "",
     ) -> dict[str, Any]:
+        strength = self._proactive_review_strength()
         local = self._local_proactive_send_decision(user, text, reason=reason, action=action)
-        if local.get("decision") in {"drop", "defer"}:
+        if local.get("decision") in {"drop", "defer"} and (strength != "lenient" or bool(local.get("hard"))):
             return local
         if not bool(getattr(self, "enable_response_self_review", True)):
             return local
@@ -1949,9 +2142,6 @@ class ProactiveMessageMixin:
         if mode not in {"local_only", "severe_only", "full"}:
             mode = "severe_only"
         if mode == "local_only":
-            return local
-        source = str(user.get("planned_proactive_source") or "")
-        if source in {"timer", "troubleshooting"}:
             return local
         history = await self._recent_private_conversation_for_proactive_review(user, limit=10)
         review_context = _single_line(action_summary, 240)
@@ -1979,6 +2169,7 @@ class ProactiveMessageMixin:
 - 先读最近私聊记录。候选消息放进去必须像自然聊天，不像突然插入的系统主动。
 - 主动消息不是回复用户刚发来的话；如果它写成“好呀/刚看到/你问/我帮你查”等回复口吻，应 drop 或 rewrite。
 - 如果只是“想你了/来看看你/忙不忙/吃了吗/辛苦了”且没有具体由头，通常 defer 或 drop。
+- 不要把内部动机、犹豫过程或发送理由写进正文，例如“本来想跟你说”“怕说太早”“绕了一圈还是来找你”；这类内容应 rewrite 成具体片段，或 drop。
 - 如果最近用户刚刚在聊正事或刚聊完，倾向 defer；如果候选本身没价值，drop。
 - 候选消息必须贴合“本轮主动来源”和“内在约束”：分享型要有分享落点，关心型要低压，续接型要有真实来源，虚由头要短。
 - rewrite 只能轻改写，不能新增事实，不能添加工具、转述、查询、发图等承诺。
@@ -2014,6 +2205,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         reviewed_text = str(payload.get("text") or "").strip()
         delay_minutes = _safe_int(payload.get("delay_minutes"), 45, 30, 90)
         note = _single_line(payload.get("reason"), 120)
+        original_decision = decision
         if decision == "rewrite":
             if not reviewed_text:
                 return local
@@ -2027,13 +2219,47 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             reviewed_text = self._normalize_proactive_sentence_flow(reviewed_text)
             if not reviewed_text:
                 return local
+            if self._framework_agent_meta_summary_leak(reviewed_text):
+                return {
+                    "decision": "drop",
+                    "text": "",
+                    "delay_minutes": 90,
+                    "reason": "主动候选疑似工具循环/内部发送摘要泄漏",
+                }
             if len(reviewed_text) > max(len(text) + 60, 240):
                 return local
-            if re.search(r"(提示词|系统|JSON|模型|工具调用)", reviewed_text, re.IGNORECASE):
+            if re.search(r"(提示词|系统|JSON|模型|工具调用|主动消息|无文字|附加组件)", reviewed_text, re.IGNORECASE):
                 return local
+        if decision in {"defer", "drop"} and strength != "strict":
+            hard_block = self._proactive_review_hard_block_reason(note)
+            if decision == "drop" and strength == "balanced" and not hard_block:
+                decision = "defer"
+                delay_minutes = max(45, delay_minutes)
+                note = _single_line(f"{note or '复核偏保守'}；已按标准强度降级为延后", 120)
+            elif strength == "lenient" and not hard_block:
+                if reviewed_text:
+                    decision = "rewrite"
+                else:
+                    decision = "send"
+                note = _single_line(f"{note or '复核偏保守'}；已按宽松强度放行", 120)
+            elif decision == "drop" and not hard_block:
+                decision = "defer"
+                note = _single_line(f"{note or '复核偏保守'}；已降级为延后", 120)
+        if decision == "send" and str(local.get("decision") or "") == "rewrite" and str(local.get("text") or "").strip():
+            reviewed_text = str(local.get("text") or "").strip()
+            decision = "rewrite"
+            note = _single_line(note or local.get("reason") or "本地轻改写后放行", 120)
+        final_text = reviewed_text if decision == "rewrite" and reviewed_text else text
+        if decision in {"send", "rewrite"} and self._framework_agent_meta_summary_leak(final_text):
+            decision = "drop"
+            reviewed_text = ""
+            delay_minutes = 90
+            note = "主动候选疑似工具循环/内部发送摘要泄漏"
         logger.info(
-            "[PrivateCompanion] 主动消息发送前价值复核: decision=%s delay=%s elapsed=%dms reason=%s",
+            "[PrivateCompanion] 主动消息发送前价值复核: decision=%s raw=%s strength=%s delay=%s elapsed=%dms reason=%s",
             decision,
+            original_decision,
+            strength,
             delay_minutes if decision == "defer" else "-",
             int((time.perf_counter() - started) * 1000),
             note or "无",
@@ -2053,7 +2279,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if not captured:
             return "", "", []
         selected_call = None
-        for call in reversed(captured):
+        for call in captured:
             if any(
                 isinstance(item, dict) and str(item.get("type") or "").strip().lower() == "image"
                 for item in call.messages
@@ -2061,7 +2287,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 selected_call = call
                 break
         if selected_call is None:
-            selected_call = captured[-1]
+            selected_call = captured[0]
         text_parts: list[str] = []
         image_path = ""
         extra_components: list[Any] = []
@@ -2199,6 +2425,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         )
         if not reviewed:
             return ""
+        reviewed = self._trim_proactive_status_inventory(reviewed)
+        reviewed = self._trim_performative_self_state_tail(reviewed)
         return self._normalize_proactive_sentence_flow(reviewed)
 
     def _proactive_reply_air_flags(
@@ -2305,6 +2533,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 
 要求：
 - 只输出要发送的正文
+- 不要把“用户”“对方”“收信人”这类内部称呼写进正文；需要称呼时用自然的“你”或对方昵称
 - 不要写成“好呀/确实/我也觉得/刚看到/你刚刚问我/你来找我了”
 - 不要把历史消息当成当前正在发生的对话
 - 没有真实图片或工具结果时，不要说已经发图、看图、转述或执行动作
@@ -2476,6 +2705,16 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if not cleaned:
             return ""
         lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        if len(lines) >= 2:
+            collapsed_lines = self._collapse_near_duplicate_proactive_lines(lines)
+            if len(collapsed_lines) < len(lines):
+                result = "\n".join(collapsed_lines).strip()
+                logger.info(
+                    "[PrivateCompanion] 主动消息已合并同轮近似候选: before=%s after=%s",
+                    _single_line(cleaned, 180),
+                    _single_line(result, 160),
+                )
+                return result or cleaned
         units: list[str] = []
         for line in lines or [cleaned]:
             units.extend(self._split_proactive_sentence_units(line))
@@ -2506,6 +2745,63 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if self._private_user_role(user) == "friend" and len(units) > 2:
             units = units[:2]
         return "\n".join(units).strip() or cleaned
+
+    def _proactive_candidate_core_text(self, text: str) -> str:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"^[\w\u4e00-\u9fffぁ-んァ-ヶー]{1,8}[，,、\s]+", "", cleaned)
+        cleaned = re.sub(r"^(?:早上好|早安|上午好|中午好|午安|下午好|晚上好)[。！？!?…~～,，\s]*", "", cleaned)
+        cleaned = re.sub(r"^(?:唔|嗯|诶|欸|啊|嗨|嘿)[。！？!?…~～,，\s]*", "", cleaned)
+        cleaned = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", cleaned)
+        filler_tokens = ("刚刚", "刚才", "现在", "今天", "这会儿", "好像", "感觉", "一点", "有点")
+        for token in filler_tokens:
+            cleaned = cleaned.replace(token, "")
+        return cleaned
+
+    def _proactive_candidate_bigrams(self, text: str) -> set[str]:
+        cleaned = self._proactive_candidate_core_text(text)
+        if len(cleaned) < 2:
+            return set()
+        return {cleaned[index : index + 2] for index in range(len(cleaned) - 1)}
+
+    def _collapse_near_duplicate_proactive_lines(self, lines: list[str]) -> list[str]:
+        kept: list[str] = []
+        for line in lines:
+            current = line.strip()
+            if not current:
+                continue
+            current_core = self._proactive_candidate_core_text(current)
+            duplicate_index = -1
+            for index, old in enumerate(kept):
+                old_core = self._proactive_candidate_core_text(old)
+                if not current_core or not old_core:
+                    continue
+                shorter = min(len(current_core), len(old_core))
+                if shorter < 8:
+                    continue
+                same_core = current_core == old_core
+                contained = current_core in old_core or old_core in current_core
+                current_bigrams = self._proactive_candidate_bigrams(current)
+                old_bigrams = self._proactive_candidate_bigrams(old)
+                bigram_overlap = 0.0
+                if current_bigrams and old_bigrams:
+                    bigram_overlap = len(current_bigrams & old_bigrams) / max(1, min(len(current_bigrams), len(old_bigrams)))
+                if same_core or contained or bigram_overlap >= 0.86:
+                    duplicate_index = index
+                    break
+            if duplicate_index < 0:
+                kept.append(current)
+                continue
+            old = kept[duplicate_index]
+            old_core = self._proactive_candidate_core_text(old)
+            prefer_current = (
+                len(current_core) < len(old_core)
+                or (len(current) + 6 < len(old) and not re.search(r"^(?:早上好|早安|上午好|中午好|午安|下午好|晚上好)", current))
+            )
+            if prefer_current:
+                kept[duplicate_index] = current
+        return kept
 
     def _should_drop_vague_generic_proactive(
         self,
@@ -2556,101 +2852,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             cleaned = re.sub(r"(呀|啦|嘛|哦|呢)(?=.*\1)", "", cleaned)
         return cleaned or str(text or "").strip()
 
-    def _action_style_hint(self, action: str, reason: str) -> str:
-        terms = self._worldview_terms()
-        if "screen_peek" in action:
-            return f"像刚瞄到一眼{terms['screen']}后随口留的一小句。可以轻轻吐槽或提醒,别复述画面,别分析,别显得很正式。"
-        if "photo_text" in action:
-            return "像路上看到什么顺手丢给熟人看。别认真讲图,只写那一下想发过去的感觉,话不要说满。"
-        if "poke" in action:
-            return "像刚戳完人又装没事。可以有点小坏,但别报数,也别解释为什么戳。"
-        if "voice" in action:
-            return "像刚发完语音又补一句文字。短一点,带一点刚说完话的余温,别写成说明。"
-        if reason == "morning_greeting":
-            return "像早上刚冒头时发来的消息。可以在语气上迷糊一点,但表达要清楚,不要把闹钟、起床过程或自己正在做什么当成主题；更像直接把早晨第一句话递过来。"
-        if reason == "noon_greeting":
-            return "像中午犯懒时发来的小消息。先从手边的小片段开口,比如刚坐下、刚吃完、午休前那一下发懒,再顺手碰到对方。别每次都问吃没吃。"
-        if reason == "evening_greeting":
-            return "像晚上终于安静下来以后发来的私聊。先落在眼前的晚上片段上,轻一点,别像群发问候,也别把想念说满。"
-        if reason == "group_share":
-            return f"像从共同{terms['group_chat']}里瞥见一小段对方可能会在意的内容,私下轻轻补一句。只说一个点,别像群聊日报,别逐条转述,也别固定用“群里刚刚”开头。"
-        if reason == "bili_video_share":
-            return f"像刚看到一个有意思的{terms['video']},忍不住私下递给对方。要短,别写成影评或推荐文案。"
-        if reason == "news_share":
-            return "像刚扫到一条新闻后私下随口提起。要有人格自己的反应,不要像新闻播报、标题党或时政评论。"
-        if reason == "web_exploration_share":
-            return "像刚按自己的兴趣上网查了点新东西,私下给熟人递一小句发现。要有自己的好奇或感受,不要像百科摘要。"
-        if reason == "jm_cosmos_share":
-            return f"像刚在{terms['bookshelf']}{terms['secret_drawer']}里翻了点漫画后自然冒出来的一句。害羞、坦然、嘴硬或转移话题都按人格来。"
-        if reason == "jm_cosmos_recommendation_request":
-            return "像忽然想找点新的私密阅读素材,于是私下问对方有没有推荐。可以撒娇、嘴硬、坦然或装作随口一问,尺度和反应按人格来。"
-        if reason == "creative_share":
-            return "像刚写自己的作品写到一个小片段,有点想给对方看一眼。可以害羞、卡文或吐槽,别像正式投稿。"
-        if reason in {"activity_share", "diary_share", "background_schedule"}:
-            return "像顺手分享日常小事。讲得具体一点,像‘我跟你说’后面的那半句,不要解释自己为什么发来。"
-        if reason in {"quiet_care", "state_share"}:
-            return "像忽然有点惦记。关心要具体,但可以侧着说,不要像健康提醒或客服回访。"
-        return "像私聊里随手冒出来的一句。短、自然,有一点在意就够,别把话说满。"
-
     def _format_action_prompt_context(self, action: str, action_context: str) -> str:
         context = str(action_context or "").strip()
-        terms = self._worldview_terms()
         if not context:
-            return f"只发一条普通{terms['private_chat']}文本,像顺手发给熟人的消息。"
-        if "群聊分享线索：" in context:
-            return (
-                f"你刚从共同{terms['group_chat']}里看到一小段对方可能会在意的内容,现在想私下轻轻提一句。\n"
-                f"{context}\n"
-                "最多一两句。优先讲“他错过的那个笑点/转折/气氛”,不要完整复盘整段群聊,不要逐条列人名,不要说自己在监控群聊,不要泄露隐私或评价群友关系。线索普通时语气要更轻,像顺手提到,不是正式转述。"
-            )
-        if "B站视频分享线索：" in context:
-            return (
-                f"你刚看到一个{terms['video']},现在想私下轻轻分享给对方。\n"
-                f"{context}\n"
-                "可以带上视频链接,但只用一句很自然的私聊口吻。不要说后台联动、插件、主动任务或日志,不要写成长推荐。"
-            )
-        if "JM阅读线索：" in context or "私密阅读线索：" in context:
-            return (
-                "你刚刚私下翻到一本漫画,现在可以按人格自然决定怎么和对方提。\n"
-                f"{context}\n"
-                "可以说读后余味、害羞吐槽、嘴硬否认或轻轻转移话题。不要说插件、后台联动、视觉模型或主动任务。"
-            )
-        if "夹层阅读推荐征求：" in context:
-            return (
-                f"你忽然想给{terms['bookshelf']}{terms['secret_drawer']}找点新的私密阅读素材,现在想私下问对方有没有推荐。\n"
-                f"{context}\n"
-                "开口方式、尺度和反应都按当前人格来。不要说插件、后台联动、视觉模型或主动任务。"
-            )
-        if "创作分享线索：" in context or "小说创作分享线索：" in context:
-            return (
-                "你最近因为生活小事、日记碎片或梦境灵感开了一个自己的文本作品,一直按自己的速度私下慢慢写。现在到了一个适合轻轻提起的小节点,想自然说一点。\n"
-                f"{context}\n"
-                "如果披露类型是 ask_impression,可以问对方读起来是什么感觉、哪个角色、句子或意象更戳他,把反馈当作灵感参考；不要让用户替你决定接下来怎么写,也不要问“你希望走哪个方向”。否则只分享一小段或一句。不要把整篇写完,不要像定期汇报,不要说模型生成、后台任务或创作系统。"
-            )
-        if "screen_peek" in action:
-            return (
-                "你刚刚瞄到对方屏幕上大概是这些："
-                f"{context}\n接下来像熟人私聊那样顺口说一句。别承认偷看,别复述屏幕,别写成分析。"
-            )
-        if "poke" in action:
-            return (
-                "你刚刚戳了对方一下。\n"
-                f"补充背景：{context}\n"
-                "接一句熟人间轻轻碰一下后的玩笑话就好,别解释机制,别报数,也别把没回复说成对方故意不理。"
-            )
-        if "voice" in action:
-            return (
-                "你刚刚发了一条语音。\n"
-                f"补充背景：{context}\n"
-                "再补一句像语音后面的短消息。别抄语音全文,也别提合成。"
-            )
-        if "photo_text" in action:
-            return (
-                "图片已经生成完成,稍后会作为单独的图片消息发送；你这里只需要写另一条配套的真人聊天文本。\n"
-                f"补充背景：{context}\n"
-                "不要说“图好了”“还在队列里”“等图出来”“已经发过去了”,不要写[图片],也不要解释生成流程。"
-            )
-        return context
+            return "普通文字"
+        return _single_line(self._sanitize_action_context_text(action, context), 420)
 
     def _sanitize_action_boundaries(
         self,
@@ -2821,7 +3027,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return "中午了诶。你吃东西没有,别又随便糊弄过去。"
         if reason in {"activity_share", "diary_share", "background_schedule"}:
             return "我刚刚想到一件小事,就想跟你说一下。"
-        return "我刚好空下来一点,就想问你一句。"
+        return "刚好到能休息一小会儿的时候,想问你一句。"
 
     async def _execute_proactive_action(
         self,
@@ -3186,7 +3392,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             third_weight += 0.06
         if reason in {"quiet_care", "check_in"}:
             second_weight += 0.08
-        if any(token in motive for token in ("闹你", "刷存在感", "碰你一下", "没忍住", "冒个头")):
+        if any(token in motive for token in ("轻轻叫你", "刷存在感", "碰你一下", "没忍住", "冒个头")):
             second_weight += 0.15
         if any(token in motive for token in ("偷偷看", "放心不下", "想起你", "不想吵你")):
             third_weight += 0.04
@@ -3216,7 +3422,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if action in {"voice", "photo_text"}:
             probability -= 0.02
         motive_text = str(motive or user.get("planned_proactive_motive") or "")
-        if any(token in motive_text for token in ("闹你", "戳", "碰碰你", "确认一下", "放心不下", "叫你一声")):
+        if any(token in motive_text for token in ("轻轻叫你", "戳", "碰碰你", "确认一下", "放心不下", "叫你一声")):
             probability += 0.08
         probability = max(0.0, min(0.72, probability))
         if random.random() >= probability:
@@ -3934,16 +4140,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         if not self.enable_photo_text_action:
             return "photo_text：未启用"
         if self._private_user_role(user) == "friend":
-            image_path = self._recent_owner_generated_photo_path()
-            if image_path:
-                return (
-                    "photo_text：复用主人最近生成的真实图片\n"
-                    f"图片类型：reused_owner_photo\n"
-                    f"后端：reuse\n"
-                    f"图片路径：{image_path}\n"
-                    "画面：复用主人最近生成过的一张生活碎片图。\n"
-                    "生图提示：复用既有图片,未调用生图后端"
-                )
+            return "photo_text：朋友关系不使用主动生图或复用主人图片,不能假装已经拍照"
         load_defer_note = self._photo_text_load_defer_note("photo_text", force_refresh=True)
         if load_defer_note:
             return f"photo_text：{load_defer_note},不能假装已经拍照"
@@ -3961,10 +4158,16 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             session_key=session_key,
         )
         if not image_path:
+            counted_attempt = self._photo_generation_failure_counts_as_attempt(workflow_note)
+            if counted_attempt:
+                async with self._data_lock:
+                    self._note_photo_generation_attempt(str(user.get("user_id") or ""), image_path="")
+                    self._save_data_sync()
             return (
                 "photo_text：生图失败,不能假装已经拍照\n"
                 f"画面草稿：{scene['caption']}\n"
                 f"失败原因：{_single_line(workflow_note, 160)}"
+                + ("\n本次已计入今日生图尝试额度,避免接口失败时反复请求。" if counted_attempt else "")
             )
         async with self._data_lock:
             self._note_photo_generation_attempt(str(user.get("user_id") or ""), image_path=image_path)
@@ -3978,11 +4181,414 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             f"生图提示：{_single_line(scene['prompt'], 240)}"
         )
 
+    def _photo_generation_failure_counts_as_attempt(self, note: str) -> bool:
+        text = _single_line(note, 500)
+        if not text:
+            return False
+        count_tokens = (
+            "HTTP",
+            "超时",
+            "请求",
+            "接口",
+            "上游",
+            "upstream",
+            "返回格式",
+            "未返回",
+            "返回空",
+            "下载",
+            "保存",
+            "响应不是图片",
+            "输出不是图片",
+            "工作流完成但图片",
+            "Error code",
+            "Exception",
+        )
+        if any(token in text for token in count_tokens):
+            return True
+        skip_tokens = (
+            "未启用",
+            "未配置",
+            "不可用或未配置",
+            "后端不可用",
+            "插件不可用",
+            "工作流名",
+            "未找到匹配工作流",
+            "电脑高负荷",
+            "负载偏高",
+            "今日发图额度",
+            "文本/聊天模型",
+            "请改成图片模型",
+        )
+        return not any(token in text for token in skip_tokens)
+
+    async def _ensure_daily_outfit_photo(
+        self,
+        diary: dict[str, Any] | None = None,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any] | None:
+        if not force and not getattr(self, "enable_daily_outfit_photo", False):
+            return None
+        today = _today_key()
+        async with self._data_lock:
+            existing = self.data.get("daily_outfit_photo") if isinstance(self.data.get("daily_outfit_photo"), dict) else {}
+            if existing.get("date") == today:
+                return dict(existing)
+        if not self.enable_photo_text_action:
+            return await self._record_daily_outfit_photo_result(today, "", "主动拍照/生图未开启")
+        if not self._photo_text_available():
+            return await self._record_daily_outfit_photo_result(today, "", "当前没有可用的生图后端")
+        prompt_text = self._build_daily_outfit_photo_prompt(diary if isinstance(diary, dict) else {})
+        backend_name, image_path, note = await self._generate_photo_image(
+            workflow_kind="selfie",
+            prompt_text=prompt_text,
+            session_key="daily_outfit",
+            image_size="1024x1024",
+        )
+        if image_path:
+            return await self._record_daily_outfit_photo_result(
+                today,
+                image_path,
+                "",
+                backend=backend_name,
+                prompt=prompt_text,
+                note=note,
+            )
+        return await self._record_daily_outfit_photo_result(
+            today,
+            "",
+            _single_line(note, 220) or "生图失败",
+            backend=backend_name,
+            prompt=prompt_text,
+            note=note,
+        )
+
+    async def _record_daily_outfit_photo_result(
+        self,
+        date_key: str,
+        image_path: str,
+        error: str = "",
+        *,
+        backend: str = "",
+        prompt: str = "",
+        note: str = "",
+    ) -> dict[str, Any]:
+        item = {
+            "date": _single_line(date_key, 20),
+            "path": _single_line(image_path, 300),
+            "error": _single_line(error, 240),
+            "backend": _single_line(backend, 80),
+            "prompt": _single_line(prompt, 500),
+            "note": _single_line(note, 220),
+            "generated_at": _now_ts(),
+        }
+        async with self._data_lock:
+            self.data["daily_outfit_photo"] = item
+            self._save_data_sync()
+        if image_path:
+            logger.info(
+                "[PrivateCompanion] 每日穿搭照片已生成: backend=%s path=%s",
+                _single_line(backend, 80) or "-",
+                _single_line(image_path, 160),
+            )
+        else:
+            logger.info("[PrivateCompanion] 每日穿搭照片未生成: %s", _single_line(error or note, 180))
+        return item
+
+    def _daily_outfit_schedule_text(self) -> str:
+        plan = self.data.get("daily_plan", {}) if isinstance(getattr(self, "data", {}), dict) else {}
+        if not isinstance(plan, dict):
+            return ""
+        items = plan.get("items")
+        if not isinstance(items, list) or not items:
+            return ""
+        lines: list[str] = []
+        for item in items[:12]:
+            if not isinstance(item, dict):
+                continue
+            time_text = _single_line(item.get("time"), 12)
+            activity = _single_line(item.get("activity"), 120)
+            mood = _single_line(item.get("mood"), 24)
+            if not activity:
+                continue
+            line = f"{time_text} {activity}".strip()
+            if mood:
+                line = f"{line}（{mood}）"
+            lines.append(line)
+        return _single_line("；".join(lines), 620)
+
+    def _build_daily_outfit_photo_prompt(self, diary: dict[str, Any]) -> str:
+        persona = self._daily_outfit_role_appearance_text()
+        style_name, style_instruction = self._get_photo_style_instruction()
+        state = self.data.get("daily_state", {}) if isinstance(getattr(self, "data", {}), dict) else {}
+        weather = self._format_weather_for_prompt() if callable(getattr(self, "_format_weather_for_prompt", None)) else ""
+        schedule_hint = self._daily_outfit_schedule_text()
+        diary_hint = _single_line(
+            (diary or {}).get("summary")
+            or (diary or {}).get("share_seed")
+            or (diary or {}).get("body"),
+            180,
+        )
+        custom = _single_line(getattr(self, "daily_outfit_photo_prompt", ""), 220)
+        parts = [
+            "在今日日程生成后,生成一张角色今天的自拍式穿搭照片,用于私人陪伴插件拓展页左上角封面。",
+            f"角色外貌与身份线索：{persona or '参考当前人格设定与人设参考图,保持角色外观稳定。'}",
+            f"今日状态：{self._format_state_for_prompt(state if isinstance(state, dict) else {})}",
+            f"天气与时令：{weather or '按当前日期和日常生活氛围处理。'}",
+            f"今日日程穿搭依据：{schedule_hint or '没有明确日程时,按普通居家日常处理。'}",
+            "穿搭决策：优先服从日程里明确出现的衣服、外套、校服、睡衣、发夹、饰品、出门、上课、运动、雨天或居家线索；如果一天有多段活动,选最能代表白天主要生活/外出安排的一套,不要只按深夜睡前状态生成睡衣。",
+            f"补充生活余味：{diary_hint or '暂无额外余味,主要服从今日日程、天气和状态来决定当天搭配。'}",
+            "画面要求：角色本人必须露脸,头部、脸、发型和表情完整入镜；可以是半身、七分身或全身,但绝不能裁掉头、遮住脸或只拍衣服。衣服搭配要清楚,姿态自然,像今天顺手拍下来的 selfie outfit photo。",
+            "尺寸与安全区：按 1:1 方形头像/封面构图生成,角色的脸、头发、肩颈和主要穿搭都要落在画面中央安全区内,四周留出足够边距,缩进方形卡片时也不能裁脸或裁身体主体。",
+            "构图要求：主体居中或略偏中,脸部位于画面上半部但要和画面上边缘保持明显留白,肩颈和上半身自然可见；不要极近自拍、手臂占据前景、无头构图、背影、低头挡脸、书本/手机/头发遮脸、只拍身体局部、只拍裙子或外套。",
+            "不要出现用户、其他人物、文字、水印、Logo、奇怪手指、暴露或色情内容。负面构图：cropped head, headless, faceless, face hidden, extreme close-up, arm in foreground, body only, outfit only, back view。",
+            f"风格：{style_name}；{style_instruction}",
+        ]
+        if custom:
+            parts.append(f"额外穿搭偏好：{custom}")
+        return _single_line(" ".join(parts), 1400)
+
+    def _daily_outfit_role_appearance_text(self) -> str:
+        persona = str(getattr(self, "schedule_persona_prompt", "") or "")
+        recognition = str(getattr(self, "private_image_self_recognition_hint", "") or "")
+        labels = {
+            "姓名",
+            "种族",
+            "性别",
+            "识别点",
+            "外貌",
+            "主要识别点",
+            "发型发色",
+            "发色",
+            "发型",
+            "瞳色",
+            "眼睛",
+            "服饰风格",
+            "服装",
+            "衣着",
+            "职业/身份",
+        }
+        parts: list[str] = []
+        for line in persona.replace("\r", "\n").split("\n"):
+            text = line.strip()
+            if not text or ("：" not in text and ":" not in text):
+                continue
+            label, value = text.split("：", 1) if "：" in text else text.split(":", 1)
+            label = label.strip()
+            value = _single_line(value, 160)
+            if label in labels and value:
+                parts.append(f"{label}：{value}")
+        if recognition:
+            parts.append(f"补充识别线索：{_single_line(recognition, 180)}")
+        seen: set[str] = set()
+        unique = []
+        for item in parts:
+            if item in seen:
+                continue
+            seen.add(item)
+            unique.append(item)
+        return _single_line("；".join(unique), 620)
+
     def _choose_photo_workflow_name(self, kind: str) -> str:
         normalized = str(kind or "").strip().lower()
         if normalized in {"selfie", "portrait", "自拍", "人像"}:
             return self.comfyui_selfie_workflow_name or self.comfyui_text2img_workflow_name
         return self.comfyui_text2img_workflow_name or self.comfyui_selfie_workflow_name
+
+    def _photo_generation_trace_id(self, session_key: str, workflow_kind: str) -> str:
+        seed = f"{session_key}|{workflow_kind}|{_now_ts()}|{uuid.uuid4().hex[:8]}"
+        return hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()[:10]
+
+    def _photo_generation_file_detail(self, image_path: str) -> str:
+        path_text = _single_line(image_path, 260)
+        if not path_text:
+            return "path=- exists=false size=0"
+        if re.match(r"^(?:https?://|data:|base64://)", path_text, flags=re.I):
+            return f"path={_single_line(path_text, 120)} exists=remote size=-"
+        local_text = path_text[len("file://"):] if path_text.startswith("file://") else path_text
+        try:
+            path = Path(local_text)
+            exists = path.exists() and path.is_file()
+            size = path.stat().st_size if exists else 0
+            return f"path={_single_line(str(path), 160)} exists={str(exists).lower()} size={size}"
+        except Exception:
+            return f"path={_single_line(path_text, 120)} exists=unknown size=-"
+
+    def _photo_generation_backend_config_summary(self) -> str:
+        external_base = _single_line(self._normalized_external_image_api_base_url(), 120)
+        if external_base:
+            external_base = re.sub(r"([?&](?:key|token|access_token|api_key)=)[^&]+", r"\1***", external_base, flags=re.I)
+        return (
+            f"preferred={_single_line(getattr(self, 'photo_generation_backend', ''), 30) or 'auto'} "
+            f"comfyui={self._comfyui_photo_available()} "
+            f"sdgen={self._sdgen_photo_available()} "
+            f"external={self._external_photo_available()} "
+            f"external_platform={self._resolved_external_image_api_platform()} "
+            f"external_model={_single_line(getattr(self, 'external_image_api_model', ''), 80) or '-'} "
+            f"external_size={_single_line(getattr(self, 'external_image_api_size', ''), 40) or '-'} "
+            f"external_base={external_base or '-'}"
+        )
+
+    def _record_recent_photo_generation(
+        self,
+        *,
+        trace_id: str,
+        session_key: str,
+        workflow_kind: str,
+        backend: str,
+        ok: bool,
+        prompt_text: str,
+        image_path: str = "",
+        note: str = "",
+        reference_image_path: str = "",
+        image_size: str = "",
+        elapsed_ms: int = 0,
+        presets: list[str] | None = None,
+    ) -> None:
+        try:
+            item = {
+                "ts": _now_ts(),
+                "trace": _single_line(trace_id, 40),
+                "session": _single_line(session_key, 100),
+                "kind": _single_line(workflow_kind, 30),
+                "backend": _single_line(backend, 80),
+                "ok": bool(ok),
+                "prompt": _single_line(prompt_text, 900),
+                "path": _single_line(image_path, 260),
+                "note": _single_line(note, 240),
+                "reference": bool(reference_image_path),
+                "reference_path": _single_line(reference_image_path, 260),
+                "image_size": _single_line(image_size, 40),
+                "elapsed_ms": int(max(0, elapsed_ms or 0)),
+                "presets": [_single_line(name, 40) for name in (presets or []) if _single_line(name, 40)][:6],
+            }
+            raw = self.data.setdefault("recent_photo_generations", [])
+            if not isinstance(raw, list):
+                raw = []
+                self.data["recent_photo_generations"] = raw
+            raw.insert(0, item)
+            del raw[12:]
+            self._save_data_sync()
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 记录最近生图提示词失败: %s", _single_line(exc, 120))
+
+    def _apply_photo_generation_fixed_prompt(self, prompt_text: str) -> str:
+        prompt = str(prompt_text or "").strip()
+        fixed = _single_line(getattr(self, "photo_generation_fixed_prompt", ""), 500)
+        if not fixed:
+            return prompt
+        if fixed in prompt:
+            return _single_line(prompt, 1800)
+        return _single_line(f"{prompt}\n\n【固定生图提示词】\n{fixed}".strip(), 1800)
+
+    def _builtin_photo_generation_scene_presets(self) -> dict[str, str]:
+        return {
+            "角色自拍": (
+                "角色本人出镜的自然自拍；必须露脸,脸、头发、表情和肩颈完整清晰；"
+                "像手机随手拍,构图有生活感,避免裁头、遮脸、背影、只拍身体或手臂占据前景。"
+            ),
+            "COS自拍": (
+                "角色穿着用户要求的 cosplay / 主题服装自拍；保留角色自身脸部、发色、瞳色和主要识别点；"
+                "服装主题明确但不过度暴露,画面像线下活动或房间试装自拍。"
+            ),
+            "镜前穿搭": (
+                "镜前或半身穿搭照片；衣服、外套、饰品和配色要清楚,角色脸部完整可见；"
+                "主体在方形安全区内,不要只拍衣服局部。"
+            ),
+            "头像特写": (
+                "适合头像的脸部特写；头发、眼睛和表情清晰,背景简洁,脸部居中且四周留白；"
+                "不要加文字、水印或复杂道具。"
+            ),
+            "房间日常": (
+                "室内生活碎片照片；桌面、小物、书本、杯子、窗边或床边等具体物件自然入镜；"
+                "不要堆太多主体,只保留一个清楚的生活切口。"
+            ),
+            "可拍画面": (
+                "像随手拍给熟人的一张具体画面；主体明确,光线自然,不写成空泛风景或天气播报；"
+                "画面里不要出现隐私屏幕、真实个人信息、无关文字和水印。"
+            ),
+            "表情包场景": (
+                "聊天可用的单张表情包或贴纸感画面；情绪明确、构图简洁、角色可爱夸张但仍可识别；"
+                "如需文字,只使用用户明确要求的短中文。"
+            ),
+        }
+
+    def _parse_photo_generation_scene_presets(self, raw: Any) -> dict[str, str]:
+        presets: dict[str, str] = {}
+        if isinstance(raw, dict):
+            iterable = raw.items()
+            for key, value in iterable:
+                name = _single_line(key, 40)
+                prompt = _single_line(value, 900)
+                if name and prompt:
+                    presets[name] = prompt
+            return presets
+        items: list[Any] = []
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, str):
+            text = raw.replace("\r\n", "\n").replace("\r", "\n")
+            items = [line for line in text.split("\n") if str(line or "").strip()]
+        for item in items:
+            if isinstance(item, dict):
+                name = _single_line(item.get("name") or item.get("key") or item.get("title"), 40)
+                prompt = _single_line(item.get("prompt") or item.get("value") or item.get("content"), 900)
+            else:
+                text = str(item or "").strip()
+                if ":" in text:
+                    name, prompt = text.split(":", 1)
+                elif "：" in text:
+                    name, prompt = text.split("：", 1)
+                else:
+                    continue
+                name = _single_line(name, 40)
+                prompt = _single_line(prompt, 900)
+            if name and prompt:
+                presets[name] = prompt
+        return presets
+
+    def _photo_generation_scene_presets(self) -> dict[str, str]:
+        presets = self._builtin_photo_generation_scene_presets()
+        presets.update(self._parse_photo_generation_scene_presets(getattr(self, "photo_generation_scene_presets", "")))
+        return presets
+
+    def _photo_generation_preset_names_for_prompt(self, workflow_kind: str, prompt_text: str) -> list[str]:
+        kind = str(workflow_kind or "").strip().lower()
+        text = _single_line(prompt_text, 1200).lower()
+        names: list[str] = []
+        if kind in {"selfie", "portrait", "自拍", "人像"}:
+            if re.search(r"\bcos\b|cosplay|角色扮演|扮成|神灯|制服|女仆|巫女|魔法少女", text, flags=re.I):
+                names.append("COS自拍")
+            elif any(token in text for token in ("穿搭", "衣服", "外套", "校服", "裙", "镜前")):
+                names.append("镜前穿搭")
+            elif any(token in text for token in ("头像", "特写", "大头")):
+                names.append("头像特写")
+            else:
+                names.append("角色自拍")
+        else:
+            if any(token in text for token in ("表情包", "贴纸", "sticker", "meme")):
+                names.append("表情包场景")
+            elif any(token in text for token in ("房间", "桌", "书", "杯", "床", "窗边", "室内")):
+                names.append("房间日常")
+            else:
+                names.append("可拍画面")
+        return list(dict.fromkeys(names))[:3]
+
+    def _apply_photo_generation_scene_presets(self, prompt_text: str, workflow_kind: str) -> tuple[str, list[str]]:
+        prompt = str(prompt_text or "").strip()
+        presets = self._photo_generation_scene_presets()
+        names = [name for name in self._photo_generation_preset_names_for_prompt(workflow_kind, prompt) if name in presets]
+        if not names:
+            return _single_line(prompt, 1800), []
+        blocks = []
+        for name in names:
+            content = _single_line(presets.get(name), 900)
+            if content and content not in prompt:
+                blocks.append(f"{name}: {content}")
+        if not blocks:
+            return _single_line(prompt, 1800), names
+        merged = f"{prompt}\n\n【生图场景预设】\n" + "\n".join(blocks)
+        return _single_line(merged, 1800), names
 
     async def _generate_photo_image(
         self,
@@ -3990,46 +4596,120 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         workflow_kind: str,
         prompt_text: str,
         session_key: str,
+        reference_image_path: str = "",
+        image_size: str = "",
     ) -> tuple[str, str, str]:
+        started = time.time()
+        trace_id = self._photo_generation_trace_id(session_key, workflow_kind)
+        prompt_text, preset_names = self._apply_photo_generation_scene_presets(prompt_text, workflow_kind)
+        prompt_text = self._apply_photo_generation_fixed_prompt(prompt_text)
+        reference_image_path = _single_line(reference_image_path, 260)
+        if not reference_image_path:
+            reference_image_path = await self._photo_persona_reference_image_for_kind_async(workflow_kind)
         preferred = self.photo_generation_backend
+        try:
+            reference_exists = bool(reference_image_path and Path(reference_image_path).exists())
+        except (OSError, ValueError):
+            reference_exists = False
+        logger.info(
+            "[PrivateCompanion] 生图开始: trace=%s session=%s kind=%s presets=%s prompt_chars=%s prompt=%s reference=%s reference_exists=%s image_size=%s %s",
+            trace_id,
+            _single_line(session_key, 80),
+            _single_line(workflow_kind, 30),
+            ",".join(preset_names) or "-",
+            len(str(prompt_text or "")),
+            _single_line(prompt_text, 180),
+            bool(reference_image_path),
+            reference_exists,
+            _single_line(image_size, 40) or "-",
+            self._photo_generation_backend_config_summary(),
+        )
+
+        def finish(backend: str, image_path: str, note: str) -> tuple[str, str, str]:
+            elapsed_ms = int((time.time() - started) * 1000)
+            ok = bool(image_path)
+            self._record_recent_photo_generation(
+                trace_id=trace_id,
+                session_key=session_key,
+                workflow_kind=workflow_kind,
+                backend=backend,
+                ok=ok,
+                prompt_text=prompt_text,
+                image_path=image_path,
+                note=note,
+                reference_image_path=reference_image_path,
+                image_size=image_size,
+                elapsed_ms=elapsed_ms,
+                presets=preset_names,
+            )
+            logger.info(
+                "[PrivateCompanion] 生图结束: trace=%s ok=%s backend=%s elapsed=%sms note=%s %s",
+                trace_id,
+                ok,
+                _single_line(backend, 60),
+                elapsed_ms,
+                _single_line(note, 220),
+                self._photo_generation_file_detail(image_path),
+            )
+            return backend, image_path, note
+
         if preferred == "comfyui":
             if not self._comfyui_photo_available():
-                return "ComfyUI", "", "ComfyUI 后端不可用或未配置"
+                return finish("ComfyUI", "", "ComfyUI 后端不可用或未配置")
             busy_state = self._local_photo_generation_busy_state(force_refresh=True)
             if busy_state:
-                return "ComfyUI", "", f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）"
+                return finish("ComfyUI", "", f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）")
             workflow_name = self._choose_photo_workflow_name(workflow_kind)
             if not workflow_name:
-                return "ComfyUI", "", f"未配置 {workflow_kind} 对应的 ComfyUI 工作流"
+                return finish("ComfyUI", "", f"未配置 {workflow_kind} 对应的 ComfyUI 工作流")
             image_path, note = await self._run_comfyui_photo_workflow(
                 workflow_name,
                 prompt_text,
                 session_key=session_key,
+                reference_image_path=reference_image_path,
             )
-            return "ComfyUI", image_path, note
+            return finish("ComfyUI", image_path, note)
         if preferred == "sdgen":
             if not self._sdgen_photo_available():
-                return "SDGen", "", "SDGen 插件不可用或未配置"
+                return finish("SDGen", "", "SDGen 插件不可用或未配置")
             busy_state = self._local_photo_generation_busy_state(force_refresh=True)
             if busy_state:
-                return "SDGen", "", f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）"
+                return finish("SDGen", "", f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）")
             image_path, note = await self._run_sdgen_photo_generation(
                 prompt_text,
                 session_key=session_key,
             )
-            return "SDGen", image_path, note
+            return finish("SDGen", image_path, note)
         if preferred == "external":
             if not self._external_photo_available():
-                return "在线图片 API", "", "在线图片 API 后端不可用或未配置"
+                return finish("在线图片 API", "", "在线图片 API 后端不可用或未配置")
             image_path, note = await self._run_external_photo_generation(
                 prompt_text,
                 session_key=session_key,
+                reference_image_path=reference_image_path,
+                image_size=image_size,
             )
-            return "在线图片 API", image_path, note
+            return finish("在线图片 API", image_path, note)
+        external_note = ""
+        if self._external_photo_available():
+            image_path, note = await self._run_external_photo_generation(
+                prompt_text,
+                session_key=session_key,
+                reference_image_path=reference_image_path,
+                image_size=image_size,
+            )
+            if image_path:
+                return finish("在线图片 API", image_path, note)
+            external_note = note
+            logger.info("[PrivateCompanion] 生图后端回退: trace=%s backend=external note=%s", trace_id, _single_line(note, 180))
+        else:
+            external_note = "在线图片 API 后端不可用或未配置"
+            logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=external note=%s", trace_id, external_note)
         if self._comfyui_photo_available():
             busy_state = self._local_photo_generation_busy_state(force_refresh=True)
             if busy_state:
                 comfyui_note = f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）"
+                logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=comfyui note=%s", trace_id, _single_line(comfyui_note, 180))
             else:
                 workflow_name = self._choose_photo_workflow_name(workflow_kind)
                 if workflow_name:
@@ -4037,37 +4717,36 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                         workflow_name,
                         prompt_text,
                         session_key=session_key,
+                        reference_image_path=reference_image_path,
                     )
                     if image_path:
-                        return "ComfyUI", image_path, note
+                        return finish("ComfyUI", image_path, note)
                     comfyui_note = note
+                    logger.info("[PrivateCompanion] 生图后端回退: trace=%s backend=comfyui note=%s", trace_id, _single_line(note, 180))
                 else:
                     comfyui_note = f"未配置 {workflow_kind} 对应的 ComfyUI 工作流"
+                    logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=comfyui note=%s", trace_id, _single_line(comfyui_note, 180))
         else:
             comfyui_note = "ComfyUI 后端不可用或未配置"
+            logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=comfyui note=%s", trace_id, comfyui_note)
         if self._sdgen_photo_available():
             busy_state = self._local_photo_generation_busy_state(force_refresh=True)
             if busy_state:
                 sdgen_note = f"电脑高负荷,已跳过本地生图（{busy_state.get('reason') or '负载偏高'}）"
+                logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=sdgen note=%s", trace_id, _single_line(sdgen_note, 180))
             else:
                 image_path, note = await self._run_sdgen_photo_generation(
                     prompt_text,
                     session_key=session_key,
                 )
                 if image_path:
-                    return "SDGen", image_path, note
+                    return finish("SDGen", image_path, note)
                 sdgen_note = note
+                logger.info("[PrivateCompanion] 生图后端回退: trace=%s backend=sdgen note=%s", trace_id, _single_line(note, 180))
         else:
             sdgen_note = "SDGen 插件不可用或未配置"
-        if self._external_photo_available():
-            image_path, note = await self._run_external_photo_generation(
-                prompt_text,
-                session_key=session_key,
-            )
-            if image_path:
-                return "在线图片 API", image_path, note
-            return "在线图片 API", "", f"ComfyUI 失败：{comfyui_note}；SDGen 失败：{sdgen_note}；在线图片 API 失败：{note}"
-        return "SDGen", "", f"ComfyUI 失败：{comfyui_note}；SDGen 失败：{sdgen_note}"
+            logger.info("[PrivateCompanion] 生图后端跳过: trace=%s backend=sdgen note=%s", trace_id, sdgen_note)
+        return finish("在线图片 API", "", f"在线图片 API 失败：{external_note}；ComfyUI 失败：{comfyui_note}；SDGen 失败：{sdgen_note}")
 
     async def _build_photo_scene_prompt(
         self, user: dict[str, Any], name: str, reason: str
@@ -4093,14 +4772,12 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 【当前日程背景】
 {self._format_plan_item_for_prompt(current_item)}
 
-{self._format_worldview_adaptation_prompt()}
-
 【这次想分享的画面钩子】
 话题：{topic_hint or '（未指定）'}
 那一刻的小动机：{motive_hint or '（未指定）'}
 
 【内容选择菜单】
-{self._format_content_choice_options_for_prompt()}
+{self._format_content_choice_options_for_prompt("photo_text")}
 
 【生图风格】
 {style_name}
@@ -4117,7 +4794,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
 
 要求：
 1. 画面必须符合当前时间、日程和人格,不要把身份设定里没有的场景、职业、服装或外观细节写进去。
-2. 图片不要总是天气或窗外。先从“内容选择菜单”里选一个方向,再结合当前日程、话题和人格生成具体主体。
+2. 图片不要总是天气或窗外。先从“内容选择菜单”里单选一个视觉锚点；当前日程、话题和人格只用于筛选主体和调整画面气质,不要把多个主体拼在一张图里。
 3. 可以是路上风景、桌面小物、随手自拍、偶遇小动物等,但不要每次都是自拍；没有明确自拍动机时优先 text2img。
 4. `prompt` 里要明确体现上面的风格要求。
 5. 不要包含 NSFW、隐私信息、用户真实电脑画面。
@@ -4165,8 +4842,72 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return "其他", "保持统一审美风格,自然生活感,避免默认写实照片风格"
         return "真实", "真实摄影风格,像手机随手拍到的生活照片,光线自然,细节可信"
 
+    def _photo_persona_reference_image_path(self) -> str:
+        raw = _single_line(getattr(self, "photo_persona_reference_image_path", ""), 1000)
+        if not raw:
+            return ""
+        raw = raw.strip().strip('"').strip("'")
+        if re.match(r"^https?://", raw, flags=re.I):
+            return ""
+        candidates = [Path(raw).expanduser()]
+        if not candidates[0].is_absolute():
+            candidates.append(Path(self.data_dir) / raw)
+        for candidate in candidates:
+            try:
+                path = candidate.resolve()
+            except Exception:
+                path = candidate
+            if not path.exists() or not path.is_file():
+                continue
+            if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                continue
+            return str(path)
+        return ""
+
+    def _photo_persona_reference_image_for_kind(self, workflow_kind: str) -> str:
+        if str(workflow_kind or "").strip().lower() not in {"selfie", "portrait", "自拍", "人像"}:
+            return ""
+        return self._photo_persona_reference_image_path()
+
+    async def _photo_persona_reference_image_path_async(self) -> str:
+        local_path = self._photo_persona_reference_image_path()
+        if local_path:
+            return local_path
+        raw = _single_line(getattr(self, "photo_persona_reference_image_path", ""), 1000).strip().strip('"').strip("'")
+        if not raw or not re.match(r"^https?://", raw, flags=re.I):
+            return ""
+        resolver = getattr(self, "_photo_reference_source_to_stable_path", None)
+        if not callable(resolver):
+            return ""
+        try:
+            stable_path = await resolver(raw, stem="config_url_reference")
+        except Exception as exc:
+            logger.info("[PrivateCompanion] 配置页人设参考图 URL 下载失败: %s url=%s", _single_line(exc, 120), _single_line(raw, 120))
+            return ""
+        if not stable_path:
+            logger.info("[PrivateCompanion] 配置页人设参考图 URL 未能转为本地参考图: url=%s", _single_line(raw, 120))
+            return ""
+        setter = getattr(self, "_set_photo_reference_config_path", None)
+        if callable(setter):
+            try:
+                setter(stable_path)
+            except Exception as exc:
+                logger.info("[PrivateCompanion] 配置页人设参考图 URL 已下载但回写失败: %s path=%s", _single_line(exc, 120), _single_line(stable_path, 160))
+        logger.info("[PrivateCompanion] 配置页人设参考图 URL 已缓存为本地文件: path=%s", _single_line(stable_path, 160))
+        return stable_path
+
+    async def _photo_persona_reference_image_for_kind_async(self, workflow_kind: str) -> str:
+        if str(workflow_kind or "").strip().lower() not in {"selfie", "portrait", "自拍", "人像"}:
+            return ""
+        return await self._photo_persona_reference_image_path_async()
+
     async def _run_comfyui_photo_workflow(
-        self, workflow_name: str, prompt_text: str, session_key: str
+        self,
+        workflow_name: str,
+        prompt_text: str,
+        session_key: str,
+        reference_image_path: str = "",
+        image_size: str = "",
     ) -> tuple[str, str]:
         module = self._get_comfyui_module()
         if module is None:
@@ -4177,22 +4918,56 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         try:
             server_ip, client_id = module._get_server_config(config)
             workflow_dir = module._get_workflow_dir()
-            workflow_file = module.find_workflow_file(
-                workflow_name,
-                1,
-                0,
-                0,
-                workflow_dir,
-            )
+            reference_image_path = _single_line(reference_image_path, 260)
+            use_reference_image = bool(reference_image_path and os.path.exists(reference_image_path))
+            workflow_file = ""
             text_count = 1
+            image_count = 0
+            if use_reference_image:
+                workflow_file = module.find_workflow_file(
+                    workflow_name,
+                    1,
+                    1,
+                    0,
+                    workflow_dir,
+                )
+                image_count = 1 if workflow_file else 0
+                if not workflow_file:
+                    workflow_file, text_count, image_count = self._find_photo_workflow_with_text_count(
+                        module,
+                        workflow_dir,
+                        workflow_name,
+                        image_count=1,
+                    )
             if not workflow_file:
-                workflow_file, text_count = self._find_photo_workflow_with_text_count(
+                workflow_file = module.find_workflow_file(
+                    workflow_name,
+                    1,
+                    0,
+                    0,
+                    workflow_dir,
+                )
+                image_count = 0
+            if not workflow_file:
+                workflow_file, text_count, image_count = self._find_photo_workflow_with_text_count(
                     module,
                     workflow_dir,
                     workflow_name,
+                    image_count=0,
                 )
             if not workflow_file:
-                return "", f"未找到匹配工作流 {workflow_name}（需要 images=0, videos=0）"
+                need = "images=1 或 images=0" if use_reference_image else "images=0"
+                return "", f"未找到匹配工作流 {workflow_name}（需要 texts>=1、{need}、videos=0）"
+            logger.info(
+                "[PrivateCompanion] ComfyUI 生图提交准备: workflow=%s file=%s text_count=%s image_count=%s reference=%s wait=%ss prompt=%s",
+                _single_line(workflow_name, 80),
+                _single_line(workflow_file, 160),
+                text_count,
+                image_count,
+                use_reference_image,
+                self.comfyui_photo_wait_seconds,
+                _single_line(prompt_text, 180),
+            )
             debug = bool(
                 getattr(config, "debug_mode", False)
                 if not isinstance(config, dict)
@@ -4200,11 +4975,24 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             )
             workflow = module.ComfyUIWorkflow(server_ip, client_id)
             workflow.load_workflow_api(workflow_file)
+            input_images = [reference_image_path] if image_count > 0 and use_reference_image else []
+            reference_note = ""
+            if input_images:
+                reference_note = "；已使用本地人设参考图"
+            elif use_reference_image:
+                reference_note = "；自拍工作流未接收图片输入,已回退纯文生图"
             prompt_id = await workflow.submit_only(
-                [],
+                input_images,
                 [prompt_text] * max(1, text_count),
                 [],
                 debug=debug,
+            )
+            logger.info(
+                "[PrivateCompanion] ComfyUI 生图已提交: workflow=%s prompt_id=%s input_images=%s text_count=%s",
+                _single_line(workflow_name, 80),
+                _single_line(prompt_id, 80),
+                len(input_images),
+                text_count,
             )
             deadline = _now_ts() + self.comfyui_photo_wait_seconds
             while _now_ts() < deadline:
@@ -4217,10 +5005,29 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                         temp_path,
                         session_key or "private_companion",
                     )
-                    return persistent_path or temp_path, "ok"
+                    logger.info(
+                        "[PrivateCompanion] ComfyUI 生图完成: prompt_id=%s temp=%s persistent=%s note=%s",
+                        _single_line(prompt_id, 80),
+                        _single_line(temp_path, 160),
+                        _single_line(persistent_path, 160),
+                        reference_note or "ok",
+                    )
+                    return persistent_path or temp_path, "ok" + reference_note
                 if url and file_type != "image":
+                    logger.info(
+                        "[PrivateCompanion] ComfyUI 生图输出类型不符: prompt_id=%s file_type=%s url=%s",
+                        _single_line(prompt_id, 80),
+                        _single_line(file_type, 40),
+                        _single_line(url, 160),
+                    )
                     return "", f"工作流输出不是图片：{file_type}"
                 await asyncio.sleep(2)
+            logger.info(
+                "[PrivateCompanion] ComfyUI 生图等待超时: workflow=%s prompt_id=%s wait=%ss",
+                _single_line(workflow_name, 80),
+                _single_line(prompt_id, 80),
+                self.comfyui_photo_wait_seconds,
+            )
             return "", f"等待 ComfyUI 结果超时（{self.comfyui_photo_wait_seconds}s）"
         except Exception as e:
             logger.warning(f"[PrivateCompanion] photo_text 生图失败: {e}", exc_info=True)
@@ -4270,12 +5077,20 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             build_prompt = getattr(plugin, "_build_positive_prompt", None)
             if callable(build_prompt):
                 positive_prompt = build_prompt(prompt_text, "")
+            logger.info(
+                "[PrivateCompanion] SDGen 生图提交: session=%s prompt=%s positive_chars=%s",
+                _single_line(session_key, 80),
+                _single_line(prompt_text, 180),
+                len(str(positive_prompt or "")),
+            )
             response = await plugin._call_t2i_api(positive_prompt)
             images = response.get("images") if isinstance(response, dict) else None
             if not isinstance(images, list) or not images:
+                logger.info("[PrivateCompanion] SDGen 生图未返回图片: response_type=%s", type(response).__name__)
                 return "", "SDGen 未返回图片"
             image = str(images[0] or "").strip()
             if not image:
+                logger.info("[PrivateCompanion] SDGen 生图返回空图片字段")
                 return "", "SDGen 返回空图片"
             config = getattr(plugin, "config", {}) or {}
             try:
@@ -4293,24 +5108,281 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 session_key=session_key,
                 ext=".png",
             )
+            logger.info(
+                "[PrivateCompanion] SDGen 生图完成: images=%s path=%s bytes=%s",
+                len(images),
+                _single_line(path, 160),
+                len(image_bytes),
+            )
             return path, "ok" if path else "保存 SDGen 图片失败"
         except Exception as e:
             logger.warning(f"[PrivateCompanion] SDGen 生图失败: {e}", exc_info=True)
             return "", str(e)
 
-    def _external_image_endpoint(self) -> str:
-        base = str(self.external_image_api_base_url or "").strip().rstrip("/")
+    def _resolved_external_image_api_platform(self) -> str:
+        normalizer = getattr(self, "_normalize_external_image_api_platform", None)
+        configured = getattr(self, "external_image_api_platform", "auto")
+        platform = normalizer(configured) if callable(normalizer) else str(configured or "auto").strip().lower()
+        if platform in {"openai", "bailian"}:
+            return platform
+        base = self._normalized_external_image_api_base_url(platform=platform).lower()
+        model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
+        if any(token in base for token in ("dashscope.aliyuncs.com", "/services/aigc/", "/api/v1/tasks", "model-studio")):
+            return "bailian"
+        if model.startswith(("qwen-image", "wanx", "wan-", "wan2.", "wan2x", "wan")):
+            return "bailian"
+        return "openai"
+
+    def _normalized_external_image_api_base_url(self, value: str = "", *, platform: str = "") -> str:
+        raw = str(value or getattr(self, "external_image_api_base_url", "") or "").strip()
+        if not raw:
+            return ""
+        if platform:
+            resolved_platform = str(platform).strip().lower()
+        else:
+            normalizer = getattr(self, "_normalize_external_image_api_platform", None)
+            configured = getattr(self, "external_image_api_platform", "auto")
+            resolved_platform = normalizer(configured) if callable(normalizer) else str(configured or "auto").strip().lower()
+        parsed = urlparse(raw)
+        host = (parsed.netloc or "").strip().lower()
+        path = (parsed.path or "").strip()
+
+        console_hosts = {
+            "bailian.console.aliyun.com",
+            "modelstudio.console.aliyun.com",
+            "bailian.console.alibabacloud.com",
+            "modelstudio.console.alibabacloud.com",
+        }
+        shared_host_by_region = {
+            "cn-beijing": "dashscope.aliyuncs.com",
+            "ap-southeast-1": "dashscope-intl.aliyuncs.com",
+            "us-east-1": "dashscope-us.aliyuncs.com",
+            "us-virginia": "dashscope-us.aliyuncs.com",
+        }
+
+        def _root_with_host(target_host: str) -> str:
+            if not target_host:
+                return raw.rstrip("/")
+            scheme = parsed.scheme or "https"
+            suffix = "/compatible-mode/v1" if resolved_platform == "openai" else "/api/v1"
+            return f"{scheme}://{target_host}{suffix}"
+
+        if host in console_hosts:
+            region = ""
+            parts = [part for part in path.split("/") if part]
+            if parts:
+                first = parts[0].strip().lower()
+                if re.fullmatch(r"[a-z]{2}(?:-[a-z0-9]+)+", first):
+                    region = first
+            if not region:
+                fragment = str(parsed.fragment or "")
+                region_match = re.search(r"\b(cn-beijing|ap-southeast-1|us-east-1|us-virginia)\b", raw, flags=re.I)
+                if region_match:
+                    region = region_match.group(1).lower()
+                elif fragment:
+                    fragment_match = re.search(r"\b(cn-beijing|ap-southeast-1|us-east-1|us-virginia)\b", fragment, flags=re.I)
+                    if fragment_match:
+                        region = fragment_match.group(1).lower()
+            mapped_host = shared_host_by_region.get(region, "dashscope.aliyuncs.com")
+            return _root_with_host(mapped_host)
+
+        if host in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com"} or host.endswith(".maas.aliyuncs.com"):
+            if resolved_platform == "openai":
+                if "/images/" in path or path.endswith("/chat/completions") or "/audio/" in path:
+                    prefix_match = re.match(r"^(.*?/compatible-mode/v1)(?:/.*)?$", path, flags=re.I)
+                    prefix = prefix_match.group(1) if prefix_match else "/compatible-mode/v1"
+                    return f"{parsed.scheme or 'https'}://{host}{prefix}"
+                return f"{parsed.scheme or 'https'}://{host}/compatible-mode/v1"
+            if path.startswith("/api/v1"):
+                api_root = re.match(r"^(.*?/api/v1)(?:/.*)?$", path, flags=re.I)
+                if api_root:
+                    return f"{parsed.scheme or 'https'}://{host}{api_root.group(1)}"
+            return f"{parsed.scheme or 'https'}://{host}/api/v1"
+
+        if resolved_platform == "bailian":
+            if "/compatible-mode/v1" in raw.lower():
+                return re.sub(r"/compatible-mode/v1(?:/.*)?$", "/api/v1", raw, flags=re.I).rstrip("/")
+            task_root = re.sub(r"/tasks(?:/.*)?$", "", raw, flags=re.I)
+            if task_root != raw:
+                return task_root.rstrip("/")
+        elif resolved_platform == "openai":
+            if re.search(r"/api/v1(?:/services/aigc/.*)?$", raw, flags=re.I):
+                root = re.sub(r"/api/v1(?:/services/aigc/.*)?$", "", raw, flags=re.I).rstrip("/")
+                return f"{root}/compatible-mode/v1"
+
+        return raw.rstrip("/")
+
+    def _external_image_platform_label(self, platform: str = "") -> str:
+        resolved = str(platform or self._resolved_external_image_api_platform() or "").strip().lower()
+        if resolved == "bailian":
+            return "阿里云百炼"
+        if resolved == "openai":
+            return "OpenAI 兼容"
+        return "在线图片 API"
+
+    def _external_image_endpoint(self, endpoint_type: str = "generations") -> str:
+        base = self._normalized_external_image_api_base_url(platform="openai").rstrip("/")
         if not base:
             return ""
-        if base.endswith("/images/generations"):
+        endpoint_type = str(endpoint_type or "generations").strip().lower()
+        target = "edits" if endpoint_type == "edits" else "generations"
+        if base.endswith(f"/images/{target}"):
             return base
-        return f"{base}/images/generations"
+        if base.endswith("/images/generations") or base.endswith("/images/edits"):
+            return re.sub(r"/images/(?:generations|edits)$", f"/images/{target}", base)
+        return f"{base}/images/{target}"
 
-    def _sanitize_external_image_size(self) -> str:
-        raw = str(self.external_image_api_size or "1024x1024").strip().lower()
+    def _sanitize_external_image_size(self, override: str = "") -> str:
+        raw = str(override or self.external_image_api_size or "1024x1024").strip().lower()
         if re.fullmatch(r"\d{2,5}x\d{2,5}", raw):
             return raw
         return "1024x1024"
+
+    def _sanitize_bailian_image_size(self, override: str = "") -> str:
+        size = self._sanitize_external_image_size(override)
+        return size.replace("x", "*")
+
+    def _bailian_api_root(self) -> str:
+        base = self._normalized_external_image_api_base_url(platform="bailian").rstrip("/")
+        if not base:
+            return ""
+        known_suffixes = (
+            "/services/aigc/multimodal-generation/generation",
+            "/services/aigc/image-generation/generation",
+            "/services/aigc/text2image/image-synthesis",
+        )
+        for suffix in known_suffixes:
+            if base.endswith(suffix):
+                return base[: -len(suffix)]
+        task_match = re.match(r"^(https?://.+?/api/v1)/tasks(?:/.*)?$", base, flags=re.I)
+        if task_match:
+            return task_match.group(1).rstrip("/")
+        api_match = re.match(r"^(https?://.+?/api/v1)(?:/.*)?$", base, flags=re.I)
+        if api_match:
+            return api_match.group(1).rstrip("/")
+        if re.match(r"^https?://[^/]+$", base, flags=re.I):
+            return f"{base}/api/v1"
+        return base if base.endswith("/api/v1") else f"{base}/api/v1"
+
+    def _bailian_multimodal_endpoint(self) -> str:
+        base = str(self.external_image_api_base_url or "").strip().rstrip("/")
+        if base.endswith("/services/aigc/multimodal-generation/generation"):
+            return base
+        root = self._bailian_api_root()
+        return f"{root}/services/aigc/multimodal-generation/generation" if root else ""
+
+    def _bailian_async_generation_endpoints(self) -> list[str]:
+        base = str(self.external_image_api_base_url or "").strip().rstrip("/")
+        root = self._bailian_api_root()
+        candidates: list[str] = []
+        for value in (
+            base if base.endswith("/services/aigc/image-generation/generation") else "",
+            base if base.endswith("/services/aigc/text2image/image-synthesis") else "",
+            f"{root}/services/aigc/image-generation/generation" if root else "",
+            f"{root}/services/aigc/text2image/image-synthesis" if root else "",
+        ):
+            cleaned = str(value or "").strip().rstrip("/")
+            if cleaned and cleaned not in candidates:
+                candidates.append(cleaned)
+        return candidates
+
+    def _bailian_task_endpoint(self, task_id: str) -> str:
+        root = self._bailian_api_root()
+        safe_task_id = quote(str(task_id or "").strip(), safe="")
+        return f"{root}/tasks/{safe_task_id}" if root and safe_task_id else ""
+
+    def _bailian_prefers_multimodal(self) -> bool:
+        model = str(getattr(self, "external_image_api_model", "") or "").strip().lower()
+        return "qwen-image" in model or "image-edit" in model
+
+    async def _reference_image_to_data_url(self, reference_image_path: str) -> str:
+        path = Path(str(reference_image_path or ""))
+        if not path.exists() or not path.is_file():
+            return ""
+        suffix = path.suffix.lower()
+        mime_type = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }.get(suffix)
+        if not mime_type:
+            return ""
+        image_bytes = await asyncio.to_thread(path.read_bytes)
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+
+    async def _materialize_external_image_value(
+        self,
+        image_value: Any,
+        *,
+        session_key: str,
+        success_note: str = "ok",
+    ) -> tuple[str, str]:
+        if isinstance(image_value, dict):
+            image_value = image_value.get("url") or image_value.get("image") or image_value.get("image_url") or ""
+        raw = str(image_value or "").strip()
+        if not raw:
+            return "", "图片结果为空"
+        if raw.lower().startswith("data:image") and "," in raw:
+            header, encoded = raw.split(",", 1)
+            mime_match = re.match(r"data:(image/[a-z0-9.+-]+);base64$", header.strip(), flags=re.I)
+            ext = ".png"
+            if mime_match:
+                mime_type = mime_match.group(1).lower()
+                if "jpeg" in mime_type or "jpg" in mime_type:
+                    ext = ".jpg"
+                elif "webp" in mime_type:
+                    ext = ".webp"
+            image_bytes = base64.b64decode(encoded)
+            saved = await self._save_external_generated_image(image_bytes, session_key=session_key, ext=ext)
+            return saved, success_note if saved else "保存在线图片失败"
+        if re.fullmatch(r"[A-Za-z0-9+/=\\s]+", raw) and len(raw) > 128:
+            try:
+                image_bytes = base64.b64decode(raw)
+                saved = await self._save_external_generated_image(image_bytes, session_key=session_key, ext=".png")
+                if saved:
+                    return saved, success_note
+            except Exception:
+                pass
+        saved, note = await self._download_external_image_url(raw, session_key=session_key)
+        return saved, success_note if saved else note
+
+    def _external_image_model_misconfiguration_note(self) -> str:
+        model = _single_line(getattr(self, "external_image_api_model", ""), 120)
+        if not model:
+            return "未配置在线图片模型"
+        lowered = model.lower()
+        platform = self._resolved_external_image_api_platform()
+        image_tokens = ("image", "img", "dall", "flux", "sd", "stable-diffusion", "midjourney", "mj", "kolors", "wanx", "wan")
+        text_model_prefixes = ("gpt-", "claude", "gemini", "deepseek", "qwen", "glm", "moonshot", "kimi", "yi-", "doubao")
+        if platform == "bailian" and (lowered.startswith("qwen-image") or lowered.startswith("wan")):
+            return ""
+        if lowered.startswith(text_model_prefixes) and not any(token in lowered for token in image_tokens):
+            return f"在线图片模型填成了文本/聊天模型：{model}。请改成该平台的图片模型名，例如支持 /images/generations 或 /images/edits 的模型。"
+        return ""
+
+    def _external_image_api_error_note(self, status: int, text: str, *, reference: bool = False) -> str:
+        raw = _single_line(text, 260)
+        lowered = raw.lower()
+        if "requires an image model" in lowered or "image model" in lowered and "got" in lowered:
+            return self._external_image_model_misconfiguration_note() or (
+                f"在线图片模型不支持 images 接口。当前模型：{_single_line(getattr(self, 'external_image_api_model', ''), 80) or '-'}，请改成图片模型。"
+            )
+        prefix = "参考图接口" if reference else ""
+        return f"{prefix}HTTP {status}: {_single_line(text, 180)}"
+
+    def _external_image_timeout_note(self, *, reference: bool = False, download: bool = False, label: str = "") -> str:
+        timeout_seconds = _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1)
+        if label:
+            target = label
+        elif download:
+            target = "下载在线图片结果"
+        elif reference:
+            target = "在线图片 API 参考图接口"
+        else:
+            target = "在线图片 API"
+        return f"{target}超时（{timeout_seconds}秒内没有返回），可调高在线生图超时秒数或切换/回退本地生图后端"
 
     async def _save_external_generated_image(
         self,
@@ -4329,6 +5401,12 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         session_part = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(session_key or "private_companion"))[:60] or "private_companion"
         file_path = out_dir / f"{session_part}_{self._environment_now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{safe_ext}"
         await asyncio.to_thread(file_path.write_bytes, image_bytes)
+        logger.info(
+            "[PrivateCompanion] 生图文件已保存: session=%s path=%s bytes=%s",
+            _single_line(session_key, 80),
+            _single_line(str(file_path), 180),
+            len(image_bytes),
+        )
         return str(file_path)
 
     async def _download_external_image_url(self, url: str, *, session_key: str) -> tuple[str, str]:
@@ -4342,9 +5420,21 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(target) as response:
                     if response.status >= 400:
+                        logger.info(
+                            "[PrivateCompanion] 下载在线生图结果失败: status=%s url=%s",
+                            response.status,
+                            _single_line(target, 180),
+                        )
                         return "", f"下载图片失败：HTTP {response.status}"
                     content = await response.read()
                     content_type = str(response.headers.get("Content-Type", "") or "").lower()
+                    logger.info(
+                        "[PrivateCompanion] 下载在线生图结果完成: status=%s content_type=%s bytes=%s url=%s",
+                        response.status,
+                        _single_line(content_type, 80),
+                        len(content),
+                        _single_line(target, 180),
+                    )
             ext = ".png"
             if "jpeg" in content_type or "jpg" in content_type:
                 ext = ".jpg"
@@ -4352,8 +5442,249 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 ext = ".webp"
             path = await self._save_external_generated_image(content, session_key=session_key, ext=ext)
             return path, "ok" if path else "保存下载图片失败"
+        except asyncio.TimeoutError:
+            note = self._external_image_timeout_note(download=True)
+            logger.info("[PrivateCompanion] 下载在线生图结果超时: url=%s note=%s", _single_line(target, 180), note)
+            return "", note
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 下载在线生图结果失败: {e}", exc_info=True)
+            return "", str(e)
+
+    async def _run_bailian_multimodal_photo_generation(
+        self,
+        prompt_text: str,
+        *,
+        session_key: str,
+        reference_image_path: str = "",
+        image_size: str = "",
+    ) -> tuple[str, str]:
+        endpoint = self._bailian_multimodal_endpoint()
+        if not endpoint:
+            return "", "未配置百炼 API 地址"
+        try:
+            import aiohttp
+
+            content: list[dict[str, Any]] = [{"type": "text", "text": prompt_text}]
+            used_reference = False
+            if reference_image_path:
+                reference_value = reference_image_path
+                if not re.match(r"^https?://", reference_value, flags=re.I):
+                    reference_value = await self._reference_image_to_data_url(reference_value)
+                if reference_value:
+                    content.append({"type": "image", "image": reference_value})
+                    used_reference = True
+            payload = {
+                "model": self.external_image_api_model,
+                "input": {"messages": [{"role": "user", "content": content}]},
+                "parameters": {"size": self._sanitize_bailian_image_size(image_size)},
+            }
+            headers = {
+                "Authorization": f"Bearer {self.external_image_api_key}",
+                "Content-Type": "application/json",
+            }
+            timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
+            logger.info(
+                "[PrivateCompanion] 百炼多模态生图提交: endpoint=%s model=%s size=%s reference=%s prompt=%s",
+                _single_line(endpoint, 160),
+                _single_line(self.external_image_api_model, 80),
+                _single_line(payload["parameters"]["size"], 40),
+                used_reference,
+                _single_line(prompt_text, 180),
+            )
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(endpoint, headers=headers, json=payload) as response:
+                    text = await response.text()
+                    logger.info(
+                        "[PrivateCompanion] 百炼多模态生图响应: status=%s chars=%s preview=%s",
+                        response.status,
+                        len(text or ""),
+                        _single_line(text, 220),
+                    )
+                    if response.status >= 400:
+                        return "", f"百炼多模态生图 HTTP {response.status}: {_single_line(text, 180)}"
+            data = self._extract_json_payload(text) if text else {}
+            if not isinstance(data, dict):
+                return "", "百炼多模态生图返回格式无效"
+            output = data.get("output") if isinstance(data.get("output"), dict) else {}
+            choices = output.get("choices")
+            if not isinstance(choices, list) or not choices:
+                return "", "百炼多模态生图未返回 choices"
+            first_choice = choices[0] if isinstance(choices[0], dict) else {}
+            message = first_choice.get("message") if isinstance(first_choice.get("message"), dict) else {}
+            items = message.get("content")
+            if isinstance(items, dict):
+                items = [items]
+            if not isinstance(items, list):
+                return "", "百炼多模态生图未返回图片内容"
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                image_value = (
+                    item.get("image")
+                    or item.get("image_url")
+                    or item.get("url")
+                    or (item.get("result") if isinstance(item.get("result"), str) else "")
+                )
+                if image_value:
+                    note = "ok；已使用本地人设参考图" if used_reference else "ok"
+                    return await self._materialize_external_image_value(
+                        image_value,
+                        session_key=session_key,
+                        success_note=note,
+                    )
+            return "", "百炼多模态生图未返回图片地址"
+        except asyncio.TimeoutError:
+            note = self._external_image_timeout_note(label="百炼多模态生图接口")
+            logger.info(
+                "[PrivateCompanion] 百炼多模态生图超时: endpoint=%s model=%s timeout=%ss",
+                _single_line(endpoint, 160),
+                _single_line(self.external_image_api_model, 80),
+                _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1),
+            )
+            return "", note
+        except Exception as e:
+            logger.warning(f"[PrivateCompanion] 百炼多模态生图失败: {e}", exc_info=True)
+            return "", str(e)
+
+    async def _run_bailian_async_photo_generation(
+        self,
+        prompt_text: str,
+        *,
+        session_key: str,
+        image_size: str = "",
+    ) -> tuple[str, str]:
+        endpoints = self._bailian_async_generation_endpoints()
+        if not endpoints:
+            return "", "未配置百炼 API 地址"
+        try:
+            import aiohttp
+
+            headers = {
+                "Authorization": f"Bearer {self.external_image_api_key}",
+                "Content-Type": "application/json",
+                "X-DashScope-Async": "enable",
+            }
+            payload = {
+                "model": self.external_image_api_model,
+                "input": {"prompt": prompt_text},
+                "parameters": {"size": self._sanitize_bailian_image_size(image_size)},
+            }
+            timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
+            task_id = ""
+            submit_note = ""
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for endpoint in endpoints:
+                    logger.info(
+                        "[PrivateCompanion] 百炼异步生图提交: endpoint=%s model=%s size=%s prompt=%s",
+                        _single_line(endpoint, 160),
+                        _single_line(self.external_image_api_model, 80),
+                        _single_line(payload["parameters"]["size"], 40),
+                        _single_line(prompt_text, 180),
+                    )
+                    async with session.post(endpoint, headers=headers, json=payload) as response:
+                        text = await response.text()
+                        logger.info(
+                            "[PrivateCompanion] 百炼异步生图响应: status=%s chars=%s preview=%s",
+                            response.status,
+                            len(text or ""),
+                            _single_line(text, 220),
+                        )
+                        if response.status >= 400:
+                            submit_note = f"百炼异步生图 HTTP {response.status}: {_single_line(text, 180)}"
+                            if response.status in {404, 405}:
+                                continue
+                            return "", submit_note
+                    data = self._extract_json_payload(text) if text else {}
+                    if not isinstance(data, dict):
+                        submit_note = "百炼异步生图返回格式无效"
+                        continue
+                    output = data.get("output") if isinstance(data.get("output"), dict) else {}
+                    task_id = str(output.get("task_id") or data.get("task_id") or "").strip()
+                    if task_id:
+                        break
+                    submit_note = _single_line(
+                        output.get("message") or data.get("message") or "百炼异步生图未返回任务 ID",
+                        180,
+                    )
+                if not task_id:
+                    return "", submit_note or "百炼异步生图未返回任务 ID"
+
+                task_endpoint = self._bailian_task_endpoint(task_id)
+                if not task_endpoint:
+                    return "", "无法生成百炼任务查询地址"
+
+                deadline = time.monotonic() + float(self.external_image_api_timeout_seconds)
+                while True:
+                    if time.monotonic() >= deadline:
+                        return "", self._external_image_timeout_note(label="百炼异步生图任务轮询")
+                    async with session.get(task_endpoint, headers={"Authorization": f"Bearer {self.external_image_api_key}"}) as response:
+                        text = await response.text()
+                        logger.info(
+                            "[PrivateCompanion] 百炼任务查询响应: status=%s task=%s chars=%s preview=%s",
+                            response.status,
+                            _single_line(task_id, 80),
+                            len(text or ""),
+                            _single_line(text, 220),
+                        )
+                        if response.status >= 400:
+                            return "", f"百炼任务查询 HTTP {response.status}: {_single_line(text, 180)}"
+                    data = self._extract_json_payload(text) if text else {}
+                    if not isinstance(data, dict):
+                        await asyncio.sleep(2)
+                        continue
+                    output = data.get("output") if isinstance(data.get("output"), dict) else {}
+                    task_status = str(output.get("task_status") or data.get("task_status") or output.get("status") or "").strip().upper()
+                    if task_status in {"SUCCEEDED", "SUCCESS"}:
+                        results = output.get("results")
+                        if isinstance(results, list):
+                            for item in results:
+                                if not isinstance(item, dict):
+                                    continue
+                                image_value = item.get("url") or item.get("image") or item.get("image_url")
+                                if image_value:
+                                    return await self._materialize_external_image_value(
+                                        image_value,
+                                        session_key=session_key,
+                                        success_note="ok",
+                                    )
+                        choices = output.get("choices")
+                        if isinstance(choices, list):
+                            for item in choices:
+                                if not isinstance(item, dict):
+                                    continue
+                                message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                                content = message.get("content")
+                                if isinstance(content, dict):
+                                    content = [content]
+                                if not isinstance(content, list):
+                                    continue
+                                for part in content:
+                                    if not isinstance(part, dict):
+                                        continue
+                                    image_value = part.get("image") or part.get("image_url") or part.get("url")
+                                    if image_value:
+                                        return await self._materialize_external_image_value(
+                                            image_value,
+                                            session_key=session_key,
+                                            success_note="ok",
+                                        )
+                        return "", "百炼任务成功但未返回图片地址"
+                    if task_status in {"FAILED", "FAIL", "CANCELED", "CANCELLED"}:
+                        return "", _single_line(
+                            output.get("message") or data.get("message") or "百炼异步生图任务失败",
+                            180,
+                        )
+                    await asyncio.sleep(2)
+        except asyncio.TimeoutError:
+            note = self._external_image_timeout_note(label="百炼异步生图接口")
+            logger.info(
+                "[PrivateCompanion] 百炼异步生图超时: model=%s timeout=%ss",
+                _single_line(self.external_image_api_model, 80),
+                _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1),
+            )
+            return "", note
+        except Exception as e:
+            logger.warning(f"[PrivateCompanion] 百炼异步生图失败: {e}", exc_info=True)
             return "", str(e)
 
     async def _run_external_photo_generation(
@@ -4361,22 +5692,91 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         prompt_text: str,
         *,
         session_key: str,
+        reference_image_path: str = "",
+        image_size: str = "",
     ) -> tuple[str, str]:
+        platform = self._resolved_external_image_api_platform()
         endpoint = self._external_image_endpoint()
+        if platform == "bailian":
+            endpoint = self._bailian_multimodal_endpoint() or self._bailian_api_root()
         if not endpoint:
-            return "", "未配置在线图片 API 地址"
+            return "", f"未配置{self._external_image_platform_label(platform)} API 地址"
         if not self.external_image_api_key:
-            return "", "未配置在线图片 API Key"
+            return "", f"未配置{self._external_image_platform_label(platform)} API Key"
         if not self.external_image_api_model:
-            return "", "未配置在线图片模型"
+            return "", f"未配置{self._external_image_platform_label(platform)}图片模型"
+        model_note = self._external_image_model_misconfiguration_note()
+        if model_note:
+            return "", model_note
+        reference_image_path = _single_line(reference_image_path, 260)
+        if platform == "bailian":
+            multimodal_first = bool(reference_image_path) or self._bailian_prefers_multimodal()
+            bailian_note = ""
+            if multimodal_first:
+                image_path, note = await self._run_bailian_multimodal_photo_generation(
+                    prompt_text,
+                    session_key=session_key,
+                    reference_image_path=reference_image_path,
+                    image_size=image_size,
+                )
+                if image_path:
+                    return image_path, note
+                bailian_note = note
+                logger.info(
+                    "[PrivateCompanion] 百炼多模态生图失败,回退异步文生图: %s",
+                    _single_line(note, 180),
+                )
+                if "超时" in str(note or ""):
+                    return "", note
+            image_path, note = await self._run_bailian_async_photo_generation(
+                prompt_text,
+                session_key=session_key,
+                image_size=image_size,
+            )
+            if image_path:
+                return image_path, note
+            if bailian_note:
+                return "", f"{note}；多模态回退原因：{_single_line(bailian_note, 120)}"
+            return "", note
+        if reference_image_path and os.path.exists(reference_image_path):
+            logger.info(
+                "[PrivateCompanion] 在线图片 API 尝试参考图接口: endpoint=%s model=%s size=%s reference=%s prompt=%s",
+                _single_line(self._external_image_endpoint("edits"), 160),
+                _single_line(self.external_image_api_model, 80),
+                self._sanitize_external_image_size(image_size),
+                _single_line(reference_image_path, 160),
+                _single_line(prompt_text, 180),
+            )
+            image_path, note = await self._run_external_photo_edit_generation(
+                prompt_text,
+                session_key=session_key,
+                reference_image_path=reference_image_path,
+                image_size=image_size,
+            )
+            if image_path:
+                return image_path, note
+            logger.info(
+                "[PrivateCompanion] 在线图片 API 参考图生图失败,回退纯文生图: %s",
+                _single_line(note, 180),
+            )
+            if "超时" in str(note or ""):
+                return "", note
         try:
             import aiohttp
 
             payload = {
                 "model": self.external_image_api_model,
                 "prompt": prompt_text,
-                "size": self._sanitize_external_image_size(),
+                "size": self._sanitize_external_image_size(image_size),
             }
+            logger.info(
+                "[PrivateCompanion] 在线图片 API 生图提交: endpoint=%s model=%s size=%s prompt_chars=%s prompt=%s",
+                _single_line(endpoint, 160),
+                _single_line(self.external_image_api_model, 80),
+                payload["size"],
+                len(str(prompt_text or "")),
+                _single_line(prompt_text, 180),
+            )
             headers = {
                 "Authorization": f"Bearer {self.external_image_api_key}",
                 "Content-Type": "application/json",
@@ -4385,8 +5785,14 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(endpoint, headers=headers, json=payload) as response:
                     text = await response.text()
+                    logger.info(
+                        "[PrivateCompanion] 在线图片 API 生图响应: status=%s chars=%s preview=%s",
+                        response.status,
+                        len(text or ""),
+                        _single_line(text, 220),
+                    )
                     if response.status >= 400:
-                        return "", f"HTTP {response.status}: {_single_line(text, 180)}"
+                        return "", self._external_image_api_error_note(response.status, text)
             data = self._extract_json_payload(text) if text else {}
             if not isinstance(data, dict):
                 return "", "在线图片 API 返回格式无效"
@@ -4404,34 +5810,158 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                     session_key=session_key,
                     ext=".png",
                 )
+                logger.info(
+                    "[PrivateCompanion] 在线图片 API 生图返回 base64: bytes=%s path=%s",
+                    len(image_bytes),
+                    _single_line(path, 160),
+                )
                 return path, "ok" if path else "保存在线图片失败"
             image_url = str(first.get("url") or "").strip()
             if image_url:
+                logger.info("[PrivateCompanion] 在线图片 API 生图返回 URL: %s", _single_line(image_url, 180))
                 return await self._download_external_image_url(
                     image_url,
                     session_key=session_key,
                 )
             return "", "在线图片 API 未返回 url 或 b64_json"
+        except asyncio.TimeoutError:
+            note = self._external_image_timeout_note()
+            logger.info(
+                "[PrivateCompanion] 在线图片 API 生图超时: endpoint=%s model=%s timeout=%ss",
+                _single_line(endpoint, 160),
+                _single_line(self.external_image_api_model, 80),
+                _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1),
+            )
+            return "", note
         except Exception as e:
             logger.warning(f"[PrivateCompanion] 在线图片 API 生图失败: {e}", exc_info=True)
             return "", str(e)
 
+    async def _run_external_photo_edit_generation(
+        self,
+        prompt_text: str,
+        *,
+        session_key: str,
+        reference_image_path: str,
+        image_size: str = "",
+    ) -> tuple[str, str]:
+        endpoint = self._external_image_endpoint("edits")
+        if not endpoint:
+            return "", "未配置在线图片 API 地址"
+        path = Path(str(reference_image_path or ""))
+        if not path.exists() or not path.is_file():
+            return "", "参考图路径不可用"
+        suffix = path.suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            return "", "参考图格式不支持"
+        try:
+            import aiohttp
+
+            image_bytes = await asyncio.to_thread(path.read_bytes)
+            form = aiohttp.FormData()
+            form.add_field("model", self.external_image_api_model)
+            form.add_field("prompt", prompt_text)
+            form.add_field("size", self._sanitize_external_image_size(image_size))
+            content_type = "image/png"
+            if suffix in {".jpg", ".jpeg"}:
+                content_type = "image/jpeg"
+            elif suffix == ".webp":
+                content_type = "image/webp"
+            form.add_field(
+                "image",
+                image_bytes,
+                filename=f"persona_reference{suffix}",
+                content_type=content_type,
+            )
+            headers = {"Authorization": f"Bearer {self.external_image_api_key}"}
+            timeout = aiohttp.ClientTimeout(total=float(self.external_image_api_timeout_seconds))
+            logger.info(
+                "[PrivateCompanion] 在线图片 API 参考图提交: endpoint=%s model=%s size=%s reference=%s bytes=%s prompt=%s",
+                _single_line(endpoint, 160),
+                _single_line(self.external_image_api_model, 80),
+                self._sanitize_external_image_size(image_size),
+                _single_line(str(path), 160),
+                len(image_bytes),
+                _single_line(prompt_text, 180),
+            )
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(endpoint, headers=headers, data=form) as response:
+                    text = await response.text()
+                    logger.info(
+                        "[PrivateCompanion] 在线图片 API 参考图响应: status=%s chars=%s preview=%s",
+                        response.status,
+                        len(text or ""),
+                        _single_line(text, 220),
+                    )
+                    if response.status >= 400:
+                        return "", self._external_image_api_error_note(response.status, text, reference=True)
+            data = self._extract_json_payload(text) if text else {}
+            if not isinstance(data, dict):
+                return "", "参考图接口返回格式无效"
+            first = None
+            items = data.get("data")
+            if isinstance(items, list) and items:
+                first = items[0]
+            if not isinstance(first, dict):
+                return "", "参考图接口未返回图片数据"
+            b64 = str(first.get("b64_json") or "").strip()
+            if b64:
+                generated_bytes = base64.b64decode(b64)
+                saved = await self._save_external_generated_image(
+                    generated_bytes,
+                    session_key=session_key,
+                    ext=".png",
+                )
+                logger.info(
+                    "[PrivateCompanion] 在线图片 API 参考图返回 base64: bytes=%s path=%s",
+                    len(generated_bytes),
+                    _single_line(saved, 160),
+                )
+                return saved, "ok；已使用本地人设参考图" if saved else "保存在线参考图生图失败"
+            image_url = str(first.get("url") or "").strip()
+            if image_url:
+                logger.info("[PrivateCompanion] 在线图片 API 参考图返回 URL: %s", _single_line(image_url, 180))
+                saved, note = await self._download_external_image_url(
+                    image_url,
+                    session_key=session_key,
+                )
+                return saved, ("ok；已使用本地人设参考图" if saved else note)
+            return "", "参考图接口未返回 url 或 b64_json"
+        except asyncio.TimeoutError:
+            note = self._external_image_timeout_note(reference=True)
+            logger.info(
+                "[PrivateCompanion] 在线图片 API 参考图生图超时: endpoint=%s model=%s timeout=%ss reference=%s",
+                _single_line(endpoint, 160),
+                _single_line(self.external_image_api_model, 80),
+                _safe_int(getattr(self, "external_image_api_timeout_seconds", 180), 180, 1),
+                _single_line(str(path), 160),
+            )
+            return "", note
+        except Exception as e:
+            logger.warning(f"[PrivateCompanion] 在线图片 API 参考图生图失败: {e}", exc_info=True)
+            return "", str(e)
+
     def _find_photo_workflow_with_text_count(
-        self, module: Any, workflow_dir: Any, workflow_name: str
-    ) -> tuple[str, int]:
+        self,
+        module: Any,
+        workflow_dir: Any,
+        workflow_name: str,
+        image_count: int = 0,
+    ) -> tuple[str, int, int]:
         if not hasattr(module, "list_workflows_in_dir"):
-            return "", 0
+            return "", 0, 0
         try:
             workflows = module.list_workflows_in_dir(workflow_dir)
         except Exception:
-            return "", 0
+            return "", 0, 0
         candidates = []
+        expected_images = max(0, int(image_count or 0))
         for item in workflows or []:
             if not isinstance(item, dict):
                 continue
             if item.get("name") != workflow_name:
                 continue
-            if _safe_int(item.get("images"), 0) != 0:
+            if _safe_int(item.get("images"), 0) != expected_images:
                 continue
             if _safe_int(item.get("videos"), 0) != 0:
                 continue
@@ -4443,9 +5973,9 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             if os.path.exists(path):
                 candidates.append((text_count, path))
         if not candidates:
-            return "", 0
+            return "", 0, 0
         candidates.sort(key=lambda value: value[0])
-        return candidates[0][1], candidates[0][0]
+        return candidates[0][1], candidates[0][0], expected_images
 
     def _get_comfyui_module(self) -> Any:
         for module_name in (
@@ -4600,6 +6130,25 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         processed = getattr(result, "chain", None) if result is not None else None
         processed_chain = list(processed or []) if processed is not None else chain
         return self._filter_decorated_proactive_chain(chain, processed_chain)
+
+    def _proactive_plain_segment_component(
+        self,
+        text: str,
+        *,
+        full_text: str = "",
+        index: int = 0,
+        count: int = 1,
+    ) -> Plain:
+        comp = Plain(text)
+        clean_full = _single_line(full_text, 1200)
+        if clean_full:
+            try:
+                setattr(comp, "_private_companion_proactive_full_text", clean_full)
+                setattr(comp, "_private_companion_proactive_segment_index", max(0, int(index)))
+                setattr(comp, "_private_companion_proactive_segment_count", max(1, int(count)))
+            except Exception:
+                pass
+        return comp
 
     def _filter_decorated_proactive_chain(self, original_chain: list[Any], processed_chain: list[Any]) -> list[Any]:
         if not processed_chain:
@@ -4952,6 +6501,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         processed_chain = await self._trigger_proactive_decorating_hooks(umo, chain)
         if not processed_chain:
             return
+        tts_chain_guard = getattr(self, "_sanitize_outbound_tts_chain_without_event", None)
+        if callable(tts_chain_guard):
+            processed_chain = await tts_chain_guard(processed_chain, umo=umo)
+            if not processed_chain:
+                return
         hit = self._forbidden_recall_hit(self._chain_text_for_forbidden_recall(processed_chain))
         if hit:
             logger.warning(
@@ -5057,7 +6611,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 if recalled_message_id:
                     logger.info("[PrivateCompanion] 触发消息已撤回，取消主动文本发送: umo=%s message_id=%s", umo, recalled_message_id)
                     return
-                await self._send_chain_components(umo, self._with_optional_reply([Plain(outbound_text)], quote_message_id))
+                await self._send_chain_components(
+                    umo,
+                    self._with_optional_reply(
+                        [self._proactive_plain_segment_component(outbound_text, full_text=text, index=0, count=1)],
+                        quote_message_id,
+                    ),
+                )
                 quote_message_id = ""
         else:
             recalled_message_id = self._should_cancel_reply_for_recalled_message_ids(trigger_message_id)
@@ -5074,7 +6634,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                     if recalled_message_id:
                         logger.info("[PrivateCompanion] 触发消息已撤回，停止主动分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
                         return
-                    chain = self._with_optional_reply([Plain(segment)], quote_message_id) if index == 0 else [Plain(segment)]
+                    segment_comp = self._proactive_plain_segment_component(segment, full_text=text, index=index, count=len(segments))
+                    chain = self._with_optional_reply([segment_comp], quote_message_id) if index == 0 else [segment_comp]
                     await self._send_chain_components(umo, chain)
                     quote_message_id = ""
                     if index < len(segments) - 1:
@@ -5146,7 +6707,9 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             await self._send_chain_components(
                 umo,
                 self._with_optional_reply(
-                    self._build_outbound_chain(outbound_text, image_path, extra_components=extra_components),
+                    [
+                        self._proactive_plain_segment_component(outbound_text, full_text=text, index=0, count=1)
+                    ],
                     quote_message_id,
                 ),
             )
@@ -5164,7 +6727,8 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             if recalled_message_id:
                 logger.info("[PrivateCompanion] 触发消息已撤回，停止主动消息分段发送: umo=%s message_id=%s index=%s", umo, recalled_message_id, index + 1)
                 return
-            chain = self._with_optional_reply([Plain(segment)], quote_message_id) if index == 0 else [Plain(segment)]
+            segment_comp = self._proactive_plain_segment_component(segment, full_text=text, index=index, count=len(segments))
+            chain = self._with_optional_reply([segment_comp], quote_message_id) if index == 0 else [segment_comp]
             await self._send_chain_components(umo, chain)
             quote_message_id = ""
             if index < len(segments) - 1:
@@ -5355,10 +6919,15 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
     def _format_plan_item_for_prompt(self, item: dict[str, Any] | None) -> str:
         if not isinstance(item, dict):
             return "（暂无）"
-        return (
-            f"{item.get('time', '')}｜{item.get('activity', '')}｜"
-            f"情绪：{item.get('mood', '')}｜可用碎片：{item.get('message_seed', '')}"
-        )
+        parts = [
+            str(item.get("time", "")).strip(),
+            str(item.get("activity", "")).strip(),
+            f"情绪：{item.get('mood', '')}".strip(),
+        ]
+        seed = _single_line(item.get("message_seed"), 120)
+        if seed:
+            parts.append(f"可分享碎片：{seed}")
+        return "｜".join(part for part in parts if part)
 
     def _sanitize_proactive_text(self, text: str) -> str:
         cleaned = str(text or "").strip()
@@ -5421,7 +6990,13 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return ""
         cleaned = self._strip_unsupported_proactive_agreement(cleaned)
         cleaned = self._trim_abrupt_closing_topic_shift(cleaned)
+        cleaned = _normalize_outbound_punctuation_flow(cleaned)
         cleaned = cleaned.replace("！?", "！？").replace("？!", "？！")
+        cleaned = re.sub(
+            r"([A-Za-z0-9_\-]{1,40})[。！？!?]\s+(呢|呀|啊|嘛|吧|哦|喔|诶)(?=[，,。！？!?~～\s]|$)",
+            r"\1\2",
+            cleaned,
+        )
         cleaned = re.sub(r"[ \t]+", " ", cleaned)
         raw_units: list[str] = []
         for raw_line in cleaned.splitlines():
@@ -5456,6 +7031,17 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         tail = "".join(normalized[2:])
         return "\n".join(head + [tail])[:260]
 
+    def _group_share_text_has_life_sidecar(self, text: str) -> bool:
+        cleaned = _single_line(text, 500)
+        if "群" not in cleaned:
+            return False
+        life_tokens = (
+            "课", "老师", "同学", "作业", "草稿纸", "书", "笔", "桌", "窗", "路上",
+            "小猫", "猫", "饭", "吃", "喝", "杯", "天气", "雨", "太阳", "云", "风",
+            "困", "饿", "刚刚", "刚才", "这会儿",
+        )
+        return any(token in cleaned for token in life_tokens)
+
     def _strip_unsupported_proactive_agreement(self, text: str) -> str:
         cleaned = str(text or "").strip()
         if not cleaned:
@@ -5468,6 +7054,143 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         for pattern in patterns:
             cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
         return cleaned or str(text or "").strip()
+
+    def _trim_performative_self_state_tail(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        tail_clause_match = re.search(
+            r"([，,；;。！？!?]\s*)"
+            r"((?:我)?(?:刚刚|刚才|刚|这会儿|现在)?"
+            r"(?:在|还在|正|正在)?"
+            r"[^。！？!?；;\n，,]{0,14}"
+            r"(?:发呆|发怔|晃神|躺着|趴着|盯着|望着|看着天花板|看天花板|刷手机|摸鱼|犯困|醒着|睡不着|放空|走神|缓神)"
+            r"[^。！？!?；;\n，,]{0,18}"
+            r"(?:来着|而已|呢|啦|。|！|？|~|～)?$)",
+            cleaned,
+        )
+        if tail_clause_match:
+            kept = cleaned[: tail_clause_match.start()].strip(" ,，、；;")
+            if kept:
+                result = self._finish_trimmed_proactive_text(kept)
+                logger.info(
+                    "[PrivateCompanion] 主动消息已去除刻意状态尾巴: before=%s after=%s",
+                    _single_line(cleaned, 160),
+                    _single_line(result, 160),
+                )
+                return result
+        units: list[str] = []
+        for line in cleaned.splitlines():
+            line = line.strip()
+            if line:
+                units.extend(self._split_proactive_sentence_units(line))
+        units = [unit.strip(" ,，、") for unit in units if unit.strip(" ,，、")]
+        if len(units) <= 1:
+            return cleaned
+        tail = units[-1].strip()
+        if not tail:
+            return cleaned
+        asks_user = bool(re.search(r"(你那边|你呢|你那儿|你那里|你现在|你今天|你还|你有没有|你要不要|你是不是)", tail))
+        if asks_user:
+            return cleaned
+        performative_tail = bool(
+            re.search(
+                r"^(?:我)?(?:刚刚|刚才|刚|这会儿|现在)?"
+                r"(?:在|还在|正|正在)?"
+                r"[^。！？!?；;\n]{0,12}"
+                r"(?:发呆|躺着|趴着|盯着|望着|看着天花板|看天花板|刷手机|摸鱼|犯困|醒着|睡不着|放空|走神|缓神)"
+                r"[^。！？!?；;\n]{0,18}"
+                r"(?:来着|而已|呢|啦|。|！|？|~|～)?$",
+                tail,
+            )
+        )
+        if not performative_tail:
+            return cleaned
+        kept = units[:-1]
+        if not kept:
+            return cleaned
+        result = "\n".join(self._finish_trimmed_proactive_text(unit) for unit in kept if unit)
+        result = result.strip()
+        if result:
+            logger.info(
+                "[PrivateCompanion] 主动消息已去除刻意状态尾巴: before=%s after=%s",
+                _single_line(cleaned, 160),
+                _single_line(result, 160),
+            )
+            return result
+        return cleaned
+
+    def _proactive_status_inventory_kind(self, unit: str) -> str:
+        cleaned = _single_line(unit, 140).strip(" ，,。！？!?~～")
+        if not cleaned:
+            return ""
+        opener_match = re.match(r"^([\w\u4e00-\u9fffぁ-んァ-ヶー]{1,8})[，,]\s*", cleaned)
+        if opener_match:
+            opener_text = opener_match.group(1)
+            if len(opener_text) <= 4 and not re.search(r"(窗外|外面|雨声|风声|天气|今天|现在|刚刚|刚才)", opener_text):
+                cleaned = cleaned[opener_match.end():].strip()
+        if re.search(r"(你|主人).{0,12}(吗|呢|呀|要不要|有没有)", cleaned):
+            return ""
+        if re.search(r"(窗外|外面|雨声|风声|雨|下雨|小雨|大雨|风|云|天色|阳光|太阳|月亮|路灯|杯沿|书页|桌边)", cleaned):
+            return "scene"
+        if re.search(r"^(?:我)?(?:刚刚|刚才|刚|才|已经|这会儿)?(?:洗漱|洗完|洗澡|刷牙|起床|醒|到家|出门|回家|吃完|喝完|写完|收拾完|换好|换完)", cleaned):
+            return "routine"
+        if re.search(r"^(?:我)?(?:今天|现在|刚刚|刚才|刚|才)?(?:穿了|穿着|换了|换成|披了|套了|戴了|拿了)", cleaned):
+            return "clothing"
+        if re.search(r"(舒服|安静|困|累|清醒|迷糊|开心|烦|平稳|舒服)", cleaned) and len(cleaned) <= 22:
+            return "state"
+        return ""
+
+    def _trim_proactive_status_inventory(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        units: list[str] = []
+        for raw_line in cleaned.splitlines():
+            line = raw_line.strip()
+            if line:
+                units.extend(self._split_proactive_sentence_units(line))
+        units = [unit.strip(" ，,、") for unit in units if unit.strip(" ，,、")]
+        if len(units) < 2:
+            return cleaned
+        kinds = [self._proactive_status_inventory_kind(unit) for unit in units]
+        inventory_count = sum(1 for kind in kinds if kind)
+        if inventory_count < 2:
+            return cleaned
+        if len(units) == 2 and inventory_count < len(units):
+            return cleaned
+        opener = ""
+        opener_match = re.match(r"^([\w\u4e00-\u9fffぁ-んァ-ヶー]{1,4}[，,])", units[0])
+        if opener_match:
+            opener = opener_match.group(1)
+        priority = {"scene": 4, "clothing": 3, "routine": 2, "state": 1}
+        best_index = max(
+            range(len(units)),
+            key=lambda index: (priority.get(kinds[index], 0), index),
+        )
+        chosen = units[best_index].strip()
+        if opener:
+            chosen = re.sub(r"^[\w\u4e00-\u9fffぁ-んァ-ヶー]{1,4}[，,]\s*", "", chosen).strip()
+            if chosen:
+                chosen = f"{opener}{chosen}"
+        chosen = self._ensure_chat_sentence_punctuation(chosen)
+        if chosen and chosen != cleaned:
+            logger.info(
+                "[PrivateCompanion] 主动消息已收束状态清单: before=%s after=%s",
+                _single_line(cleaned, 180),
+                _single_line(chosen, 160),
+            )
+            return chosen
+        return cleaned
+
+    def _finish_trimmed_proactive_text(self, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        lines = [line.strip(" ,，、；;") for line in cleaned.splitlines() if line.strip(" ,，、；;")]
+        if not lines:
+            return ""
+        return "\n".join(self._ensure_chat_sentence_punctuation(line) for line in lines)
 
     def _has_abrupt_closing_topic_shift(self, text: str, *, inbound_text: str = "") -> bool:
         original = str(text or "").strip()
@@ -5492,7 +7215,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         inbound_is_sleep_context = bool(re.search(r"(晚安|睡了|睡觉|做梦|好梦|困了|休息|先睡|去睡|早点睡)", inbound))
         closing_index = -1
         for index, unit in enumerate(units):
-            if re.search(r"(晚安|好梦|做个梦|做梦|睡吧|睡觉|去睡|早点睡|休息吧|明天见|先不吵你)", unit):
+            if re.search(r"(晚安|好梦|做个梦|做梦|睡吧|睡觉|去睡|早点睡|休息吧|明天见|(?:先)?(?:别|不)(?:吵|打扰|烦))", unit):
                 closing_index = index
                 break
         if closing_index < 0 or closing_index >= len(units) - 1:
@@ -5522,7 +7245,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return cleaned
         question_tokens = (
             "吗", "嘛", "么", "什么", "怎么", "咋", "有没有", "是不是", "要不要",
-            "忙什么", "吃东西了吗", "睡了吗", "醒了吗",
+            "忙什么", "吃东西了吗", "睡了吗", "醒了吗", "你呢", "你那边呢", "你那里呢", "你那儿呢",
         )
         if any(token in cleaned for token in question_tokens):
             return cleaned + "？"
@@ -5551,20 +7274,22 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         cleaned = self._strip_parenthetical_stage_directions(cleaned)
         if not cleaned:
             return ""
+        cleaned = self._trim_proactive_status_inventory(cleaned)
+        cleaned = self._trim_performative_self_state_tail(cleaned)
         cleaned = re.sub(r"^(?:早上好|早安|上午好|中午好|午安|下午好|晚上好)[,,\s]*", "", cleaned)
 
         _SOCIAL_REPLACEMENTS = [
-            ("刷一下存在感", "来跟你说一句"),
-            ("冒个泡", "晃过来一下"),
-            ("冒个头", "晃过来一下"),
-            ("顺手冒了个头", "晃过来一下"),
-            ("突然想起你", "刚好停了一下"),
-            ("刚好想到你", "刚好停了一下"),
-            ("我刚刚想到你了。", "刚好停了一下。"),
-            ("我刚刚想到你了", "刚好停了一下"),
+            ("刷一下存在感", "来打个招呼"),
+            ("冒个泡", "来打个招呼"),
+            ("冒个头", "来打个招呼"),
+            ("顺手冒了个头", "来打个招呼"),
+            ("突然想起你", "想到一件小事"),
+            ("刚好想到你", "想到一件小事"),
+            ("我刚刚想到你了。", "想到一件小事。"),
+            ("我刚刚想到你了", "想到一件小事"),
             ("没什么大不了的,就是", ""),
             ("没什么大道理,就是", ""),
-            ("免得你又忘了我", "怕你又一头扎进去"),
+            ("免得你又忘了我", "怕你忙过头"),
             ("最近忙不忙？", ""),
             ("最近忙不忙", ""),
             ("数据有意思吗？", ""),
@@ -5650,6 +7375,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         name: str,
         planned_reason: str = "",
     ) -> tuple[str, str]:
+        """Pick the proactive reason and return an internal intent note.
+
+        The second value is deliberately not outbound copy. The actual message
+        must still be generated by the framework chain and pass send review.
+        """
         state = self.data.get("daily_state", {})
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         can_do = self.data.get("can_do", [])
@@ -5688,57 +7418,29 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         reason = planned_reason if planned_reason and self._is_reason_allowed_now(planned_reason) else random.choice(reasons)
 
         if reason == "insomnia_night":
-            return reason, random.choice([
-                f"{name},我有点睡不着。\n先来你这边晃一下。",
-                f"{name},醒着。\n夜里脑子有点吵,我先把这句放你这。",
-                f"{name},我脑子里那盏灯还没关。\n你睡了就别管我,明天再笑我。",
-            ])
+            return reason, "夜间清醒时的一句短开场；不报时、不追问、不拉长。"
 
         if reason == "quiet_care":
-            return reason, random.choice([
-                f"{name},小声找你一下。\n别把自己绷太久。",
-                f"{name},先停一下嘛。\n喝口水也算有进展。",
-                f"{name},你是不是又一头扎进去了。\n出来透口气。",
-            ])
+            return reason, "低能量或状态余波下的轻量问候；只给一个具体切口，不写成关心清单。"
 
         if reason == "morning_greeting":
-            return reason, random.choice([
-                f"{name},早呀。\n我先冒个头。",
-                f"早。\n你那边醒了吗。",
-            ])
+            return reason, "当前时段的首次早间开口；贴近早晨片段，不写模板早安。"
 
         if reason == "noon_greeting":
-            return reason, random.choice([
-                f"{name},中午了。\n来晃你一下,顺便看看你有没有记得吃东西。",
-                f"午后有点懒洋洋的。\n所以我先来戳你一下。",
-            ])
+            return reason, "午间短开口；可以围绕吃饭、午休或短暂放松，不催促。"
 
         if reason == "evening_greeting":
-            return reason, random.choice([
-                f"{name},天快暗下来了。\n我先来找你一下,看看你今天有没有把自己累坏。",
-                f"差不多该把今天收一收了。\n所以先来你这边晃一下。",
-            ])
+            return reason, "傍晚或夜间收尾时的一句轻开口；不汇报日程，不追问。"
 
 
         if reason == "activity_share":
             activity = _single_line(random.choice(can_do), 40) if isinstance(can_do, list) and can_do else "刚才那点小事"
-            return reason, random.choice([
-                f"{name},刚刚去弄了一点“{activity}”。\n很小,但算我今天有动过了。",
-                f"{name},我把“{activity}”塞进今天了。\n你看,我也不是只会等你来找我。",
-                f"{name},突然想到个和“{activity}”有关的小东西。\n先记下,晚点说不定能用。",
-                f"我跟你说,刚刚“{activity}”居然真的推进了一点。\n虽然只有一点点,但也算。",
-                f"刚才在弄“{activity}”。\n不许笑,至少我没完全摸鱼。",
-            ])
+            return reason, f"围绕可做事项“{activity}”分享一个很小的进展或片段；不要写成自证或汇报。"
 
         if reason == "diary_share":
             fragment = self._pick_diary_fragment()
             if fragment:
-                return reason, random.choice([
-                    f"{name},刚翻到我今天记的一句：\n{fragment}",
-                    f"{name},我把这个写进日记了：\n{fragment}",
-                    f"{name},给你看个小碎片：\n{fragment}",
-                    f"突然想把这个发给你：\n{fragment}",
-                ])
+                return reason, f"可引用日记碎片“{_single_line(fragment, 80)}”；只取一句自然分享，不写成报告。"
 
         if reason == "important_date_share" and upcoming_dates:
             entry = upcoming_dates[0]
@@ -5746,14 +7448,12 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             title = _single_line(entry.get("title"), 40)
             note = _single_line(entry.get("note"), 80)
             if days == 0:
-                return reason, random.choice([
-                    f"{name},今天是「{title}」。\n{note or '我记得的,没忘。'}",
-                    f"提醒一下,今天「{title}」。\n{note or '别装没看见。'}",
-                ])
-            return reason, random.choice([
-                f"{name},「{title}」还有 {days} 天。\n{note or '我先帮你放到显眼一点的位置。'}",
-                f"小提醒,「{title}」还剩 {days} 天。\n{note or '提前说,不然你这个笨蛋又要临时想起来。'}",
-            ])
+                detail = f"今天是「{title}」"
+            else:
+                detail = f"「{title}」还有 {days} 天"
+            if note:
+                detail = f"{detail}；备注：{note}"
+            return reason, f"重要日期提醒：{detail}；一句说清，不责备用户。"
 
         if reason == "background_schedule" and current_item:
             activity = _single_line(current_item.get("activity"), 40)
@@ -5761,10 +7461,10 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                 _single_line(current_item.get("message_seed"), 60),
                 reason=reason,
             )
-            parts = [seed or "刚好停了一下,把这句放你这。"]
-            return reason, "\n".join(parts)
+            detail = "；".join(part for part in (activity, seed) if part)
+            return reason, f"当前日程片段：{detail or '没有明确片段'}；只取一个生活切口，不逐项汇报。"
 
-        style = str(user.get("style") or self.default_style)
-        templates = STYLE_TEMPLATES.get(style) or STYLE_TEMPLATES["温柔"]
-        return "check_in", random.choice(templates).format(name=name)
+        style = _single_line(user.get("style") or self.default_style, 24)
+        style_hint = f"；参考语气偏好：{style}" if style else ""
+        return "check_in", f"无明确来源时的轻量开场{style_hint}；优先贴近关系事实、当前状态或当前日程，不使用固定模板。"
 

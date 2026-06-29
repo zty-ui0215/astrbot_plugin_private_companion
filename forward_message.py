@@ -1191,6 +1191,45 @@ class ForwardMessageMixin:
         visit(message_obj)
         return {"texts": texts[:8], "links": links[:8], "images": images[:6]}
 
+    @staticmethod
+    def _reply_rich_card_music_album_context(texts: list[str], links: list[str]) -> dict[str, str]:
+        joined = " ".join([*texts, *links])
+        compact = re.sub(r"\s+", "", joined)
+        if not compact:
+            return {}
+        if not any(token in compact for token in ("网易云音乐", "专辑", "歌手", "歌曲", "曲目", "歌单", "music.163.com")):
+            return {}
+        album = ""
+        artist = ""
+        platform = ""
+        for text in texts:
+            normalized = _single_line(text, 120)
+            if not album:
+                match = re.search(r"(?:专辑|album)\s*[：:]\s*([^\s，。！？!?]{2,60})", normalized, re.I)
+                if match:
+                    album = _single_line(match.group(1), 60)
+            if not artist:
+                match = re.search(r"(?:歌手|artist)\s*[：:]\s*([^\s，。！？!?]{2,40})", normalized, re.I)
+                if match:
+                    artist = _single_line(match.group(1), 40)
+            if not platform and any(token in normalized for token in ("网易云音乐", "music.163.com")):
+                platform = "网易云音乐"
+        if not album and not artist and not platform:
+            return {}
+        return {
+            "album": album,
+            "artist": artist,
+            "platform": platform,
+            "summary": "；".join(
+                part for part in (
+                    f"专辑：{album}" if album else "",
+                    f"歌手：{artist}" if artist else "",
+                    platform or "",
+                )
+                if part
+            ),
+        }
+
     async def _format_reply_rich_card_context_for_prompt(self, event: AstrMessageEvent) -> str:
         message_id, raw_message = await self._reply_raw_message_for_event(event)
         if raw_message is None:
@@ -1205,6 +1244,7 @@ class ForwardMessageMixin:
         images = [item for item in info.get("images", []) if item]
         if not (texts or links or images):
             return ""
+        music_context = self._reply_rich_card_music_album_context(texts, links)
         image_vision_text = await self._transcribe_forward_message_images(event, images)
         lines = [
             "【本轮引用卡片/动态】",
@@ -1230,6 +1270,17 @@ class ForwardMessageMixin:
             lines.append("卡片链接：" + "；".join(links[:4]))
         if images:
             lines.append(f"卡片图片数：{len(images)}")
+        if music_context:
+            lines.append("音乐卡片识别：")
+            lines.append(
+                "这是一张音乐专辑/点歌卡片，卡片里的专辑名和歌手名应当直接视为有效线索；"
+                "如果用户是在让你发出这张专辑的几首歌，不要再追问“哪个专辑”，优先按卡片里的信息继续。"
+            )
+            lines.append(f"音乐卡片摘要：{music_context.get('summary') or '（未提取到完整信息）'}")
+            try:
+                setattr(event, "private_companion_reply_music_album_context", music_context)
+            except Exception:
+                pass
         if image_vision_text:
             lines.append("引用卡片中的图片：")
             lines.append(image_vision_text)

@@ -77,7 +77,6 @@ from .constants import (
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
-    STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
@@ -438,7 +437,8 @@ class IntegrationStatusMixin:
             boundary = "私聊可查当前用户相关的旧约定、偏好和共同经历。"
         return (
             "【长期记忆检索】\n"
-            f"上下文不够时可用 `{tool_name}` 查记忆。{boundary}结果只作接话背景。"
+            f"上下文不够时可用 `{tool_name}` 查记忆。{boundary}结果只作接话背景。\n"
+            "召回结果里出现人名、昵称、QQ 或群成员别名时,不要直接当作稳定身份；能查关系网时先用关系网确认,不能确认就按召回文本里的具体说话人原样转述。"
         )
 
     def _format_livingmemory_status(self) -> str:
@@ -679,7 +679,60 @@ class IntegrationStatusMixin:
                 "plugin_vision_fallback": "备选识图模型兜底",
             }.get(vision_source, vision_source or "视觉转述模型")
             lines.append(f"视觉转述模型={source_label} / {self._provider_model_label(vision_id)}")
+        photo_generation = self._format_photo_generation_perception()
+        if photo_generation:
+            lines.append(f"生图能力={photo_generation}")
         return "；".join(lines)
+
+    def _format_photo_generation_perception(self) -> str:
+        if not (
+            bool(getattr(self, "enable_photo_text_action", False))
+            or bool(getattr(self, "enable_natural_language_photo_generation", False))
+        ):
+            return ""
+        preferred = _single_line(getattr(self, "photo_generation_backend", ""), 30) or "auto"
+        external_model = _single_line(getattr(self, "external_image_api_model", ""), 80)
+        platform = "openai"
+        resolver = getattr(self, "_resolved_external_image_api_platform", None)
+        if callable(resolver):
+            try:
+                platform = str(resolver() or "openai")
+            except Exception:
+                platform = "openai"
+        comfyui_workflow = _single_line(getattr(self, "comfyui_text2img_workflow_name", ""), 60)
+        selfie_workflow = _single_line(getattr(self, "comfyui_selfie_workflow_name", ""), 60)
+        comfyui_available = bool(getattr(self, "_comfyui_photo_available", lambda: False)())
+        sdgen_available = bool(getattr(self, "_sdgen_photo_available", lambda: False)())
+        external_available = bool(getattr(self, "_external_photo_available", lambda: False)())
+
+        def comfyui_label() -> str:
+            labels = []
+            if comfyui_workflow:
+                labels.append(f"文生图:{comfyui_workflow}")
+            if selfie_workflow and selfie_workflow != comfyui_workflow:
+                labels.append(f"自拍:{selfie_workflow}")
+            suffix = f" / {', '.join(labels)}" if labels else ""
+            return f"ComfyUI{suffix}"
+
+        def external_label() -> str:
+            prefix = "阿里云百炼" if platform == "bailian" else "在线图片 API"
+            return f"{prefix} / {external_model or '未填模型'}"
+
+        if preferred == "external":
+            return external_label()
+        if preferred == "comfyui":
+            return comfyui_label()
+        if preferred == "sdgen":
+            return "SDGen"
+        if external_available:
+            return f"auto -> {external_label()}"
+        if comfyui_available:
+            return f"auto -> {comfyui_label()}"
+        if sdgen_available:
+            return "auto -> SDGen"
+        if external_model:
+            return f"auto（候选：{external_label()}）"
+        return "auto（当前无可用生图后端）"
 
     async def _format_environment_perception(self, event: AstrMessageEvent) -> str:
         checker = getattr(self, "_feature_enabled_or_temp_unlocked", None)
@@ -691,7 +744,7 @@ class IntegrationStatusMixin:
         current = self._environment_now()
         lines = [
             "【环境感知】",
-            "这是当前消息的背景边界，只影响语境判断、节奏和措辞；回复里不需要提到自己读取了时间、平台或环境。",
+            "这是当前消息的背景边界，主要影响语境判断、节奏和措辞；如果用户明确问到时间、节日、平台或环境线索，可以按需要自然回答，没问到时就把它当作背景参考。",
         ]
         holiday = self._format_holiday_perception(current)
         if holiday:
@@ -713,6 +766,27 @@ class IntegrationStatusMixin:
         platform = await self._format_platform_perception(event)
         if platform:
             lines.append(f"会话：{platform}")
+        try:
+            is_private_chat = bool(getattr(event, "is_private_chat", lambda: False)())
+        except Exception:
+            is_private_chat = False
+        if not is_private_chat:
+            try:
+                sender_id = _single_line(str(event.get_sender_id()), 40)
+            except Exception:
+                sender_id = ""
+            sender_name = ""
+            try:
+                sender_name = _single_line(self._sender_display_name(event), 40)
+            except Exception:
+                sender_name = ""
+            if sender_id:
+                label = f"{sender_name}[QQ:{sender_id}]" if sender_name and sender_name != sender_id else f"QQ:{sender_id}"
+                lines.append(
+                    "群聊身份边界：本轮当前发言者是"
+                    f"{label}；环境感知只提供当前消息背景，不能把上一位说话人的专属关系身份继承给当前发言者；"
+                    "该 ID 只供内部判断，不要在回复正文里复述。"
+                )
         model = self._format_model_perception(event)
         if model:
             lines.append(f"模型：{model}")

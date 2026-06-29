@@ -77,7 +77,6 @@ from .constants import (
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
-    STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
@@ -257,6 +256,7 @@ _PROMPT_MODULE_DESCRIPTIONS: dict[str, tuple[str, str]] = {
     "bookshelf.reading": ("阅读上下文", "补充近期阅读/书柜内容对本轮回复的影响。"),
     "private_reading.preference": ("阅读偏好", "让私聊回复更贴近用户已形成的阅读偏好。"),
     "news.recent": ("近期新闻", "用户聊到新闻/时事时，提供近期阅读过的新闻上下文。"),
+    "web_exploration.recent": ("主动搜索近况", "用户询问最近搜索/网页探索时，提供真实搜索词、动机、笔记和来源。"),
     "skill.growth": ("能力成长", "注入角色近期能力变化，帮助回复体现可成长性。"),
     "skill.growth.match": ("本轮相关技能", "用户提到已追踪技能时，只注入命中的能力边界。"),
     "companion.planner": ("陪伴规划", "整合关系画像、互动节奏和回复策略，控制陪伴感与边界。"),
@@ -294,8 +294,6 @@ _PROMPT_MODULE_PREFIX_DESCRIPTIONS: tuple[tuple[str, tuple[str, str]], ...] = (
 _PROMPT_SECTION_DESCRIPTIONS: dict[str, str] = {
     "内容选择菜单": "限制本次主动消息可选内容类型，避免把多个动机拼成一条。",
     "主动能力检索": "提示模型可使用的主动能力和素材来源。",
-    "状态表现层": "把当前身体状态转成可自然表达的回复气息。",
-    "怎么写这条消息": "约束主动消息的写法、长度、语气和输出格式。",
     "禁止事项": "列出主动消息不能触碰的回复式承接、幻觉和污染项。",
     "最近主动行为闭环": "提供最近主动行为后的反馈，用于降低打扰和重复。",
     "主动意图具体化": "要求主动消息围绕一个具体由头，减少泛泛关心。",
@@ -358,6 +356,32 @@ class EventDispatchMixin:
             seen.add(message_id)
             unique.append(message_id)
         return unique
+
+    def _event_is_platform_message_event(self, event: AstrMessageEvent) -> bool:
+        """Return True only for events whose current id can be queried by get_msg."""
+        raw = self._event_raw_payload(event)
+        post_type = str(raw.get("post_type") or "").strip().lower()
+        if post_type:
+            return post_type in {"message", "message_sent"}
+        if raw:
+            message_type = str(raw.get("message_type") or "").strip().lower()
+            if message_type in {"private", "group"}:
+                return True
+            if any(key in raw for key in ("raw_message", "message", "message_id", "msg_id")):
+                return True
+            return False
+        components = self._event_components(event)
+        if components:
+            labels: list[str] = []
+            for item in components:
+                label = item.__class__.__name__.lower()
+                if isinstance(item, dict):
+                    label = str(item.get("type") or item.get("post_type") or "").strip().lower()
+                labels.append(label)
+            if labels and all(("poke" in label or "notice" in label) for label in labels):
+                return False
+            return True
+        return bool(str(getattr(event, "message_str", "") or "").strip())
 
     def _event_scope_key(self, event: AstrMessageEvent) -> str:
         raw = self._event_raw_payload(event)
@@ -587,6 +611,196 @@ class EventDispatchMixin:
             )
         return result
 
+    def _legacy_proactive_prompt_trace_text(self, item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        parts = [
+            str(item.get("content") or ""),
+            str(item.get("preview") or ""),
+            str(item.get("title") or ""),
+        ]
+        modules = item.get("modules")
+        if isinstance(modules, list):
+            for module in modules:
+                if isinstance(module, dict):
+                    parts.extend(
+                        [
+                            str(module.get("key") or ""),
+                            str(module.get("title") or ""),
+                            str(module.get("content") or ""),
+                            str(module.get("preview") or ""),
+                        ]
+                    )
+        return "\n".join(part for part in parts if part)
+
+    def _is_legacy_proactive_prompt_trace(self, item: Any) -> bool:
+        text = self._legacy_proactive_prompt_trace_text(item)
+        if not text:
+            return False
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        if callable(meta_leak_checker) and meta_leak_checker(text):
+            return True
+        markers = (
+            "【怎么写这条消息】",
+            "【禁止事项】",
+            "【状态表现层】",
+            "【主动意图具体化】",
+            "【语言风格疲劳】",
+            "你正在为 Private Companion 生成一条主动私聊消息。下面这段规则是稳定规则前缀",
+            "日程主语归属必须稳定",
+        )
+        return any(marker in text for marker in markers)
+
+    def _cleanup_legacy_proactive_prompt_traces(self) -> bool:
+        root = self.data.get("recent_prompt_injections") if isinstance(getattr(self, "data", None), dict) else None
+        if not isinstance(root, dict):
+            return False
+        changed = False
+        for key in ("proactive",):
+            items = root.get(key)
+            if not isinstance(items, list):
+                continue
+            kept = [item for item in items if not self._is_legacy_proactive_prompt_trace(item)]
+            if len(kept) != len(items):
+                root[key] = kept[:5]
+                changed = True
+        return changed
+
+    def _prompt_injection_trace_id_for_event(self, event: AstrMessageEvent) -> str:
+        cached = _single_line(getattr(event, "private_companion_prompt_trace_id", ""), 80)
+        if cached:
+            return cached
+        session = _single_line(getattr(event, "unified_msg_origin", ""), 160) or self._event_scope_key(event)
+        sender_id = self._event_sender_id(event)
+        message_id = self._event_message_id(event)
+        inbound_ts = self._event_inbound_activity_ts(event)
+        text = self._event_text_for_recall_cache(event, limit=280)
+        seed = "|".join(
+            part
+            for part in (
+                session,
+                sender_id,
+                message_id,
+                f"{inbound_ts:.3f}" if inbound_ts > 0 else "",
+                text,
+            )
+            if part
+        )
+        trace_id = f"evt-{hashlib.sha1(seed.encode('utf-8', errors='ignore')).hexdigest()[:16]}" if seed else f"evt-{uuid.uuid4().hex[:16]}"
+        try:
+            setattr(event, "private_companion_prompt_trace_id", trace_id)
+        except Exception:
+            pass
+        return trace_id
+
+    def _prompt_injection_message_preview_for_event(self, event: AstrMessageEvent) -> str:
+        cached = _single_line(getattr(event, "private_companion_prompt_trace_preview", ""), 220)
+        if cached:
+            return cached
+        text = self._event_text_for_recall_cache(event, limit=280)
+        if not text:
+            text = _single_line(getattr(event, "message_str", ""), 280)
+        if not text:
+            text = self._event_existing_reply_result_preview(event)
+        preview = _single_line(text, 220)
+        try:
+            setattr(event, "private_companion_prompt_trace_preview", preview)
+        except Exception:
+            pass
+        return preview
+
+    def _prompt_injection_sender_label_for_event(self, event: AstrMessageEvent) -> str:
+        sender_id = _single_line(self._event_sender_id(event), 80)
+        display_name = _single_line(self._sender_display_name(event), 40)
+        if display_name and sender_id and display_name != sender_id:
+            return f"{display_name}/{sender_id}"
+        return display_name or sender_id
+
+    @staticmethod
+    def _prompt_injection_preview_is_internal_prompt(text: str) -> bool:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return False
+        internal_markers = (
+            "【语音消息规则】",
+            "<pc_tts>",
+            "</pc_tts>",
+            "语音消息规则",
+            "提示词片段",
+            "请求级环境感知注入",
+            "被动回复注入",
+            "当前语音正文目标语种",
+            "自然聊天时用中文文字推进对话",
+            "不要写“中文含义”",
+        )
+        if any(marker in cleaned for marker in internal_markers):
+            return True
+        if cleaned.startswith("【") and "规则" in cleaned[:40]:
+            return True
+        return False
+
+    def _safe_prompt_injection_message_preview(self, value: Any, *, limit: int = 220) -> str:
+        preview = _single_line(value, limit)
+        if self._prompt_injection_preview_is_internal_prompt(preview):
+            return ""
+        return preview
+
+    def _upsert_recent_prompt_injection_event(
+        self,
+        *,
+        trace_id: str,
+        item: dict[str, Any],
+        message_preview: str = "",
+        sender_label: str = "",
+    ) -> None:
+        trace = _single_line(trace_id, 80) or f"trace-{uuid.uuid4().hex[:16]}"
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        preview = (
+            self._safe_prompt_injection_message_preview(message_preview)
+            or self._safe_prompt_injection_message_preview(metadata.get("触发消息"))
+        )
+        sender = _single_line(sender_label, 80)
+        events = self.data.setdefault("recent_prompt_injection_events", [])
+        if not isinstance(events, list):
+            events = []
+            self.data["recent_prompt_injection_events"] = events
+        target: dict[str, Any] | None = None
+        for entry in events:
+            if isinstance(entry, dict) and _single_line(entry.get("trace_id"), 80) == trace:
+                target = entry
+                break
+        ts = _safe_float(item.get("ts"), _now_ts(), 0.0)
+        copied_item = deepcopy(item)
+        if target is None:
+            target = {
+                "trace_id": trace,
+                "session": _single_line(item.get("session"), 160) or "unknown",
+                "sender_label": sender,
+                "message_preview": preview,
+                "first_ts": ts,
+                "last_ts": ts,
+                "items": [],
+            }
+            events.append(target)
+        else:
+            if not _single_line(target.get("session"), 160):
+                target["session"] = _single_line(item.get("session"), 160) or "unknown"
+            if preview:
+                target["message_preview"] = preview
+            if sender:
+                target["sender_label"] = sender
+            target["first_ts"] = min(_safe_float(target.get("first_ts"), ts, 0.0), ts)
+            target["last_ts"] = max(_safe_float(target.get("last_ts"), ts, 0.0), ts)
+        event_items = target.get("items")
+        if not isinstance(event_items, list):
+            event_items = []
+            target["items"] = event_items
+        copied_item["trace_seq"] = len(event_items)
+        event_items.append(copied_item)
+        del event_items[32:]
+        events.sort(key=lambda entry: _safe_float(entry.get("last_ts"), 0.0, 0.0), reverse=True)
+        del events[10:]
+
     async def _record_prompt_injection_snapshot(
         self,
         *,
@@ -597,6 +811,9 @@ class EventDispatchMixin:
         mode: str = "",
         metadata: dict[str, Any] | None = None,
         modules: list[dict[str, Any]] | None = None,
+        trace_id: str = "",
+        message_preview: str = "",
+        sender_label: str = "",
     ) -> None:
         content = str(text or "").strip()
         kind = _single_line(kind, 20) or "unknown"
@@ -625,6 +842,8 @@ class EventDispatchMixin:
                 if _single_line(key, 40) and _single_line(value, 220)
             },
         }
+        if kind == "proactive" and self._is_legacy_proactive_prompt_trace(item):
+            return
         async with self._data_lock:
             root = self.data.setdefault("recent_prompt_injections", {})
             if not isinstance(root, dict):
@@ -646,6 +865,12 @@ class EventDispatchMixin:
                     root["tts"] = tts_items
                 tts_items.insert(0, item)
                 del tts_items[8:]
+            self._upsert_recent_prompt_injection_event(
+                trace_id=trace_id,
+                item=item,
+                message_preview=message_preview,
+                sender_label=sender_label,
+            )
         try:
             self._schedule_data_save(delay=2.0)
         except Exception:
@@ -910,9 +1135,9 @@ class EventDispatchMixin:
             return
         if not getattr(self, "enable_recall_message_cache", True):
             return
-        raw = self._event_raw_payload(event)
-        if raw.get("post_type") == "notice":
+        if not self._event_is_platform_message_event(event):
             return
+        raw = self._event_raw_payload(event)
         message_ids = self._event_message_id_candidates(event)
         if not message_ids:
             return
@@ -1029,15 +1254,16 @@ class EventDispatchMixin:
 
     def _reply_cancel_trigger_message_ids(self, event: AstrMessageEvent, *extra_message_ids: str) -> list[str]:
         ids: list[str] = []
-        current_id = self._event_message_id(event)
-        if current_id:
-            ids.append(current_id)
-        quote_id = self._group_current_reply_quote_message_id(event)
-        if quote_id:
-            ids.append(quote_id)
-        for message_id in self._event_reply_message_ids(event):
-            if message_id:
-                ids.append(message_id)
+        if self._event_is_platform_message_event(event):
+            current_id = self._event_message_id(event)
+            if current_id:
+                ids.append(current_id)
+            quote_id = self._group_current_reply_quote_message_id(event)
+            if quote_id:
+                ids.append(quote_id)
+            for message_id in self._event_reply_message_ids(event):
+                if message_id:
+                    ids.append(message_id)
         for message_id in extra_message_ids:
             message_id = _single_line(message_id, 120)
             if message_id:
@@ -2722,18 +2948,21 @@ class EventDispatchMixin:
             item for item in recent[-12:]
             if isinstance(item, dict) and _safe_float(item.get("ts"), 0) >= active_ts
         ]
+        short_interjection_checker = getattr(self, "_group_scene_short_interjection", None)
         other_after_active = [
             item for item in after_active
             if str(item.get("sender_id") or "") and str(item.get("sender_id") or "") != str(sender_id or "")
+            and not (callable(short_interjection_checker) and short_interjection_checker(item.get("text")))
         ]
         seconds_since = now - active_ts if active_ts > 0 else 9999
         direct_markers = (
             "你", "妳", self.bot_name, "bot", "Bot", "刚才你", "你刚才", "你说", "你觉得", "你看",
-            "那你", "问你", "回你", "跟你说", "不是说你", "不是问你",
+            "那你", "问你", "回你", "跟你说", "不是说你", "不是问你", "你来", "按你说",
         )
         continuation_markers = (
             "所以", "那", "那我", "那你", "还有", "然后", "不过", "但是", "刚刚", "刚才",
-            "这个", "这样", "怎么", "为什么", "可以吗", "行吗", "是不是", "对吗", "呢", "？", "?",
+            "这个", "这样", "怎么", "为什么", "可以吗", "行吗", "是不是", "对吗", "对吧",
+            "是吧", "然后呢", "后来呢", "接着呢", "你呢", "所以呢", "你觉得", "？", "?",
         )
         redirect_markers = ("你们", "大家", "群里", "有人", "谁", "他", "她", "它", "他们", "她们")
         has_direct_cue = any(marker and marker in cleaned for marker in direct_markers)
@@ -2743,6 +2972,10 @@ class EventDispatchMixin:
         if looks_redirected_to_group:
             return False
         if has_direct_cue:
+            return True
+        score_getter = getattr(self, "_group_implicit_reply_score", None)
+        implicit_score = score_getter(cleaned) if callable(score_getter) else 0
+        if seconds_since <= 45 and implicit_score >= 40:
             return True
         if other_after_active:
             if not allow_llm:
@@ -3216,7 +3449,12 @@ class EventDispatchMixin:
 
         def _protected_cleanup_chunks(value: str) -> list[tuple[str, bool]]:
             protected_pattern = re.compile(
-                r"(?is)<tts\b[^>]*>.*?</tts>|(?i:\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
+                r"(?is)"
+                r"<(?:image|img|video|record|audio|file)\b[^>]*(?:>.*?</(?:image|img|video|record|audio|file)>|/?>)"
+                r"|<tts\b[^>]*>.*?</tts>"
+                r"|<[^>\n]{1,240}\bpath=\"[^\"]{1,500}\"[^>\n]*>"
+                r"|<[^>\n]{1,240}\b(?:url|src)=\"[^\"]{1,500}\"[^>\n]*>"
+                r"|(?i:\b(?:https?://|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)"
             )
             bracket_pairs = {
                 "(": ")",
@@ -3224,9 +3462,12 @@ class EventDispatchMixin:
                 "[": "]",
                 "【": "】",
                 "{": "}",
+                "「": "」",
+                "『": "』",
+                "《": "》",
             }
             bracket_closers = {closer: opener for opener, closer in bracket_pairs.items()}
-            quote_pairs = {"\"": "\"", "“": "”"}
+            quote_pairs = {"\"": "\"", "“": "”", "'": "'", "‘": "’"}
             chunks: list[tuple[str, bool]] = []
             current: list[str] = []
             protected = False

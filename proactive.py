@@ -77,7 +77,6 @@ from .constants import (
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
-    STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
@@ -268,14 +267,46 @@ class ProactiveMixin:
         platform = _single_line(getattr(self, "target_platform", ""), 40) or "aiocqhttp"
         return f"{platform}:FriendMessage:{user_id}"
 
+    def _private_delivery_user_id_for(self, user_id: str) -> str:
+        canonical = self._canonical_private_user_id(str(user_id or "").strip())
+        aliases = getattr(self, "private_user_delivery_aliases", {}) or {}
+        target = str(aliases.get(canonical) or "").strip()
+        if target and target.isdigit() and not self._is_bot_self_user_id(target):
+            return target
+        return canonical
+
+    def _private_delivery_umo_for_user_id(self, user_id: str) -> str:
+        return self._default_private_umo_for_user_id(self._private_delivery_user_id_for(user_id))
+
+    def _note_private_user_umo(self, user_id: str, user: dict[str, Any] | None, umo: str) -> None:
+        if not isinstance(user, dict):
+            return
+        clean_umo = _single_line(umo, 180)
+        if not clean_umo:
+            return
+        user_id = self._canonical_private_user_id(str(user_id or user.get("user_id") or "").strip())
+        delivery_umo = self._private_delivery_umo_for_user_id(user_id)
+        if delivery_umo:
+            user["umo"] = delivery_umo
+            user["last_inbound_umo"] = clean_umo
+            return
+        user["umo"] = clean_umo
+
     def _ensure_private_user_umo(self, user_id: str, user: dict[str, Any] | None) -> bool:
         if not isinstance(user, dict):
             return False
         user_id = str(user_id or user.get("user_id") or "").strip()
-        fallback = self._default_private_umo_for_user_id(user_id)
+        fallback = self._private_delivery_umo_for_user_id(user_id)
         if not fallback:
             return False
         current = _single_line(user.get("umo"), 180)
+        delivery_id = self._private_delivery_user_id_for(user_id)
+        canonical_id = self._canonical_private_user_id(user_id)
+        if delivery_id and delivery_id != canonical_id:
+            expected_suffix = f":FriendMessage:{delivery_id}"
+            if not current.endswith(expected_suffix):
+                user["umo"] = fallback
+                return True
         if not current:
             user["umo"] = fallback
             return True
@@ -415,7 +446,7 @@ class ProactiveMixin:
                 f"- 当前用户角色：{label}。\n"
                 "- 对方不是主人/恋人/专属陪伴目标。主动联系应像普通朋友：少量、具体、不过度亲密，不使用主人专属称呼、占有欲、撒娇索取或暧昧承诺。\n"
                 "- 动机应以礼貌关心、共同话题、必要转告、轻分享为主；不要因为想贴近、想被哄、想确认对方在不在而频繁打扰。\n"
-                "- 不给朋友使用窥屏或单独生图能力；如果出现图片分享,只能是复用已有普通图片,不要声称为朋友专门拍照、生成或观察。"
+                "- 不给朋友使用窥屏或主动生图能力；不要把主人或其他私聊对象的图片、生活碎片复用给朋友。"
                 "- 不对朋友发起本子/夹层阅读推荐、私密阅读分享、屏幕观察、群聊私下转述、私下创作分享或其他涉及隐私来源的主动。"
             )
         if note:
@@ -433,7 +464,7 @@ class ProactiveMixin:
 
     def _friend_sensitive_proactive_action(self, action: Any) -> bool:
         parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
-        return bool(parts & {"screen_peek", "jm_cosmos_read"})
+        return bool(parts & {"screen_peek", "photo_text", "jm_cosmos_read"})
 
     def _friend_can_receive_proactive_reason(self, user: dict[str, Any] | None, reason: Any, action: Any = "") -> bool:
         if not isinstance(user, dict) or self._private_user_role(user) != "friend":
@@ -466,7 +497,23 @@ class ProactiveMixin:
             "观察你", "看你在忙", "看看你在干嘛", "看你在干嘛",
         )
         combined = f"{normalized_topic} {normalized_motive}"
-        if not any(token in combined for token in sensitive_markers):
+        has_sensitive_action_text = any(token in combined for token in sensitive_markers)
+        has_friend_interaction_text = self._friend_plan_has_private_interaction_text(combined)
+        if not has_sensitive_action_text and not has_friend_interaction_text:
+            return {
+                "reason": str(reason or "check_in"),
+                "action": normalized_action,
+                "topic": normalized_topic,
+                "motive": normalized_motive,
+            }
+        if has_friend_interaction_text:
+            if not normalized_topic or self._friend_plan_has_private_interaction_text(normalized_topic):
+                normalized_topic = "顺手分享一点日常近况"
+            normalized_motive = (
+                "作为普通朋友轻轻分享一个不指向第三方私聊互动的小片段,不要求立刻回复"
+                if str(reason or "") in {"", "check_in", "quiet_care", "state_share", "activity_share"}
+                else "按朋友关系做一次克制的普通文字分享,不写成和朋友用户聊天或约见"
+            )
             return {
                 "reason": str(reason or "check_in"),
                 "action": normalized_action,
@@ -493,6 +540,19 @@ class ProactiveMixin:
             "topic": normalized_topic,
             "motive": normalized_motive,
         }
+
+    @staticmethod
+    def _friend_plan_has_private_interaction_text(text: Any) -> bool:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return False
+        patterns = (
+            r"给.{0,16}(?:回了?消息|发了?消息|回信|回复了?|发私聊)",
+            r"(?:回了?消息|发了?消息|回信|发私聊|私聊|聊天|互相吐槽|互相安慰)",
+            r"(?:约饭|夜宵|见面|出门|一起(?:做|看|聊|吃|去|玩|散步|上课|写|打))",
+            r"(?:朋友用户|朋友边界|朋友那边|朋友私聊)",
+        )
+        return any(re.search(pattern, cleaned) for pattern in patterns)
 
     def _sync_configured_targets(self):
         for user_id in self._configured_target_ids():
@@ -888,7 +948,7 @@ class ProactiveMixin:
     @staticmethod
     def _proactive_text_is_intimate(*parts: Any) -> bool:
         text = " ".join(_single_line(part, 120) for part in parts if _single_line(part, 120))
-        return bool(re.search(r"贴贴|抱抱|亲亲|摸摸|揉揉|蹭蹭|闹你|撒娇|想你|黏|贴近|靠近|坏心思|亲密|睡前|床|小屁股", text, re.I))
+        return bool(re.search(r"贴贴|抱抱|亲亲|摸摸|揉揉|蹭蹭|逗你|撒娇|想你|黏|贴近|靠近|坏心思|亲密|睡前|床|小屁股", text, re.I))
 
     def _low_pressure_proactive_replacement(
         self,
@@ -1005,7 +1065,9 @@ class ProactiveMixin:
         )
         rel_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
         hurt_until = _safe_float(rel_state.get("hurt_until"), 0)
-        base_after = max(check_now + 90 * 60, hurt_until + random.uniform(15 * 60, 75 * 60))
+        backoff_until = _safe_float(rel_state.get("backoff_until"), 0)
+        gate_until = max(hurt_until, backoff_until)
+        base_after = max(check_now + 90 * 60, gate_until + random.uniform(15 * 60, 75 * 60))
         if intimate or mode in {"refusing", "backoff"}:
             self._mark_planned_candidate_status(user, "deferred", f"情绪 {mode}: 亲密主动候选已清理/延后")
             self._clear_pending_proactive_plan(user)
@@ -1120,6 +1182,42 @@ class ProactiveMixin:
             return minute < 14 * 60
         return False
 
+    def _random_proactive_impulse_context(
+        self,
+        user: dict[str, Any],
+        *,
+        now: float,
+    ) -> dict[str, Any]:
+        state = self.data.get("daily_state", {})
+        if not isinstance(state, dict):
+            state = {}
+        energy = _safe_int(state.get("energy"), 70, 0, 100)
+        mood = _single_line(state.get("mood_bias") or state.get("mood"), 24)
+        note = _single_line(state.get("note"), 120)
+        ignored_streak = _safe_int(user.get("ignored_streak"), 0, 0, 20)
+        awaiting_since = _safe_float(user.get("awaiting_reply_since"), 0)
+        last_sent = _safe_float(user.get("last_sent"), 0)
+        reasons: list[str] = []
+        suggest_soft_reason = False
+        if awaiting_since > 0:
+            silent_hours = (now - awaiting_since) / 3600.0
+            if silent_hours >= 3.0:
+                reasons.append(f"已等待回复 {silent_hours:.1f}h")
+                suggest_soft_reason = True
+        elif ignored_streak >= 1 and last_sent > 0 and now - last_sent >= 3 * 3600:
+            reasons.append(f"未回应 {ignored_streak} 次")
+            suggest_soft_reason = True
+        low_energy = energy <= 45
+        quiet_mood = mood in {"安静", "疲惫", "低落", "收声", "困倦"}
+        if low_energy or quiet_mood or any(token in note for token in ("疲惫", "困", "低电量", "收声", "慢一点", "安静")):
+            reasons.append(f"状态偏低({energy}/{mood or '平稳'})")
+            suggest_soft_reason = True
+        return {
+            "allowed": bool(reasons),
+            "reasons": reasons,
+            "suggest_soft_reason": suggest_soft_reason,
+        }
+
     def _queue_event_driven_proactive_impulses(
         self,
         user: dict[str, Any],
@@ -1177,6 +1275,15 @@ class ProactiveMixin:
                 planned_event=event,
             )
             topic = _single_line(event.get("topic"), 60) or self._choose_proactive_topic(reason, user)
+            if self._action_has_photo_text(action) and self._private_user_role(user) != "friend":
+                photo_patch = self._photo_text_plan_field_patch(
+                    reason=reason,
+                    topic=topic,
+                    motive=motive,
+                    planned_event=event,
+                )
+                topic = _single_line(photo_patch.get("topic"), 60) or topic
+                motive = _single_line(photo_patch.get("motive"), 140) or motive
             if self._private_user_role(user) == "friend":
                 friend_safe = self._sanitize_friend_proactive_plan_fields(
                     user,
@@ -1214,7 +1321,12 @@ class ProactiveMixin:
         now: float,
         delay_hours: tuple[float, float],
     ) -> dict[str, Any] | None:
+        context = self._random_proactive_impulse_context(user, now=now)
+        if not bool(context.get("allowed")):
+            return None
         reason = self._choose_planned_reason()
+        if bool(context.get("suggest_soft_reason")) and reason in {"check_in", "state_share"}:
+            reason = "quiet_care"
         motive = self._choose_proactive_motive(reason, user)
         action = self._choose_action_for_reason(reason, user, motive=motive)
         action = self._maybe_upgrade_planned_message_action(
@@ -1241,6 +1353,14 @@ class ProactiveMixin:
         motive = _single_line(emotion_adjustment.get("motive"), 140) or motive
         topic = _single_line(emotion_adjustment.get("topic"), 60) or topic
         scheduled = _safe_float(emotion_adjustment.get("scheduled"), scheduled)
+        if self._action_has_photo_text(action) and self._private_user_role(user) != "friend":
+            photo_patch = self._photo_text_plan_field_patch(
+                reason=reason,
+                topic=topic,
+                motive=motive,
+            )
+            topic = _single_line(photo_patch.get("topic"), 60) or topic
+            motive = _single_line(photo_patch.get("motive"), 140) or motive
         if self._private_user_role(user) == "friend":
             friend_safe = self._sanitize_friend_proactive_plan_fields(
                 user,

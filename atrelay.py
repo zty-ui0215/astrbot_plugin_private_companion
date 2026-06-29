@@ -77,7 +77,6 @@ from .constants import (
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
-    STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
@@ -104,7 +103,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key, normalize_legacy_tag_text
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -534,7 +533,7 @@ class AtRelayMixin:
         text: str,
         relay_mode: str,
     ) -> str:
-        original = _single_line(text, 800)
+        original = self._normalize_atrelay_text(text, limit=800)
         if not original:
             return original
         if not bool(getattr(self, "enable_atrelay_llm_rewrite", True)):
@@ -572,6 +571,7 @@ class AtRelayMixin:
         cleaned = self._clean_atrelay_llm_text(rewritten)
         if not cleaned:
             return original
+        cleaned = self._normalize_atrelay_text(cleaned, limit=800)
         recipient_name = _single_line(recipient_label.split("（", 1)[0], 40)
         source_name = _single_line(source_label.split("（", 1)[0], 40)
         for name in (source_name, recipient_name):
@@ -712,6 +712,9 @@ class AtRelayMixin:
         text = str(value or "").strip().lower()
         return text in {"1", "true", "yes", "y", "on", "确认", "已确认", "可以", "是"}
 
+    def _normalize_atrelay_text(self, text: Any, *, limit: int = 800, label: bool = False) -> str:
+        return _single_line(normalize_legacy_tag_text(text, label=label), limit)
+
     def _parse_atrelay_target_list(self, value: Any, *, limit: int | None = None) -> list[str]:
         if isinstance(value, list):
             raw_items = value
@@ -738,7 +741,7 @@ class AtRelayMixin:
         return kept
 
     def _atrelay_send_signature(self, kind: str, target: str, text: str, at_user: str = "") -> str:
-        compact = re.sub(r"\s+", "", _single_line(text, 240))
+        compact = re.sub(r"\s+", "", self._normalize_atrelay_text(text, limit=240))
         return f"{kind}:{target}:{at_user}:{compact[:160]}"
 
     def _atrelay_cached_group_matches(self, hint: Any = "") -> list[dict[str, str]]:
@@ -884,7 +887,7 @@ class AtRelayMixin:
         source_name: str = "",
     ) -> None:
         target_id = _single_line(target, 40)
-        sent_text = _single_line(text, 300)
+        sent_text = self._normalize_atrelay_text(text, limit=300)
         if not target_id or not sent_text:
             return
         contexts = self._recent_atrelay_contexts()
@@ -968,13 +971,14 @@ class AtRelayMixin:
         source_name: str = "",
     ) -> None:
         log = self._atrelay_send_log()
+        normalized_text = self._normalize_atrelay_text(text, limit=300)
         log.append(
             {
                 "ts": _now_ts(),
                 "kind": kind,
                 "target": str(target),
                 "at_user": _single_line(at_user, 80),
-                "signature": self._atrelay_send_signature(kind, target, text, at_user),
+                "signature": self._atrelay_send_signature(kind, target, normalized_text, at_user),
             }
         )
         del log[:-80]
@@ -985,7 +989,7 @@ class AtRelayMixin:
         self._note_atrelay_recent_context(
             kind=kind,
             target=target,
-            text=text,
+            text=normalized_text,
             at_user=at_user,
             source_user=source_user,
             source_name=source_name,

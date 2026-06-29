@@ -77,7 +77,6 @@ from .constants import (
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
-    STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
@@ -104,7 +103,16 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import (
+    _date_key,
+    _now_ts,
+    _safe_float,
+    _safe_int,
+    _single_line,
+    _strip_internal_message_blocks,
+    _text_similarity,
+    _today_key,
+)
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -611,6 +619,28 @@ class PrivateReadingMixin:
             if (normalized := self._normalize_private_reading_tag(part))
         }
 
+    def _dedupe_private_reading_impression(self, text: Any, *, limit: int = 420) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        chunks: list[str] = []
+        for part in re.split(r"(?:\n+|(?<=[。！？!?；;])\s*)", cleaned):
+            part = _single_line(part.strip(), 240)
+            part = re.sub(r"^(?:读后感|画面记录|札记\s*\d*|笔记\s*\d*)[:：]\s*", "", part).strip()
+            if part:
+                chunks.append(part)
+        if not chunks:
+            chunks = [_single_line(cleaned, limit)]
+        kept: list[str] = []
+        for chunk in chunks:
+            if any(_text_similarity(chunk, existing) >= 0.72 for existing in kept):
+                continue
+            kept.append(chunk)
+            if len("".join(kept)) >= limit:
+                break
+        result = "".join(kept).strip()
+        return _single_line(result or cleaned, limit)
+
     def _jm_cosmos_detail_blocked_by_tags(self, detail: dict[str, Any]) -> str:
         blocked_tags = self._private_reading_blocked_tag_set()
         if not blocked_tags:
@@ -734,7 +764,7 @@ class PrivateReadingMixin:
             parsed = self._parse_jm_cosmos_vision_result(text, sampled_pages or [])
             if parsed.get("impression") or parsed.get("page_comments"):
                 return parsed
-            return {"impression": _single_line(text, 420), "page_comments": []}
+            return {"impression": self._dedupe_private_reading_impression(text), "page_comments": []}
         except Exception as e:
             logger.debug(f"[PrivateCompanion] 夹层阅读视觉分析失败: {e}")
             return {}
@@ -790,7 +820,7 @@ class PrivateReadingMixin:
             if len(comments) >= 8:
                 break
         return {
-            "impression": _single_line(data.get("impression"), 420),
+            "impression": self._dedupe_private_reading_impression(data.get("impression")),
             "rating": _safe_int(data.get("rating"), 0, 0, 10),
             "rating_reason": _single_line(data.get("rating_reason") or data.get("reason"), 160),
             "preference_tags": [
@@ -847,22 +877,16 @@ class PrivateReadingMixin:
             secret = {}
             self.data["bookshelf_secret"] = secret
         password = _single_line(secret.get("password"), 12)
-        if password:
+        basis = _single_line(secret.get("basis"), 40)
+        if password and not self._bookshelf_password_should_rotate(password, basis):
             return password
-        candidates: list[str] = []
-        for item in self.data.get("important_dates", []) if isinstance(self.data.get("important_dates"), list) else []:
-            if not isinstance(item, dict):
-                continue
-            date_text = re.sub(r"\D", "", _single_line(item.get("date"), 16))
-            for size in (6, 4):
-                if len(date_text) >= size:
-                    candidates.append(date_text[-size:])
-        password = next((item for item in candidates if re.fullmatch(r"\d{4,6}", item or "")), "")
-        if not password:
-            password = f"{random.randint(1000, 999999):04d}"[:6]
+        password = self._generate_bookshelf_password()
         secret["password"] = password
-        secret["basis"] = "numeric_dates_or_random"
+        secret["basis"] = "local_random_numeric_v2"
+        secret["reason"] = self._bookshelf_password_fallback_reason(password)
         secret["created_at"] = _now_ts()
+        if basis:
+            secret["previous_basis"] = basis
         return password
 
     async def _ensure_bookshelf_password_async(self) -> str:
@@ -871,18 +895,19 @@ class PrivateReadingMixin:
             secret = {}
             self.data["bookshelf_secret"] = secret
         password = _single_line(secret.get("password"), 12)
-        if password:
+        basis = _single_line(secret.get("basis"), 40)
+        if password and not self._bookshelf_password_should_rotate(password, basis):
             return password
-        dates = self._format_important_dates_for_prompt()
         prompt = f"""
 请作为这个 Bot 自己,私下给书柜夹层设置一个密码。
 
 要求：
 1. 密码必须是纯数字,只能包含 0-9。
 2. 长度 4 到 6 位,不要太长。
-3. 可以参考人设、世界观、重要日期或她容易记住的数字,但最终只能输出数字本身。
-4. 不要解释,不要输出 JSON,不要加“密码是”,只输出 4 到 6 位数字。
-5. 不要使用真实手机号、QQ号、身份证号等长敏感数字。
+3. 可以参考人格气质和世界观氛围,但不要参考用户或自己的生日、纪念日、日期、手机号、QQ号、账号、门牌号等现实身份信息。
+4. 不要输出 1234、123456、111111、520520、1314、重复数字、顺子或明显常见密码。
+5. reason 用一句简短的第一人称说明为什么会选这个数字,只能写成气质、手感、私密暗号、书柜氛围之类,不得提生日、纪念日、日期、手机号、QQ号、账号或现实身份信息。
+6. 只输出 JSON,不要使用 Markdown。格式：{{"password":"482719","reason":"这串数字像我随手藏进书页里的暗号,有点偏心又不太好猜。"}}
 
 【Bot 名称】
 {self.bot_name}
@@ -895,9 +920,6 @@ class PrivateReadingMixin:
 
 【世界观补充】
 {self.schedule_worldview_prompt or "（无）"}
-
-【重要日期】
-{dates or "（无）"}
 """.strip()
         raw = await self._llm_call(
             prompt,
@@ -907,39 +929,293 @@ class PrivateReadingMixin:
                 self.llm_provider_id,
             ),
         )
-        candidate = re.sub(r"\D", "", _single_line(raw, 24))
-        if (
-            not candidate
-            or not re.fullmatch(r"\d{4,6}", candidate)
-        ):
+        payload = self._parse_bookshelf_password_payload(raw)
+        candidate = _single_line(payload.get("password"), 12)
+        reason = _single_line(payload.get("reason"), 120)
+        if not candidate or self._bookshelf_password_should_rotate(candidate, ""):
             candidate = self._ensure_bookshelf_password()
+            secret["basis"] = "local_random_numeric_fallback"
+            secret["reason"] = self._bookshelf_password_fallback_reason(candidate)
         else:
             secret["password"] = candidate
-            secret["basis"] = "bot_private_llm_numeric"
+            secret["basis"] = "bot_private_llm_numeric_v2"
+            secret["reason"] = reason or self._bookshelf_password_fallback_reason(candidate)
             secret["created_at"] = _now_ts()
+            if basis:
+                secret["previous_basis"] = basis
         self._save_data_sync()
         return _single_line(secret.get("password") or candidate, 12)
+
+    @staticmethod
+    def _bookshelf_password_fallback_reason(password: str = "") -> str:
+        value = _single_line(password, 12)
+        if value:
+            return "这串数字只是一枚书柜夹层里的私密暗号,没有生日或日期含义。"
+        return "这是一枚书柜夹层里的私密暗号,没有生日或日期含义。"
+
+    @staticmethod
+    def _parse_bookshelf_password_payload(raw: Any) -> dict[str, str]:
+        text = str(raw or "").strip()
+        payload: dict[str, Any] = {}
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except Exception:
+                payload = {}
+        password = re.sub(r"\D", "", _single_line(payload.get("password"), 24))
+        if not password:
+            password = re.sub(r"\D", "", _single_line(text, 40))
+        reason = _single_line(payload.get("reason"), 120)
+        forbidden_reason_terms = (
+            "生日", "纪念日", "日期", "手机号", "手机", "QQ", "qq", "账号", "账户", "门牌", "身份证",
+            "12月", "月份", "日子",
+        )
+        if any(term in reason for term in forbidden_reason_terms):
+            reason = ""
+        return {"password": password, "reason": reason}
+
+    async def _ensure_bookshelf_password_reason_async(self, password: str = "") -> str:
+        secret = self.data.setdefault("bookshelf_secret", {})
+        if not isinstance(secret, dict):
+            secret = {}
+            self.data["bookshelf_secret"] = secret
+        password = _single_line(password or secret.get("password"), 12)
+        reason = self._sanitize_bookshelf_password_reason(secret.get("reason"))
+        if reason:
+            return reason
+        if not password:
+            password = await self._ensure_bookshelf_password_async()
+        prompt = f"""
+请作为这个 Bot 自己,给书柜夹层密码写一句内部理由。
+
+要求：
+1. 密码是：{password}
+2. 只写为什么自己会选这串数字,像私密暗号、书页边缘、抽屉手感、人格气质之类。
+3. 不要把它解释成生日、纪念日、日期、手机号、QQ号、账号、门牌号或任何现实身份信息。
+4. 不要说这是随机数、插件、配置或系统生成。
+5. 只输出一句中文,不要超过 45 字。
+
+【Bot 名称】
+{self.bot_name}
+
+【人格】
+{self._get_default_persona_prompt()}
+""".strip()
+        raw = await self._llm_call(
+            prompt,
+            max_tokens=80,
+            provider_id=self._task_provider(
+                self.dream_diary_provider_id,
+                self.mai_style_provider_id,
+                self.llm_provider_id,
+            ),
+        )
+        reason = self._sanitize_bookshelf_password_reason(raw)
+        if not reason:
+            reason = self._bookshelf_password_fallback_reason(password)
+        secret["reason"] = reason
+        secret["reason_generated_at"] = _now_ts()
+        self._save_data_sync()
+        return reason
+
+    @staticmethod
+    def _sanitize_bookshelf_password_reason(value: Any) -> str:
+        reason = _single_line(value, 120).strip(" ：:，,。.!！?？\"'`")
+        if not reason:
+            return ""
+        forbidden_reason_terms = (
+            "生日", "纪念日", "日期", "手机号", "手机", "QQ", "qq", "账号", "账户", "门牌", "身份证",
+            "12月", "月份", "日子", "随机", "插件", "配置", "系统生成",
+        )
+        if any(term in reason for term in forbidden_reason_terms):
+            return ""
+        return reason[:80]
+
+    @staticmethod
+    def _bookshelf_password_should_rotate(password: str, basis: str = "") -> bool:
+        value = _single_line(password, 12)
+        if not re.fullmatch(r"\d{4,6}", value or ""):
+            return True
+        if basis == "manual":
+            return False
+        common_values = {
+            "0000", "1111", "2222", "3333", "4444", "5555", "6666", "7777", "8888", "9999",
+            "000000", "111111", "222222", "333333", "444444", "555555", "666666", "777777", "888888", "999999",
+            "1234", "12345", "123456", "654321", "112233", "121212", "1314", "520520",
+        }
+        if value in common_values or len(set(value)) <= 2:
+            return True
+        return False
+
+    @staticmethod
+    def _generate_bookshelf_password() -> str:
+        rng = random.SystemRandom()
+        while True:
+            value = f"{rng.randint(100000, 999999)}"
+            if PrivateReadingMixin._bookshelf_password_should_rotate(value, ""):
+                continue
+            return value
 
     async def _format_bookshelf_secret_for_prompt(
         self,
         inbound_text: str = "",
         user: dict[str, Any] | None = None,
     ) -> str:
-        if not getattr(self, "enable_jm_cosmos_integration", False):
+        signal = self._bookshelf_secret_signal_info(inbound_text)
+        if not (
+            getattr(self, "enable_private_reading_integration", False)
+            or getattr(self, "enable_jm_cosmos_integration", False)
+        ):
+            self._log_bookshelf_secret_skip(
+                "feature_disabled",
+                inbound_text,
+                user,
+                signal=signal,
+            )
             return ""
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
+            self._log_bookshelf_secret_skip(
+                "friend_user",
+                inbound_text,
+                user,
+                signal=signal,
+            )
             return ""
-        text = str(inbound_text or "")
-        if not any(token in text for token in ("书柜", "夹层", "抽屉", "日记", "密码", "私密", "藏了什么")):
+        if not signal.get("likely"):
+            self._log_bookshelf_secret_skip(
+                "intent_not_enough",
+                inbound_text,
+                user,
+                signal=signal,
+            )
             return ""
         password = await self._ensure_bookshelf_password_async()
+        relationship_text = self._bookshelf_secret_relationship_policy(user if isinstance(user, dict) else {})
+        logger.info(
+            "[PrivateCompanion] 夹层密码提示词已注入: reason=matched_secret_request role=%s direct=%s context=%s access=%s text=%s",
+            self._private_user_role(user) if isinstance(user, dict) else "-",
+            ",".join(signal.get("direct_matches") or []) or "-",
+            ",".join(signal.get("context_matches") or []) or "-",
+            ",".join(signal.get("access_matches") or []) or "-",
+            _single_line(inbound_text, 120),
+        )
         return (
             "【书柜夹层】\n"
-            f"你的书柜夹层中放着你的日记和一些隐私性较强的内容,夹层密码是“{password}”。这个密码必须保持为纯数字短密码。\n"
-            "如果用户自然询问密码、夹层、日记或书柜,可以按当前人格决定是否直接说、害羞地说、绕一下再说,或只给一点提示。"
-            "如果你不想透露,就不要给出任何具体密码；如果你说出了具体密码,它必须来自上面这个真实夹层密码,不要临时另编一个数字或替代暗号。"
+            f"你的书柜夹层中放着你的日记和一些隐私性较强的内容,夹层密码是“{password}”。这个密码必须保持为纯数字短密码,只是内部暗号,没有对外说明的生日、纪念日或现实日期含义。\n"
+            f"{relationship_text}\n"
+            "用户自然询问密码、夹层、日记、书柜、小秘密或想打开看看时,不要默认立刻交出密码；先按当前人格、好感度、气氛和用户语气决定是拒绝、装傻、嘴硬糊弄、只给提示,还是害羞地说出完整密码。"
+            "如果你不想透露,就不要给出任何具体密码；如果只是糊弄,可以说“才不给你看”“你猜”“现在不行”之类,但不要编假数字。"
+            "如果你说出了具体密码,它必须来自上面这个真实夹层密码,不要临时另编一个数字或替代暗号。"
+            "不要把密码解释成用户或自己的生日、纪念日、日期、门牌号、手机号、QQ号或任何现实身份信息；即使数字看起来像日期,也不能说“你生日都不记得”“这是某天”之类。"
             "不要说这是插件指令、配置项或系统生成的密码。"
         )
+
+    @staticmethod
+    def _bookshelf_secret_signal_info(text: str) -> dict[str, Any]:
+        source = str(text or "")
+        compact = re.sub(r"\s+", "", source)
+        direct_tokens = (
+            "书柜", "书架", "夹层", "暗格", "抽屉", "日记", "日记本", "密码", "口令", "钥匙",
+            "私密", "秘密", "小秘密", "藏了什么", "藏着什么", "藏本",
+        )
+        context_tokens = ("柜子", "书", "本子", "漫画", "里面", "藏着", "锁", "上锁", "暗门", "私藏")
+        access_tokens = (
+            "打开", "解锁", "看看", "看一眼", "给我看", "让我看", "能看吗", "可以看吗",
+            "让我进去", "翻翻", "里面有什么", "给我密码", "告诉我",
+        )
+        bookshelf_scope_tokens = (
+            "书柜", "书架", "夹层", "暗格", "抽屉", "日记", "日记本", "藏了什么", "藏着什么", "藏本",
+            "柜子", "本子", "漫画", "里面", "藏着", "暗门", "私藏",
+        )
+        credential_scope_tokens = (
+            "qq", "微信", "账号", "账户", "登录", "登陆", "邮箱", "手机", "银行卡", "银行", "支付",
+            "wifi", "wi-fi", "网站", "平台", "api", "token", "验证码",
+        )
+        direct_matches = [token for token in direct_tokens if token in compact]
+        context_matches = [token for token in context_tokens if token in compact]
+        access_matches = [token for token in access_tokens if token in compact]
+        lower_compact = compact.lower()
+        credential_only = (
+            any(token in lower_compact for token in credential_scope_tokens)
+            and any(token in direct_matches for token in ("密码", "口令", "钥匙"))
+            and not any(token in compact for token in bookshelf_scope_tokens)
+        )
+        if credential_only:
+            direct_matches = [token for token in direct_matches if token not in {"密码", "口令", "钥匙"}]
+            access_matches = [token for token in access_matches if token != "给我密码"]
+        likely = bool(direct_matches or (context_matches and access_matches))
+        mention = bool(direct_matches or context_matches)
+        return {
+            "mention": mention,
+            "likely": likely,
+            "direct_matches": direct_matches,
+            "context_matches": context_matches,
+            "access_matches": access_matches,
+        }
+
+    @staticmethod
+    def _bookshelf_secret_request_likely(text: str) -> bool:
+        return bool(PrivateReadingMixin._bookshelf_secret_signal_info(text).get("likely"))
+
+    def _log_bookshelf_secret_skip(
+        self,
+        reason: str,
+        inbound_text: str = "",
+        user: dict[str, Any] | None = None,
+        *,
+        signal: dict[str, Any] | None = None,
+    ) -> None:
+        signal = signal if isinstance(signal, dict) else self._bookshelf_secret_signal_info(inbound_text)
+        if not signal.get("mention"):
+            return
+        logger.info(
+            "[PrivateCompanion] 用户提到夹层但未注入夹层密码提示词: reason=%s role=%s direct=%s context=%s access=%s feature=%s legacy_feature=%s text=%s",
+            reason,
+            self._private_user_role(user) if isinstance(user, dict) else "-",
+            ",".join(signal.get("direct_matches") or []) or "-",
+            ",".join(signal.get("context_matches") or []) or "-",
+            ",".join(signal.get("access_matches") or []) or "-",
+            bool(getattr(self, "enable_private_reading_integration", False)),
+            bool(getattr(self, "enable_jm_cosmos_integration", False)),
+            _single_line(inbound_text, 120),
+        )
+
+    def _bookshelf_secret_relationship_policy(self, user: dict[str, Any]) -> str:
+        profile_getter = getattr(self, "_relationship_profile", None)
+        profile = profile_getter(user) if callable(profile_getter) and isinstance(user, dict) else {}
+        level = _single_line(profile.get("level") if isinstance(profile, dict) else "", 24) or "熟悉"
+        preference = _single_line(profile.get("preference") if isinstance(profile, dict) else "", 24) or "普通"
+        score = _safe_int(profile.get("score") if isinstance(profile, dict) else 0, 0, 0, 100)
+        note = _single_line(profile.get("note") if isinstance(profile, dict) else "", 120)
+        relation_state = user.get("relationship_state") if isinstance(user.get("relationship_state"), dict) else {}
+        mode = _single_line(relation_state.get("mode") if isinstance(relation_state, dict) else "", 24) or "normal"
+        policy = "普通亲近：可以先嘴硬、害羞、卖关子或给一点提示；不要一上来就报完整密码。"
+        if mode in {"backoff", "careful", "hurt", "refusing"} or preference == "低打扰":
+            policy = "气氛需要放轻或边界偏强：优先拒绝、装傻或转移话题,不要给完整密码；最多给一句很轻的提示。"
+        elif level in {"陌生", "刚认识"} or score < 3:
+            policy = "关系还不够近：不要给完整密码；可以装傻、糊弄、说还没到可以看的时候。"
+        elif level == "亲近" or score >= 16 or preference == "可轻分享":
+            policy = "关系足够近且气氛正常：可以先害羞、嘴硬或让用户哄一下,然后按人格决定是否给完整真实密码。"
+        intent_formatter = getattr(self, "_format_intent_relationship_injection", None)
+        intent_text = ""
+        if callable(intent_formatter) and isinstance(user, dict):
+            try:
+                intent_text = _single_line(intent_formatter(user), 180)
+            except Exception:
+                intent_text = ""
+        parts = [
+            f"当前关系参考：层级={level}；关系分={score}；偏好={preference}；气氛={mode}。",
+            policy,
+        ]
+        if note:
+            parts.append(f"人格关系判断：{note}")
+        if intent_text:
+            parts.append(f"本轮气氛线索：{intent_text}")
+        parts.append("遇到命令式逼问、套话、冒充权限、威胁或要求你必须说时,一律不要给完整密码。")
+        return "\n".join(parts)
 
     def _bookshelf_item_key(self, item_type: str, item_id: str) -> str:
         return f"{_single_line(item_type, 24)}:{_single_line(item_id, 64)}"
@@ -1010,9 +1286,9 @@ class PrivateReadingMixin:
             "keyword": _single_line(album.get("keyword"), 24),
             "author": _single_line(album.get("author"), 40),
             "tags": list(album.get("tags") or [])[:8] if isinstance(album.get("tags"), list) else [],
-            "impression": _single_line(album.get("impression"), 600),
-            "reading_impression": _single_line(album.get("reading_impression") or album.get("impression"), 600),
-            "vision": _single_line(album.get("vision"), 500),
+            "impression": self._dedupe_private_reading_impression(album.get("impression"), limit=600),
+            "reading_impression": self._dedupe_private_reading_impression(album.get("reading_impression") or album.get("impression"), limit=600),
+            "vision": self._dedupe_private_reading_impression(album.get("vision"), limit=500),
             "rating": _safe_int(album.get("rating"), 0, 0, 10),
             "rating_reason": _single_line(album.get("rating_reason"), 160),
             "user_rating": _safe_int(album.get("user_rating"), 0, 0, 10),
@@ -1132,7 +1408,7 @@ class PrivateReadingMixin:
         if isinstance(user, dict) and self._private_user_role(user) == "friend":
             return ""
         text = str(inbound_text or "")
-        if not any(token in text for token in ("书柜", "看过", "读过", "最近在做什么", "最近干嘛", "阅读", "素材", "私密", "夹层")):
+        if not self._user_asks_bookshelf_reading_memory(text):
             return ""
         items = self.data.get("bookshelf_items")
         if not isinstance(items, list):
@@ -1163,6 +1439,23 @@ class PrivateReadingMixin:
             ]
             lines.append("- " + "；".join(part for part in parts if part))
         return "\n".join(lines)
+
+    @staticmethod
+    def _user_asks_bookshelf_reading_memory(text: str) -> bool:
+        cleaned = _single_line(text, 120)
+        if not cleaned:
+            return False
+        compact = re.sub(r"\s+", "", cleaned)
+        direct_tokens = (
+            "书柜", "夹层", "抽屉", "藏本", "私密阅读", "阅读记录",
+            "本子", "漫画", "小本本",
+        )
+        if any(token in compact for token in direct_tokens):
+            return True
+        return bool(
+            re.search(r"(最近|刚刚|之前|上次|这两天|今天).{0,8}(看|读|翻).{0,8}(什么|啥|哪本|哪篇|哪部)", compact)
+            or re.search(r"(看过|读过|翻过).{0,8}(什么|啥|哪本|哪篇|哪部)", compact)
+        )
 
     async def _run_jm_cosmos_read_action(self, user: dict[str, Any] | None = None) -> dict[str, Any] | None:
         if not self._jm_cosmos_read_available(user):
@@ -1298,7 +1591,7 @@ class PrivateReadingMixin:
                     page_paths,
                     sampled_pages=sampled_pages,
                 )
-                vision = _single_line(vision_result.get("impression"), 420) if isinstance(vision_result, dict) else ""
+                vision = self._dedupe_private_reading_impression(vision_result.get("impression")) if isinstance(vision_result, dict) else ""
                 page_comments = vision_result.get("page_comments", []) if isinstance(vision_result, dict) else []
                 bot_rating = _safe_int(vision_result.get("rating"), 0, 0, 10) if isinstance(vision_result, dict) else 0
                 rating_reason = _single_line(vision_result.get("rating_reason"), 160) if isinstance(vision_result, dict) else ""
@@ -1324,8 +1617,8 @@ class PrivateReadingMixin:
                     "photo_count": photo_count,
                     "image_count": len(pages),
                     "vision": vision,
-                    "impression": _single_line(impression, 420),
-                    "reading_impression": _single_line(impression, 420),
+                    "impression": self._dedupe_private_reading_impression(impression),
+                    "reading_impression": self._dedupe_private_reading_impression(impression),
                     "rating": bot_rating,
                     "rating_reason": rating_reason,
                     "preference_tags": [_single_line(tag, 24) for tag in preference_tags[:8] if _single_line(tag, 24)] if isinstance(preference_tags, list) else [],

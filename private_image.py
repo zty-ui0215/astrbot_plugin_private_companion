@@ -935,6 +935,13 @@ class PrivateImageMixin:
             None,
         )
 
+    def _private_image_provider_timeout_seconds(self) -> float:
+        configured = _safe_float(getattr(self, "private_image_provider_timeout_seconds", 12.0), 12.0, 3.0)
+        wait_budget = _safe_float(getattr(self, "private_image_vision_wait_seconds", 30.0), 30.0, 0.0)
+        if wait_budget > 0:
+            configured = min(configured, max(3.0, wait_budget))
+        return max(3.0, configured)
+
     def _private_image_model_image_items(self, image_sources: list[str]) -> list[tuple[str, str]]:
         items, _source_count, _has_gif_frames = self._private_image_model_image_items_with_meta(image_sources)
         return items
@@ -1689,7 +1696,11 @@ class PrivateImageMixin:
                 continue
             try:
                 start = time.time()
-                result = await provider.text_chat(prompt=prompt, image_urls=image_urls, max_tokens=min(520, 220 + image_count * 50))
+                attempt_timeout = self._private_image_provider_timeout_seconds()
+                result = await asyncio.wait_for(
+                    provider.text_chat(prompt=prompt, image_urls=image_urls, max_tokens=min(520, 220 + image_count * 50)),
+                    timeout=attempt_timeout,
+                )
                 text = str(getattr(result, "completion_text", result) or "").strip()
                 cleaned_text = _single_line(_strip_internal_message_blocks(text), text_limit)
                 cleaned_text = self._private_image_downgrade_conflicting_ownership(cleaned_text)
@@ -1729,6 +1740,21 @@ class PrivateImageMixin:
                     preview=self._private_image_cache_preview_from_sources(cache_key, [*original_sources, *sources]),
                 )
                 return cleaned_text
+            except asyncio.TimeoutError:
+                elapsed_ms = int((time.time() - start) * 1000) if "start" in locals() else 0
+                timeout_note = f"识图单次调用超过 {self._private_image_provider_timeout_seconds():.1f}s"
+                self._record_llm_usage(
+                    provider_id=provider_id,
+                    task="private_image_vision",
+                    prompt=prompt,
+                    completion="",
+                    elapsed_ms=elapsed_ms,
+                    success=False,
+                    error=timeout_note,
+                    budget_exempt=True,
+                )
+                self._mark_private_image_provider_failure(provider_id, provider_source, timeout_note, task="private_image_vision")
+                continue
             except Exception as exc:
                 self._record_llm_usage(
                     provider_id=provider_id,
@@ -2305,6 +2331,7 @@ class PrivateImageMixin:
         vision_task = buffer.get("vision_task")
         image_limit = self._private_image_vision_text_limit(len(images))
         vision_text = _single_line(buffer.get("vision_text"), image_limit)
+        vision_wait_timed_out = False
         if not vision_text and isinstance(vision_task, asyncio.Task):
             timeout = max(0.0, float(getattr(self, "private_image_vision_wait_seconds", 30.0) or 0.0))
             try:
@@ -2312,6 +2339,7 @@ class PrivateImageMixin:
                     logger.info("[PrivateCompanion] 私聊单图等待视觉转述完成: user=%s timeout=%.1fs", user_id, timeout)
                     vision_text = _single_line(await asyncio.wait_for(asyncio.shield(vision_task), timeout=timeout), image_limit)
             except asyncio.TimeoutError:
+                vision_wait_timed_out = True
                 logger.info("[PrivateCompanion] 私聊单图延迟处理时视觉转述仍未完成: user=%s timeout=%.1fs", user_id, timeout)
             except Exception as exc:
                 logger.info("[PrivateCompanion] 私聊单图延迟视觉转述失败: user=%s error=%s", user_id, _single_line(exc, 120))
@@ -2402,11 +2430,24 @@ class PrivateImageMixin:
             elif request_image_refs:
                 setattr(framework_event, "private_companion_delayed_image_mode", "caption" if has_visual_provider else "no_vision")
             if not direct_image_mode and has_visual_provider and not vision_text and images:
-                vision_text = _single_line(await self._transcribe_private_inbound_images(images, umo=umo), self._private_image_vision_text_limit(len(images)))
-                setattr(framework_event, "private_companion_delayed_image_vision_text", vision_text)
-                ownership_line = self._private_image_ownership_line(vision_text)
-                intent_line = self._private_image_intent_line(vision_text)
-                reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
+                completed_vision = self._completed_private_image_vision_task_text(vision_task)
+                if completed_vision:
+                    vision_text = _single_line(completed_vision, self._private_image_vision_text_limit(len(images)))
+                    logger.info(
+                        "[PrivateCompanion] 私聊单图主链前取到后台视觉摘要: user=%s preview=%s",
+                        user_id,
+                        _single_line(vision_text, 220),
+                    )
+                elif not vision_wait_timed_out:
+                    vision_text = _single_line(await self._transcribe_private_inbound_images(images, umo=umo), self._private_image_vision_text_limit(len(images)))
+                else:
+                    logger.info("[PrivateCompanion] 私聊单图识图等待已超时,主链不再重复发起视觉转述: user=%s", user_id)
+                    setattr(framework_event, "private_companion_delayed_image_mode", "no_vision")
+                if vision_text:
+                    setattr(framework_event, "private_companion_delayed_image_vision_text", vision_text)
+                    ownership_line = self._private_image_ownership_line(vision_text)
+                    intent_line = self._private_image_intent_line(vision_text)
+                    reply_objective = self._private_image_reply_objective(ownership_line, vision_text=vision_text)
             if has_dynamic_gif_sources and request_image_refs:
                 logger.info(
                     "[PrivateCompanion] 私聊单图检测到动态 GIF,已改用抽帧视觉摘要链路: user=%s has_vision=%s",
@@ -2597,8 +2638,10 @@ class PrivateImageMixin:
                             user_id,
                             _single_line(vision_text, 220),
                         )
-                    else:
+                    elif not vision_wait_timed_out:
                         vision_text = _single_line(await self._transcribe_private_inbound_images(images, umo=umo), self._private_image_vision_text_limit(len(images)))
+                    else:
+                        logger.info("[PrivateCompanion] 私聊单图兜底阶段跳过重复视觉转述: user=%s", user_id)
                     setattr(event, "private_companion_delayed_image_vision_text", vision_text)
                     ownership_line = self._private_image_ownership_line(vision_text)
                     intent_line = self._private_image_intent_line(vision_text)
@@ -2628,13 +2671,24 @@ class PrivateImageMixin:
                     _single_line(reply, 180),
                 )
                 if not reply:
-                    reply_source = "fallback_static"
-                    reply = (
-                        f"我看到了，{_single_line(vision_text, 120)}"
-                        if vision_text
-                        else "我看到你发了图片，但这边暂时没看清内容。你补一句想让我看哪里就好。"
+                    logger.warning(
+                        "[PrivateCompanion] 私聊单图原生链路与兜底 LLM 均未生成有效回复,不启用本地静态兜底: user=%s images=%s has_vision=%s",
+                        user_id,
+                        len(images),
+                        bool(vision_text),
                     )
-                logger.warning("[PrivateCompanion] 私聊单图原生链路回复为空,已使用兜底回复: user=%s images=%s", user_id, len(images))
+                    self._record_llm_usage(
+                        provider_id="framework",
+                        task="private_image_only_framework",
+                        prompt=prompt,
+                        completion="",
+                        elapsed_ms=int((time.time() - start) * 1000),
+                        success=False,
+                        resp=llm_resp,
+                        budget_exempt=True,
+                    )
+                    return
+                logger.warning("[PrivateCompanion] 私聊单图原生链路回复为空,已使用兜底 LLM 回复: user=%s images=%s", user_id, len(images))
             self._record_llm_usage(
                 provider_id="framework",
                 task="private_image_only_framework",

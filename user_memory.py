@@ -77,7 +77,6 @@ from .constants import (
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
-    STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
@@ -383,7 +382,7 @@ class UserMemoryMixin:
     def _update_expression_profile_from_message(self, user: dict[str, Any], text: str) -> None:
         if not self.enable_expression_learning:
             return
-        cleaned = _single_line(text, 220)
+        cleaned = _single_line(text, self._expression_sample_max_chars())
         if not cleaned:
             return
         if self._should_skip_expression_sample(cleaned):
@@ -426,6 +425,18 @@ class UserMemoryMixin:
         cutoff = now - 30 * 86400
         samples = [item for item in samples if _safe_float(item.get("ts"), now) >= cutoff]
         profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        sample = self._expression_sample_from_text(cleaned, now)
+        if self._expression_manual_review_enabled():
+            profile["samples"] = samples[: self.max_learned_expression_items]
+            self._queue_expression_pending_sample(profile, sample, cleaned)
+            self._refresh_expression_profile_legacy_summary(profile)
+            return
+        samples.insert(0, sample)
+        profile["samples"] = samples[: self.max_learned_expression_items]
+        self._refresh_expression_profile_legacy_summary(profile)
+
+    def _expression_sample_from_text(self, cleaned: str, now: float | None = None) -> dict[str, Any]:
+        now = now or _now_ts()
         punctuation = {}
         for mark in ("！", "!", "？", "?", "~", "～", "…", "。"):
             count = cleaned.count(mark)
@@ -436,23 +447,63 @@ class UserMemoryMixin:
         if 2 <= len(stripped) <= 80:
             ending = stripped[-min(6, max(2, len(stripped))):]
         phrase = ""
-        if 2 <= len(cleaned) <= 40 and not re.search(r"https?://|<[^>]+>", cleaned):
+        phrase_limit = 56 if self._expression_learning_mode() == "aggressive" else 40
+        if 2 <= len(cleaned) <= phrase_limit and not re.search(r"https?://|<[^>]+>", cleaned):
             phrase = cleaned
-        samples.insert(
-            0,
-            {
-                "ts": now,
-                "length": len(cleaned),
-                "punctuation": punctuation,
-                "ending": ending,
-                "phrase": phrase,
-            },
+        return {
+            "id": hashlib.sha1(f"{now}:{cleaned}".encode("utf-8")).hexdigest()[:12],
+            "ts": now,
+            "text": cleaned,
+            "length": len(cleaned),
+            "punctuation": punctuation,
+            "ending": ending,
+            "phrase": phrase,
+        }
+
+    def _expression_learning_mode(self) -> str:
+        mode = str(getattr(self, "expression_learning_mode", "balanced") or "balanced").strip().lower()
+        if mode not in {"light", "balanced", "aggressive"}:
+            return "balanced"
+        return mode
+
+    def _expression_sample_max_chars(self) -> int:
+        return 180 if self._expression_learning_mode() == "aggressive" else 120
+
+    def _expression_style_review_enabled(self) -> bool:
+        return bool(
+            getattr(self, "enable_expression_learning", True)
+            and getattr(self, "enable_expression_style_review", True)
         )
-        profile["samples"] = samples[: self.max_learned_expression_items]
-        self._refresh_expression_profile_legacy_summary(profile)
+
+    def _expression_manual_review_enabled(self) -> bool:
+        return bool(
+            getattr(self, "enable_expression_learning", True)
+            and getattr(self, "enable_expression_manual_review", False)
+        )
+
+    def _queue_expression_pending_sample(self, profile: dict[str, Any], sample: dict[str, Any], cleaned: str) -> None:
+        pending = profile.get("pending_samples")
+        if not isinstance(pending, list):
+            pending = []
+        compact = self._compact_repeat_text(cleaned)
+        kept: list[dict[str, Any]] = []
+        for item in pending:
+            if not isinstance(item, dict):
+                continue
+            old_text = _single_line(item.get("text") or item.get("phrase"), 180)
+            if old_text and self._compact_repeat_text(old_text) == compact:
+                continue
+            kept.append(item)
+        item = dict(sample)
+        item["review_status"] = "pending"
+        item["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        kept.insert(0, item)
+        profile["pending_samples"] = kept[: min(80, max(12, self.max_learned_expression_items * 2))]
+        profile["pending_count"] = len(profile["pending_samples"])
+        profile["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     def _should_skip_expression_sample(self, cleaned: str) -> bool:
-        if len(cleaned) > 120:
+        if len(cleaned) > self._expression_sample_max_chars():
             return True
         if re.search(r"https?://|www\.|```|Traceback|Error code:|Exception|\[INFO\]|\[WARN\]|\[ERRO\]|\[Core\]", cleaned, re.IGNORECASE):
             return True
@@ -467,6 +518,44 @@ class UserMemoryMixin:
         if re.search(r"(复制|日志|报错|堆栈|代码|配置|schema|版本号|commit|diff|traceback)", cleaned, re.IGNORECASE):
             return True
         return False
+
+    def _safe_expression_phrase(self, phrase: Any, limit: int = 56) -> str:
+        text = _single_line(phrase, limit)
+        if not text or len(text) < 2:
+            return ""
+        if self._should_skip_expression_sample(text):
+            return ""
+        if re.search(r"<[^>]{1,120}>|@[A-Za-z0-9_\-\u4e00-\u9fff]{1,32}|QQ|群聊|群友|私聊", text, re.IGNORECASE):
+            return ""
+        if re.search(r"(你是|我是|他是|她是|叫我|叫你|名字|主人|朋友|同学|老师|室友|父母|妈妈|爸爸|哥哥|姐姐|弟弟|妹妹)", text):
+            return ""
+        return text
+
+    def _expression_profile_phrases(self, profile: dict[str, Any], *, limit: int = 4) -> list[str]:
+        raw = profile.get("recent_phrases") if isinstance(profile, dict) else []
+        if not isinstance(raw, list):
+            return []
+        phrases: list[str] = []
+        for item in raw:
+            phrase = self._safe_expression_phrase(item, 56)
+            if phrase and phrase not in phrases:
+                phrases.append(phrase)
+            if len(phrases) >= limit:
+                break
+        return phrases
+
+    def _expression_profile_endings(self, profile: dict[str, Any], *, limit: int = 4) -> list[str]:
+        raw = profile.get("endings") if isinstance(profile, dict) else []
+        if not isinstance(raw, list):
+            return []
+        endings: list[str] = []
+        for item in raw:
+            ending = self._safe_expression_phrase(item, 12)
+            if ending and ending not in endings:
+                endings.append(ending)
+            if len(endings) >= limit:
+                break
+        return endings
 
     def _refresh_expression_profile_legacy_summary(self, profile: dict[str, Any]) -> None:
         samples = profile.get("samples")
@@ -615,6 +704,17 @@ class UserMemoryMixin:
             lines.append("对方常用短问句推进聊天,回复要直接接住问题,别绕开。")
         if exclaim_count >= max(2, samples // 4):
             lines.append("语气可以稍微轻快一点,但不要夸张。")
+        mode = self._expression_learning_mode()
+        if mode == "aggressive":
+            endings = self._expression_profile_endings(profile, limit=3)
+            phrases = self._expression_profile_phrases(profile, limit=3)
+            if endings:
+                lines.append("句尾可轻参考：" + "、".join(endings) + "；只学节奏,别照抄。")
+            if phrases:
+                lines.append("短句样本：" + " / ".join(phrases) + "；只取口语松紧,不要复读原句。")
+            lines.append("表达学习只用于节奏,不能学习身份、关系、群友口癖、脏话、日志格式或事实判断。")
+        elif mode == "light":
+            lines = lines[:2]
         return "\n".join(lines)
 
     def _format_companion_memory_for_prompt(self, user: dict[str, Any], *, style_only: bool = False) -> str:
@@ -989,6 +1089,45 @@ class UserMemoryMixin:
                 )
         del loops[:-12]
 
+    def _remove_open_loop_entry(self, user: dict[str, Any], value: str) -> str:
+        loops = user.get("open_loops")
+        if not isinstance(loops, list) or not loops:
+            user["open_loops"] = []
+            return "当前没有未完话头。"
+
+        keyword = _single_line(value, 60)
+        if not keyword:
+            return "请提供要删除的话头关键词，或用“全部”清空所有未完话头。"
+
+        if keyword.lower() in {"全部", "所有", "all", "清空"}:
+            kept_pending: list[dict[str, Any]] = []
+            removed_count = 0
+            for item in loops:
+                if isinstance(item, dict) and str(item.get("status") or "") in {"已完成", "已取消"}:
+                    kept_pending.append(item)
+                else:
+                    removed_count += 1
+            user["open_loops"] = kept_pending[-12:]
+            return f"已清空 {removed_count} 条未完话头。" if removed_count else "当前没有未完话头。"
+
+        if len(keyword) < 2:
+            return "关键词太短，请提供至少 2 个字，避免误删多条话头。"
+
+        kept: list[dict[str, Any]] = []
+        removed: list[str] = []
+        for item in loops:
+            if not isinstance(item, dict):
+                continue
+            text = _single_line(item.get("text"), 120)
+            if text and keyword in text and str(item.get("status") or "") not in {"已完成", "已取消"}:
+                removed.append(text)
+            else:
+                kept.append(item)
+        user["open_loops"] = kept[-12:]
+        if not removed:
+            return "没有找到匹配的未完话头。"
+        return "已删除未完话头：\n" + "\n".join(f"- {item}" for item in removed)
+
     def _update_action_preferences_from_message(self, user: dict[str, Any], text: str) -> None:
         cleaned = _single_line(text, 240)
         if not cleaned:
@@ -1027,11 +1166,14 @@ class UserMemoryMixin:
             user["action_consequences"] = items
         now = _now_ts()
         kept: list[dict[str, Any]] = []
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
         for item in items:
             if not isinstance(item, dict):
                 continue
             created = _safe_float(item.get("ts"), now)
             if now - created > 7 * 86400:
+                continue
+            if callable(meta_leak_checker) and meta_leak_checker(str(item.get("text") or "")):
                 continue
             kept.append(item)
         if len(kept) != len(items):
@@ -1122,7 +1264,9 @@ class UserMemoryMixin:
         continuity["last_action_ts"] = _now_ts()
         continuity["last_action"] = action
         continuity["last_action_reason"] = _single_line(reason, 50)
-        continuity["last_action_text"] = _single_line(_strip_internal_message_blocks(text), 120)
+        cleaned_text = _single_line(_strip_internal_message_blocks(text), 120)
+        meta_leak_checker = getattr(self, "_framework_agent_meta_summary_leak", None)
+        continuity["last_action_text"] = "" if callable(meta_leak_checker) and meta_leak_checker(cleaned_text) else cleaned_text
 
     def _note_proactive_afterglow_sent(
         self,
@@ -1620,7 +1764,7 @@ class UserMemoryMixin:
             if not isinstance(user, dict) or not user.get("enabled", True) or not self._is_target_private_user(str(user_id), user):
                 continue
             name = _single_line(user.get("nickname") or user_id, 24)
-            text = self._format_user_behavior_habits_for_prompt(user, current_only=False, limit=3)
+            text = self._format_user_behavior_habits_for_prompt(user, current_only=False, limit=3, natural=True)
             habit_lines = [line for line in text.splitlines() if line.startswith("- ")]
             for line in habit_lines:
                 lines.append(f"- {name}：{line[2:]}")
@@ -1628,7 +1772,13 @@ class UserMemoryMixin:
                     break
             if len(lines) >= limit:
                 break
-        return "用户近期行为习惯：\n" + "\n".join(lines) if lines else "暂无用户习惯线索。"
+        if not lines:
+            return "暂无用户习惯线索。"
+        return (
+            "用户近期行为习惯（只作日程软背景）：\n"
+            + "\n".join(lines)
+            + "\n使用方式：只帮助判断对方常出现的时段和话题,不要把用户习惯、食物偏好或避雷直接改写成 Bot 今天必须执行的购买、带饭、约饭或准备任务。"
+        )
 
     def _habit_proactive_event_for_user(self, user: dict[str, Any], *, now: float | None = None) -> dict[str, Any] | None:
         if not self.enable_user_habit_learning:
@@ -2244,7 +2394,55 @@ target 只能是 bot/self/other/ambiguous/none。
         recent.append({"ts": _now_ts(), "signature": signature, "text": _single_line(text, 120)})
         del recent[:-18]
 
-    async def _review_and_rewrite_response(self, user: dict[str, Any], inbound_text: str, response_text: str) -> str:
+    @staticmethod
+    def _music_album_reply_needs_disambiguation_fix(text: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact:
+            return False
+        return any(
+            token in compact
+            for token in (
+                "哪个专辑",
+                "哪一个专辑",
+                "我不太确定你说的是哪一个",
+                "你说的是哪一个",
+                "发到哪里",
+                "私聊里还是群里",
+            )
+        )
+
+    @staticmethod
+    def _music_album_reply_from_context(context: dict[str, Any], *, user_text: str = "") -> str:
+        album = _single_line(context.get("album"), 60)
+        artist = _single_line(context.get("artist"), 40)
+        platform = _single_line(context.get("platform"), 24)
+        parts: list[str] = []
+        if artist and album:
+            parts.append(f"看到了，这是 {artist} 的《{album}》专辑。")
+        elif album:
+            parts.append(f"看到了，这张是《{album}》专辑。")
+        elif artist:
+            parts.append(f"看到了，这是 {artist} 的专辑卡。")
+        else:
+            parts.append("看到了，这是一张音乐专辑卡。")
+        if platform:
+            parts.append(f"来源是{platform}。")
+        if re.search(r"(发|列|整理|曲目|歌单|几首歌)", str(user_text or "")):
+            parts.append("如果你要，我可以直接把这张专辑的曲目列出来。")
+        if re.search(r"(发到哪里|私聊|群里)", str(user_text or "")):
+            parts.append("你要是愿意，也可以告诉我发到私聊还是群里。")
+        else:
+            parts.append("你要是愿意，我也可以直接帮你把曲目列出来。")
+        return "".join(parts)
+
+    async def _review_and_rewrite_response(
+        self,
+        user: dict[str, Any],
+        inbound_text: str,
+        response_text: str,
+        *,
+        music_album_context: dict[str, Any] | None = None,
+    ) -> str:
         relay_claim_checker = getattr(self, "_unexecuted_relay_claim_reason", None)
         if callable(relay_claim_checker):
             relay_claim_note = relay_claim_checker(response_text)
@@ -2261,23 +2459,23 @@ target 只能是 bot/self/other/ambiguous/none。
         trimmed = self._trim_abrupt_closing_topic_shift(response_text, inbound_text=inbound_text)
         if trimmed and trimmed != str(response_text or "").strip():
             return trimmed
-        flags = self._response_review_flags(response_text, user)
-        if not flags:
-            return response_text
-        if "repeats_last_bot_message" in flags:
-            fallback = self._fallback_non_repeating_reply(inbound_text)
+        if isinstance(music_album_context, dict) and self._music_album_reply_needs_disambiguation_fix(response_text):
+            fallback = self._music_album_reply_from_context(music_album_context, user_text=inbound_text)
             if fallback:
                 logger.info(
-                    "[PrivateCompanion] 回复本地防复读生效: before=%s after=%s",
+                    "[PrivateCompanion] 音乐专辑回复已按卡片上下文纠偏: before=%s after=%s",
                     _single_line(response_text, 120),
-                    _single_line(fallback, 120),
+                    _single_line(fallback, 160),
                 )
                 return fallback
-        if not self.enable_response_self_review:
+        flags = self._response_review_flags(response_text, user, inbound_text=inbound_text)
+        if not flags:
             return response_text
         review_mode = str(getattr(self, "response_review_mode", "severe_only") or "severe_only").strip().lower()
         if review_mode not in {"local_only", "severe_only", "full"}:
             review_mode = "severe_only"
+        if not self.enable_response_self_review:
+            return response_text
         if review_mode == "local_only":
             return response_text
         severe_flags = self._response_review_severe_flags(flags)
@@ -2286,7 +2484,7 @@ target 只能是 bot/self/other/ambiguous/none。
         effective_flags = severe_flags if review_mode == "severe_only" else flags
         lightweight_checker = getattr(self, "_is_lightweight_private_passive_inbound", None)
         if callable(lightweight_checker) and lightweight_checker(inbound_text):
-            critical_flags = {"too_long", "meta_or_assistant", "over_structured", "leaks_internal"}
+            critical_flags = {"too_long", "meta_or_assistant", "over_structured", "leaks_internal", "repeats_last_bot_message"}
             if not any(flag in critical_flags for flag in effective_flags):
                 return response_text
         intent = user.get("intent_profile") if isinstance(user.get("intent_profile"), dict) else {}
@@ -2314,19 +2512,29 @@ target 只能是 bot/self/other/ambiguous/none。
 - 只输出改写后的正文
 - 不要标题、列表、JSON、括号动作、系统/AI/提示词字眼
 - 普通闲聊尽量 1 到 3 句；求助类可以保留必要步骤,但更口语
+- 如果用户只是短句闲聊、报天气、说一句状态或轻轻接话,改成 1 句或 2 句短回复；不要扩展成关心清单、建议清单或连续状态复述
 - 如果用户情绪低,先接住情绪,少讲道理
 - 如果是边界/不想被打扰,短一点,退一步
 - 如果回复已经在说晚安、睡觉、做梦、告别,不要再突然追加天气、日程、生活观察或另一个新话题
 - 如果问题是重复上一条 Bot 消息,必须直接承接用户这句话,不要再说上一条里的“吃饱犯困/下午还有事/有什么安排”等同义内容
 - 如果原回复为了表现困、迷糊、半梦半醒或低能量而变得含混,优先改成清楚承接用户；状态只能留在语气里,不能牺牲回答质量
+- 如果问题是表达学习过头、异常断句或照抄用户样本,保留意思,改成自然中文私聊；不要为了模仿口癖而加奇怪逗号、空格、断句或复读用户原话
 """.strip()
         started = time.perf_counter()
-        rewritten = await self._llm_call(
-            prompt,
-            max_tokens=260,
-            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
-            task="response_review",
-        )
+        try:
+            rewritten = await self._llm_call(
+                prompt,
+                max_tokens=260,
+                provider_id=self._task_provider(self.response_review_provider_id, self.mai_style_provider_id),
+                task="response_review",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[PrivateCompanion] 被动回复模型自检失败,保留原回复: flags=%s error=%s",
+                ",".join(effective_flags),
+                _single_line(exc, 160),
+            )
+            return response_text
         logger.info(
             "[PrivateCompanion] 被动回复模型自检完成: mode=%s flags=%s elapsed=%dms",
             review_mode,
@@ -2337,18 +2545,66 @@ target 只能是 bot/self/other/ambiguous/none。
         if not cleaned:
             return response_text
         if len(cleaned) > max(len(response_text) + 80, self.response_review_max_chars + 160):
-            return response_text
+            fallback = self._fallback_overlong_casual_reply(inbound_text, response_text)
+            return fallback or response_text
         if re.search(r"(提示词|系统|JSON|改写后|以下是)", cleaned, re.IGNORECASE):
             return response_text
         if last_message and self._text_repeats_recent_message(cleaned, last_message):
-            fallback = self._fallback_non_repeating_reply(inbound_text)
-            return fallback or response_text
+            logger.info(
+                "[PrivateCompanion] 被动回复模型自检后仍复读,不启用本地兜底: before=%s",
+                _single_line(cleaned, 120),
+            )
+            return response_text
+        if (
+            any(flag in effective_flags for flag in ("casual_overexplained", "weather_overexplained"))
+            and len(cleaned) > self._casual_reply_review_limit(inbound_text)
+        ):
+            fallback = self._fallback_overlong_casual_reply(inbound_text, cleaned)
+            return fallback or cleaned
         return cleaned
 
-    @staticmethod
-    def _response_review_severe_flags(flags: list[str]) -> list[str]:
-        severe = {"meta_or_assistant", "leaks_internal", "repeats_last_bot_message"}
+    def _response_review_severe_flags(self, flags: list[str]) -> list[str]:
+        severe = {
+            "meta_or_assistant",
+            "leaks_internal",
+            "repeats_last_bot_message",
+            "casual_overexplained",
+            "weather_overexplained",
+        }
+        if self._expression_style_review_enabled():
+            severe.update({"unnatural_punctuation", "expression_overfit", "copied_user_expression_sample"})
         return [flag for flag in flags if flag in severe]
+
+    def _casual_reply_review_limit(self, inbound_text: str) -> int:
+        inbound_compact = self._compact_repeat_text(inbound_text)
+        if len(inbound_compact) <= 12:
+            return min(140, max(90, self.response_review_max_chars // 2))
+        if len(inbound_compact) <= 28:
+            return min(180, max(120, int(self.response_review_max_chars * 0.65)))
+        return self.response_review_max_chars
+
+    def _is_short_casual_inbound_for_review(self, inbound_text: str, user: dict[str, Any]) -> bool:
+        inbound = str(inbound_text or "").strip()
+        if not inbound:
+            return False
+        if len(self._compact_repeat_text(inbound)) > 32:
+            return False
+        intent_profile = user.get("intent_profile") if isinstance(user.get("intent_profile"), dict) else {}
+        if str(intent_profile.get("intent") or "") in {"help", "task", "code", "search"}:
+            return False
+        if re.search(r"(怎么|如何|为什么|啥原因|帮我|检查|分析|整理|写|生成|修|改|步骤|教程|配置|报错)", inbound):
+            return False
+        return True
+
+    def _fallback_overlong_casual_reply(self, inbound_text: str, response_text: str) -> str:
+        cleaned = _strip_internal_message_blocks(str(response_text or "")).strip()
+        parts = [part.strip() for part in re.split(r"(?<=[。！？!?…])\s*|\n+", cleaned) if part.strip()]
+        for part in parts:
+            if len(part) <= 90 and not re.search(r"(首先|其次|最后|建议你|你可以.*也可以|总结一下|以下是)", part):
+                return part
+        if parts:
+            return _single_line(parts[0], 70)
+        return ""
 
     def _simulation_active(self, user: dict[str, Any]) -> bool:
         raw = user.get("simulation_mode")
@@ -2674,14 +2930,19 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
                 line = _single_line(raw_line[2:] if raw_line.startswith("- ") else raw_line, 90)
                 if line and self._private_context_line_is_safe(line):
                     lines.append(line)
-        if self.enable_expression_learning and len(hint) <= 24:
+        expression_mode = self._expression_learning_mode()
+        expression_hint_limit = 80 if expression_mode == "aggressive" else (36 if expression_mode == "balanced" else 24)
+        if self.enable_expression_learning and len(hint) <= expression_hint_limit:
             expression_text = self._format_expression_profile_for_prompt(user)
             if expression_text and not expression_text.startswith("暂无足够样本"):
+                expression_limit = 3 if expression_mode == "aggressive" else 1
                 for raw_line in expression_text.splitlines():
                     line = _single_line(raw_line, 90)
                     if line and self._private_context_line_is_safe(line):
                         lines.append(line)
-                        break
+                        expression_limit -= 1
+                        if expression_limit <= 0:
+                            break
         deduped = list(dict.fromkeys(line for line in lines if line))
         if not deduped:
             return ""
@@ -2966,7 +3227,15 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
             raw = []
         kept = [
             item for item in raw
-            if isinstance(item, dict) and now - _safe_float(item.get("ts"), 0) <= self.passive_topic_memory_hours * 3600
+            if isinstance(item, dict)
+            and now - _safe_float(item.get("ts"), 0) <= self.passive_topic_memory_hours * 3600
+            and not (
+                callable(getattr(self, "_framework_agent_meta_summary_leak", None))
+                and (
+                    getattr(self, "_framework_agent_meta_summary_leak")(str(item.get("text") or ""))
+                    or getattr(self, "_framework_agent_meta_summary_leak")(str(item.get("signature") or ""))
+                )
+            )
         ]
         user["recent_reply_topics"] = kept[-18:]
         return user["recent_reply_topics"]
@@ -2982,7 +3251,7 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
                 lines.append(f"- {self._format_timestamp_elapsed(item.get('ts'))}回复过：{text}")
         return "\n".join(lines)
 
-    def _response_review_flags(self, text: str, user: dict[str, Any]) -> list[str]:
+    def _response_review_flags(self, text: str, user: dict[str, Any], *, inbound_text: str = "") -> list[str]:
         cleaned = str(text or "").strip()
         flags: list[str] = []
         if not cleaned:
@@ -2994,6 +3263,17 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
         length_limit = self.response_review_max_chars * (2 if is_help else 1)
         if len(cleaned) > length_limit:
             flags.append("too_long")
+        if not is_help and self._is_short_casual_inbound_for_review(inbound_text, user):
+            casual_limit = self._casual_reply_review_limit(inbound_text)
+            sentence_count = len(re.findall(r"[。！？!?…]+", cleaned))
+            paragraph_count = len([part for part in re.split(r"\n+", cleaned) if part.strip()])
+            advice_count = len(re.findall(r"(记得|别忘|注意|小心|可以|要不要|最好|建议|带伞|喝点|早点|路上)", cleaned))
+            if len(cleaned) > casual_limit or sentence_count >= 4 or paragraph_count >= 2:
+                flags.append("casual_overexplained")
+            inbound_weather = re.search(r"(雨|下雨|变天|天气|降温|冷|热|风)", inbound_text)
+            reply_weather = re.search(r"(雨|天气|伞|降温|冷|热|风|外面|出门)", cleaned)
+            if inbound_weather and reply_weather and (len(cleaned) > min(casual_limit, 130) or advice_count >= 2):
+                flags.append("weather_overexplained")
         if re.search(r"^(好的|当然|没问题|我理解|总结一下|以下是|首先|其次|最后)[，,：:]", cleaned):
             flags.append("assistant_tone")
         if re.search(r"(作为.*助手|AI|模型|系统|提示词|插件|后台|根据.*信息|我会从.*角度)", cleaned, re.IGNORECASE):
@@ -3002,6 +3282,8 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
             flags.append("over_structured")
         if re.search(r"(能量\s*\d+|关系站位|状态机|内部规划|用户意图|表达学习|陪伴记忆)", cleaned):
             flags.append("leaks_internal")
+        if self._expression_style_review_enabled():
+            flags.extend(self._expression_review_flags(cleaned, user))
         signature = self._proactive_topic_signature(cleaned)
         if self._has_abrupt_closing_topic_shift(cleaned, inbound_text=""):
             flags.append("abrupt_topic_shift")
@@ -3016,6 +3298,30 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
             if not last_sent or _now_ts() - last_sent <= self.proactive_reply_context_hours * 3600:
                 flags.append("repeats_last_bot_message")
         return list(dict.fromkeys(flags))
+
+    def _expression_review_flags(self, cleaned: str, user: dict[str, Any]) -> list[str]:
+        flags: list[str] = []
+        if re.search(r"[，,]\s*[。！？!?…~～]|[。！？!?]\s*[，,]|[，,]{2,}|[。！？!?]{3,}", cleaned):
+            flags.append("unnatural_punctuation")
+        if re.search(r"\b[A-Za-z]{2,}\b\s*[。！？!?]\s*\b[A-Za-z]{1,4}\b\s*[。！？!?]", cleaned):
+            flags.append("unnatural_punctuation")
+        if len(cleaned) <= 260:
+            punct_count = len(re.findall(r"[，,。！？!?…~～]", cleaned))
+            if punct_count >= max(7, len(cleaned) // 10):
+                flags.append("expression_overfit")
+        profile = user.get("expression_profile") if isinstance(user.get("expression_profile"), dict) else {}
+        phrases = self._expression_profile_phrases(profile, limit=8)
+        compact_reply = self._compact_repeat_text(cleaned)
+        copied = 0
+        for phrase in phrases:
+            compact_phrase = self._compact_repeat_text(phrase)
+            if len(compact_phrase) >= 8 and compact_phrase in compact_reply:
+                copied += 1
+        if copied >= 2 or (copied >= 1 and self._expression_learning_mode() == "aggressive"):
+            flags.append("copied_user_expression_sample")
+        if re.search(r"(学你|像你说话|模仿你|你的口癖|你的语气)", cleaned):
+            flags.append("leaks_internal")
+        return flags
 
     @staticmethod
     def _compact_repeat_text(text: str) -> str:
@@ -3051,18 +3357,6 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
                     if shared_chunks >= 2:
                         return True
         return False
-
-    def _fallback_non_repeating_reply(self, inbound_text: str) -> str:
-        inbound = _single_line(inbound_text, 120)
-        if not inbound:
-            return "嗯，我在。"
-        if any(token in inbound for token in ("吃", "觅食", "饭", "饿", "饱")):
-            return "还在觅啊，那你先把饭解决完，别边吃边赶。"
-        if any(token in inbound for token in ("忙", "事", "安排", "下午")):
-            return "那先按你那边的节奏来，我不催你。"
-        if len(inbound) <= 8:
-            return "嗯嗯，接到。"
-        return "懂了，那我先顺着你这边来。"
 
     def _fallback_relationship_level(
         self,

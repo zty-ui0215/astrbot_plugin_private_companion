@@ -39,6 +39,7 @@ class LlmToolActionsMixin:
         return """
 【关系网查询】
 用户明确要求“查一下关系网/帮我查某个 QQ 或昵称”时，可以用 `pc_query_relation_person` 查询关系网。
+- 如果刚用 LivingMemory/长期记忆召回到某个人名、昵称、QQ 或群成员别名,并且需要判断 TA 是谁、和用户什么关系、能不能套用某段关系时,也可以先查关系网再回答。
 - 只用于确认是否认识和读取稳定称呼、别名、简短身份备注；不要发送消息。
 - 参数用 keyword 传 QQ 号、昵称、别名或用户原话里最像名字的部分。
 - 查不到就自然说明没在关系网里确认过，不要编造。
@@ -798,7 +799,7 @@ class LlmToolActionsMixin:
         at_recipient = self._atrelay_bool_flag(kwargs.get("at_recipient", kwargs.get("at", False)))
         expire_hours = kwargs.get("expire_hours", kwargs.get("ttl_hours", 24))
 
-        text = _single_line(message, 800)
+        text = self._normalize_atrelay_text(message, limit=800)
         recipient = _single_line(recipient_hint, 80)
         if not text:
             return json.dumps({"status": "error", "message": "缺少 message/text 内容"}, ensure_ascii=False)
@@ -858,6 +859,7 @@ class LlmToolActionsMixin:
                 text=text,
                 relay_mode=relay_mode,
             )
+            send_text = self._normalize_atrelay_text(send_text, limit=800)
             if delay_until_seen:
                 if not recipient:
                     return json.dumps({"status": "need_recipient", "message": "延迟转述需要目标群友"}, ensure_ascii=False)
@@ -944,6 +946,7 @@ class LlmToolActionsMixin:
             text=text,
             relay_mode=relay_mode,
         )
+        send_text = self._normalize_atrelay_text(send_text, limit=800)
         result = await self._pc_send_to_private_user_impl(
             event,
             user_id=target_user,
@@ -989,7 +992,7 @@ class LlmToolActionsMixin:
         relay_mode = kwargs.get("relay_mode") or kwargs.get("mode") or ""
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         target_group = _single_line(group_id, 40)
-        text = _single_line(message, 800)
+        text = self._normalize_atrelay_text(message, limit=800)
         relay_mode_normalized = self._normalize_atrelay_relay_mode(relay_mode)
         if not target_group.isdigit():
             return "发送失败：群号格式不正确"
@@ -1065,7 +1068,7 @@ class LlmToolActionsMixin:
         )
         receipt_expire_hours = kwargs.get("receipt_expire_hours", kwargs.get("expire_hours", kwargs.get("ttl_hours", 12)))
         target_user = _single_line(user_id, 40)
-        text = _single_line(message, 800)
+        text = self._normalize_atrelay_text(message, limit=800)
         relay_mode_normalized = self._normalize_atrelay_relay_mode(relay_mode)
         if not target_user.isdigit():
             return "发送失败：QQ 号格式不正确"
@@ -1170,7 +1173,7 @@ class LlmToolActionsMixin:
         sensitive_confirmed = kwargs.get("sensitive_confirmed", kwargs.get("confirmed", False))
         expire_hours = kwargs.get("expire_hours", kwargs.get("ttl_hours", 24))
         target_group = _single_line(group_id, 40) or self._extract_group_id_from_event(event)
-        text = _single_line(message, 800)
+        text = self._normalize_atrelay_text(message, limit=800)
         if not target_group.isdigit():
             return "挂起失败：群号格式不正确"
         if not text:

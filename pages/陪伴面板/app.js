@@ -10,6 +10,7 @@ const state = {
   troubleshooting: null,
   availableProviders: [],
   tokenStats: null,
+  tokenStatsPartial: false,
   bookshelfUnlocked: null,
   bookshelfAccessToken: "",
   selectedBook: null,
@@ -42,6 +43,13 @@ const state = {
   configImportPreview: null,
   configBackups: [],
   configLastChecks: [],
+  activeTab: "dashboard",
+  lazyLoaded: {
+    diagnostics: false,
+    providers: false,
+    tokenStats: false,
+    configBackups: false,
+  },
 };
 
 const hiddenCompatibilityConfigKeys = new Set([
@@ -183,6 +191,7 @@ function featureDraftFromOverview(overview = {}) {
   const settingBackedFeatureKeys = [
     "enable_rest_reply_simulation",
     "enable_worldview_perception",
+    "enable_group_injection_guard",
     "enable_group_persona_denoise",
     "auto_voice_enabled",
     "auto_voice_full_conversion_enabled",
@@ -207,6 +216,7 @@ const pluginIntegrationAvailabilityRules = {
   enable_qzone_integration: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_life_publish: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_generated_image_publish: () => Boolean(state.overview?.qzone?.available),
+  enable_qzone_comment_inbox: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_emotional_vent_publish: () => Boolean(state.overview?.qzone?.available && toBool(state.featureDraft?.enable_emotion_simulation)),
 };
 
@@ -475,10 +485,12 @@ const providerGroupByKey = providerGroups.reduce((acc, group) => {
 }, {});
 
 const featureMeta = {
-  enable_proactive_only_mode: ["主动消息专用模式", "只保留主动私聊调度、生成和发送；普通私聊/群聊不再进入本插件被动增强。"],
+  enable_proactive_only_mode: ["仅保留主动能力", "只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给默认主链或其他插件。"],
   enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
   enable_companion_memory: ["长期画像", "沉淀用户偏好、边界、关系线索和可复用事实。"],
   enable_expression_learning: ["表达节奏学习", "统计用户句长、标点、句尾和短句节奏，只影响回复口感。"],
+  enable_expression_manual_review: ["表达样本审核", "新样本先进入私聊对象的待审核列表，通过后才会参与表达画像。"],
+  enable_expression_style_review: ["表达发送前审核", "发送前检查表达学习过头、异常断句、照抄样本等问题。"],
   enable_intent_emotion_analysis: ["本地意图/情绪快判", "用带置信度的本地规则识别求助、低落、玩笑、亲近和边界。"],
   enable_response_self_review: ["回复/主动复核", "被动回复做轻量自检；主动消息发送前判断是否值得现在发送、是否需要改写或延后。"],
   enable_llm_timer_scheduling: ["对话临时预约", "把聊天里自然形成的稍后提醒、叫醒、回头说等约定转写成 AstrBot 官方定时计划；插件本身不再单独调度。"],
@@ -490,6 +502,8 @@ const featureMeta = {
   enable_user_habit_learning: ["用户习惯画像", "学习用户常在什么时段做什么、问什么；被动只在相关时理解，主动可到点关心。"],
   enable_food_menu_recommendation: ["吃什么候选", "管理常吃菜、菜馆和外卖；用户纠结吃什么时，只取少量贴合项作为回复参考。"],
   enable_humanized_states: ["拟人身体状态", "生成精力、睡眠、梦境、健康、饥饿和周期等扮演状态，影响日程、主动消息和被动语气。"],
+  enable_health_state: ["健康/不适状态", "开启后视为可用，允许当前扮演状态出现生病、不舒服或恢复尾声。"],
+  enable_hunger_state: ["饥饿/胃口状态", "开启后视为可用，允许当前扮演状态出现饿、胃口不好或想吃东西。"],
   enable_segmented_proactive_reply: ["分段发送", "按作用范围把主动消息或全部 LLM 纯文本回复拆成更像聊天的短句，并合并过短片段。"],
   inject_passive_states: ["被动状态注入", "普通聊天前注入“当前扮演状态”，只影响语气、长短和节奏。"],
   enable_passive_state_delta_injection: ["被动状态增量注入", "同一会话只在状态首次出现、明显变化或用户询问近况时注入短状态摘要，减少重复动态提示词。"],
@@ -506,7 +520,7 @@ const featureMeta = {
   enable_environment_perception: ["环境感知", "注入当前时间、日期语境、平台、群聊/私聊和消息媒介信息。"],
   enable_holiday_perception: ["节假日感知", "识别工作日、周末、节假日和调休，影响生活节奏判断。"],
   enable_platform_perception: ["平台感知", "识别 QQ/平台、私聊/群聊、群号群名以及图片语音视频消息。"],
-  enable_model_perception: ["模型感知", "识别当前会话 LLM 和视觉转述模型配置。"],
+  enable_model_perception: ["模型感知", "识别当前会话 LLM、视觉转述模型和生图后端/图片模型配置。"],
   enable_worldview_perception: ["世界观适配感知", "把插件能力和生活语境转换成当前人设世界观说法，默认关闭，避免和 AstrBot 人设重复。"],
   enable_lunar_perception: ["农历感知", "可用时注入农历日期，辅助节日、生活氛围和日记语境。"],
   enable_solar_term_perception: ["节气感知", "注入当天或临近节气，让日程和表达更贴合时令。"],
@@ -516,6 +530,7 @@ const featureMeta = {
   enable_group_slang_learning: ["群黑话学习", "记录群内常用梗、简称和特殊表达。"],
   enable_group_member_profiles: ["群内成员观察", "记录成员在当前群里的近期发言、短句和活跃痕迹。"],
   enable_group_context_injection: ["群上下文注入", "在群聊回复时加入群氛围、话题和成员信息。"],
+  enable_group_injection_guard: ["群聊防注入", "拦截群友通过改称呼、改语气、改设定或改输出格式污染群聊上下文和长期观察。"],
   enable_group_persona_denoise: ["群聊人格降噪", "降低群聊里的私聊腔、状态汇报和私聊关系外溢。"],
   enable_forward_message_adaptation: ["合并消息阅读", "读取合并转发节点并整理成自然聊天记录，让 Bot 能理解转发里的发言顺序、人物和话题。"],
   enable_group_scene_awareness: ["群聊场景感知", "推断当前消息是在对 Bot、某个群友还是整个群说话，减少误以为别人都在问自己。"],
@@ -548,6 +563,7 @@ const featureMeta = {
   enable_qzone_integration: ["QQ 空间动态", "整合查看、点赞、评论和发布说说入口。"],
   enable_qzone_life_publish: ["生活说说", "根据状态、日程和日记余味低频发布公开生活动态。"],
   enable_qzone_generated_image_publish: ["说说配图", "发布生活说说时可按概率调用主动生图能力生成配图。"],
+  enable_qzone_comment_inbox: ["评论收件箱", "低频查看自己说说下的新评论，并按需公开追加回复。"],
   enable_photo_text_action: ["主动拍照/生图", "允许 Bot 在合适的主动动机下生成真实图片；本地 ComfyUI 可在电脑忙时自动延后。"],
   enable_private_reading_integration: ["夹层阅读素材", "检测到可用素材能力时，允许作为低频私下阅读来源。"],
   enable_private_reading_boredom_read: ["私下阅读", "空档、无聊或夜里低频自己搜索并阅读，形成内部印象。"],
@@ -609,6 +625,7 @@ const featureGroups = [
     keys: [
       "enable_group_companion",
       "enable_group_context_injection",
+      "enable_group_injection_guard",
       "enable_group_persona_denoise",
       "enable_group_scene_awareness",
       "enable_group_reality_promise_guard",
@@ -667,6 +684,7 @@ const featureGroups = [
       "enable_web_exploration_boredom_search",
       "enable_qzone_integration",
       "enable_qzone_life_publish",
+      "enable_qzone_comment_inbox",
       "enable_photo_text_action",
       "enable_private_reading_integration",
       "enable_private_reading_boredom_read",
@@ -682,6 +700,8 @@ const featureGroups = [
 const embeddedFeatureParentByKey = {
   inject_passive_states: "enable_humanized_states",
   enable_passive_state_delta_injection: "inject_passive_states",
+  enable_health_state: "enable_humanized_states",
+  enable_hunger_state: "enable_humanized_states",
   enable_cycle_state: "enable_humanized_states",
   enable_rest_reply_simulation: "enable_humanized_states",
   enable_recall_cancel_reply: "enable_recall_enhancement",
@@ -699,6 +719,7 @@ const embeddedFeatureParentByKey = {
   enable_solar_term_perception: "enable_environment_perception",
   enable_almanac_perception: "enable_environment_perception",
   enable_group_context_injection: "enable_group_companion",
+  enable_group_injection_guard: "enable_group_companion",
   enable_group_persona_denoise: "enable_group_companion",
   enable_group_reality_promise_guard: "enable_group_companion",
   enable_group_high_intensity_mode: "enable_group_wakeup_enhancement",
@@ -715,6 +736,7 @@ const embeddedFeatureParentByKey = {
   enable_web_exploration_boredom_search: "enable_web_exploration",
   enable_qzone_life_publish: "enable_qzone_integration",
   enable_qzone_generated_image_publish: "enable_qzone_integration",
+  enable_qzone_comment_inbox: "enable_qzone_integration",
   enable_qzone_emotional_vent_publish: "enable_emotion_simulation",
   enable_private_reading_boredom_read: "enable_private_reading_integration",
   enable_private_reading_ask_recommendation: "enable_private_reading_integration",
@@ -834,6 +856,7 @@ const configLabels = {
   default_style: "默认语气",
   plugin_specific_persona_id: "插件指定人格 ID",
   private_user_aliases: "私聊身份别名归并",
+  private_user_delivery_aliases: "私聊主动发送目标映射",
   schedule_persona_prompt: "角色设定补充",
   schedule_worldview_prompt: "世界观/生活背景",
   roleplay_user_profile_prompt: "用户与关系补充",
@@ -863,7 +886,11 @@ const configLabels = {
   qzone_emotional_vent_probability: "心情动态触发概率",
   enable_food_menu_recommendation: "吃什么候选",
   response_review_mode: "回复/主动复核模式",
-  response_review_max_chars: "被动 full 模式长度阈值",
+  proactive_review_strength: "主动复核强度",
+  proactive_review_hard_risk_threshold: "硬拦截风险阈值",
+  proactive_review_low_score_threshold: "低价值分数阈值",
+  proactive_review_pressure_threshold: "打扰压力阈值",
+  response_review_max_chars: "被动回复长度阈值",
   tts_frequency_control_mode: "TTS频率控制模式",
   tts_constraint_mode: "TTS约束强度",
   tts_session_min_interval_seconds: "TTS会话最小间隔秒数",
@@ -905,7 +932,7 @@ const configLabels = {
   recall_forbidden_words: "撤回违禁词表",
   recall_forbidden_scope: "违禁词撤回范围",
   recall_forbidden_word_case_sensitive: "违禁词大小写敏感",
-  enable_proactive_only_mode: "主动消息专用模式",
+  enable_proactive_only_mode: "仅保留主动能力",
   text_message_debounce_seconds: "文本补话等待秒数",
   image_message_debounce_seconds: "图片补话等待秒数",
   forward_message_debounce_seconds: "转发补话等待秒数",
@@ -920,6 +947,7 @@ const configLabels = {
   quote_skip_short_reply_chars: "短回复不引用阈值",
   quote_target_strategy: "引用目标策略",
   private_image_vision_wait_seconds: "单图等待识图秒数",
+  private_image_provider_timeout_seconds: "单个识图模型超时秒数",
   enable_private_image_gif_enhancement: "GIF 动图强化",
   private_image_gif_max_frames: "GIF 抽帧数",
   enable_private_image_self_recognition: "图片转述增强",
@@ -947,6 +975,11 @@ const configLabels = {
   group_conversation_followup_seconds: "群聊续接判断秒数",
   group_conversation_followup_max_turns: "群聊连续续接上限",
   enable_group_conversation_followup: "启用连续对话保持",
+  enable_group_context_injection: "群上下文注入",
+  enable_group_injection_guard: "群聊防注入",
+  enable_group_persona_denoise: "群聊人格降噪",
+  enable_group_scene_awareness: "群聊场景感知",
+  enable_group_privacy_guard: "群隐私保护",
   forward_message_mode: "合并消息适配方式",
   forward_message_max_messages: "合并消息最多读取条数",
   forward_message_max_chars: "合并消息注入字数上限",
@@ -962,6 +995,8 @@ const configLabels = {
   daily_token_soft_limit: "每日 Token 软限额",
   humanized_state_intensity: "拟人状态强度",
   enable_humanized_states: "拟人身体状态",
+  enable_health_state: "健康/不适状态",
+  enable_hunger_state: "饥饿/胃口状态",
   inject_passive_states: "被动状态注入",
   enable_passive_state_delta_injection: "被动状态增量注入",
   passive_injection_position: "动态提示词注入位置",
@@ -970,6 +1005,8 @@ const configLabels = {
   rest_reply_mode: "休息回复判定模式",
   rest_reply_probability: "休息中概率回复(%)",
   rest_reply_llm_threshold: "模型醒来阈值",
+  rest_reply_active_windows: "休息闸门生效时段",
+  rest_reply_awake_grace_minutes: "醒后免重判分钟数",
   enable_rest_backlog_reply: "醒后补看私聊",
   rest_backlog_max_messages: "醒后最多补看条数",
   REST_WAKEUP_PROVIDER_ID: "休息醒来判断模型",
@@ -1040,9 +1077,12 @@ const configLabels = {
   worldbook_auto_import: "启动时刷新关系网",
   worldbook_member_match_aliases: "允许别名辅助匹配",
   worldbook_self_registration: "允许群聊自登记",
+  worldbook_self_registration_block_words: "自登记拒绝词",
+  worldbook_self_registration_block_reply: "自登记拒绝回复",
   worldbook_auto_pending_observations: "低频待确认观察",
   worldbook_member_inject_limit: "单次注入节点数",
   worldbook_config_paths: "关系网配置路径",
+  cross_user_memory_owner_only: "仅主人可用",
   atrelay_require_worldbook_first: "优先按关系网解析",
   atrelay_member_cache_minutes: "群成员缓存分钟",
   atrelay_sensitive_confirm: "敏感转述确认",
@@ -1051,6 +1091,7 @@ const configLabels = {
   atrelay_multi_target_limit: "多目标单次上限",
   memory_refresh_interval_minutes: "长期画像整理间隔",
   max_companion_memory_items: "长期画像条目上限",
+  expression_learning_mode: "表达学习模式",
   max_learned_expression_items: "表达节奏样本上限",
   episode_memory_refresh_messages: "片段整理消息阈值",
   episode_memory_refresh_minutes: "片段整理时间阈值",
@@ -1093,23 +1134,35 @@ const configLabels = {
   qzone_life_publish_probability: "说说触发概率",
   enable_qzone_generated_image_publish: "说说配图",
   qzone_generated_image_probability: "说说配图概率",
+  enable_qzone_comment_inbox: "空间评论收件箱",
+  qzone_comment_inbox_interval_minutes: "评论检查间隔",
+  qzone_comment_inbox_recent_posts: "扫描最近说说数",
+  qzone_comment_inbox_max_replies_per_tick: "每轮最多回复",
   enable_photo_text_action: "主动拍照/生图",
   photo_action_max_daily: "每日主动生图上限",
   proactive_photo_text_probability: "主动带图触发概率",
   photo_generation_backend: "主动生图后端",
   COMFYUI_TEXT2IMG_WORKFLOW_NAME: "文生图工作流",
   COMFYUI_SELFIE_WORKFLOW_NAME: "自拍工作流",
+  photo_persona_reference_image_path: "人设参考图路径",
+  enable_daily_outfit_photo: "每日穿搭照片",
+  daily_outfit_photo_prompt: "每日穿搭提示词",
+  enable_natural_language_photo_generation: "自然语言生图/改图",
+  natural_language_photo_generation_max_daily: "自然语言生图上限",
   comfyui_photo_wait_seconds: "本地生图等待秒数",
   enable_local_photo_load_guard: "电脑高负荷保护",
   local_photo_cpu_busy_percent: "CPU 忙碌阈值",
   local_photo_memory_busy_percent: "内存忙碌阈值",
   local_photo_defer_minutes: "忙时延后分钟数",
   EXTERNAL_IMAGE_API_BASE_URL: "在线图片 API 地址",
+  EXTERNAL_IMAGE_API_KEY: "在线图片 API Key",
   EXTERNAL_IMAGE_API_MODEL: "在线图片模型",
   external_image_api_size: "在线生图尺寸",
   external_image_api_timeout_seconds: "在线生图超时秒数",
   photo_generation_style: "主动生图风格",
   photo_generation_style_custom_prompt: "自定义风格说明",
+  photo_generation_fixed_prompt: "固定附加提示词",
+  photo_generation_scene_presets: "生图场景预设",
   private_reading_min_interval_hours: "阅读最小间隔",
   private_reading_max_photo_count: "页数上限",
   private_reading_share_probability: "主动提起概率",
@@ -1132,7 +1185,7 @@ const configLabels = {
 };
 
 const configDescriptions = {
-  enable_proactive_only_mode: "开启后，本插件只保留主动私聊的日程、主动生成和发送链路；普通私聊、群聊消息不会再被本插件做状态/TTS/图片/转发/群聊上下文注入，也不会触发被动回复增强。用户回复主动消息时仍会被轻量记为已回应。它会让普通被动回复的 prompt 更稳定，显著提高缓存命中率。",
+  enable_proactive_only_mode: "开启后，本插件只保留主动私聊的日程、主动生成和发送链路；普通私聊、群聊消息不会再被本插件做状态/TTS/图片/转发/群聊上下文注入，也不会触发本插件的被动回复增强，但不会阻止 AstrBot 默认回复或其他插件处理。用户回复主动消息时仍会被轻量记为已回应。适合只想使用主动陪伴、或担心本插件被动链路误接管/误识别的场景。",
   enable_llm_proactive_message: "开启后，主动调度只负责挑选动机和时机，真正文本会调用 AstrBot 人格生成；关闭时回退为本地模板，更省但更机械。",
   proactive_prompt_template: "自定义主动消息生成提示词。留空使用内置模板；适合把角色口吻、世界观约束和“不要像回复空气”这类要求固定下来。",
   enable_llm_proactive_persona_judge: "主动计划到点后，先让模型判断这个念头是否符合角色、世界观、关系温度和当下打扰边界；可放行、改写、延后或丢弃。",
@@ -1142,11 +1195,14 @@ const configDescriptions = {
   default_style: "没有单独学习到用户偏好时，插件用于生成日程、状态和主动行为的基础语气参考。",
   plugin_specific_persona_id: "填写 AstrBot 人格 ID 后，插件会优先使用该人格作为主回复人格；留空则继承 AstrBot 当前默认人格。不同于角色设定补充，它会影响私聊被动回复和关系判断。",
   private_user_aliases: "把临时会话 ID、异常 sender_id 或机器人侧误报 ID 归并到主 QQ。每行一个映射，例如：688C2CE7...=100012345。",
+  private_user_delivery_aliases: "只改变主动消息/主动测试的发送出口，不改变记忆归属。每行一个映射，例如：大号QQ=小号QQ。",
   schedule_persona_prompt: "给陪伴插件的日程、状态、主动行为、识图和创作提供角色补充；不会覆盖 AstrBot 主人格。",
   schedule_worldview_prompt: "给陪伴插件判断生活背景和世界规则，适合写所在世界、日常规则、居住/学校/城市环境和与用户的生活关系。",
   roleplay_user_profile_prompt: "描述角色如何称呼用户、用户身份、彼此关系和相处方式；不会作为图片自我识别的外观线索。",
   humanized_state_intensity: "控制睡眠不佳、健康、饥饿、周期等状态出现概率和能量影响强度，范围 0-100。",
   enable_humanized_states: "总开关。关闭后不再生成拟人身体/梦境状态，只保留基础平稳状态。",
+  enable_health_state: "开启后健康/不适状态视为可用，拟人状态可能出现生病、不舒服、头疼或恢复尾声；关闭后自动生成和手动增添都会跳过这类状态。",
+  enable_hunger_state: "开启后饥饿/胃口状态视为可用，拟人状态可能出现饿、胃口不好、想吃东西或想吃甜的；关闭后不会生成吃什么类身体小需求，手动增添也会拦截饥饿状态。",
   inject_passive_states: "开启后普通聊天会参考“当前扮演状态”；关闭后状态主要影响日程和主动行为。",
   enable_passive_state_delta_injection: "开启后，同一会话只在状态首次出现、明显变化或用户问近况时注入短状态摘要；状态未变时不重复塞完整日程和生活背景。关闭后恢复每轮完整状态注入。",
   passive_injection_position: "选择被动状态、环境感知、TTS 本轮频控、转发/引用上下文等动态片段的注入位置。当前请求末尾会进入统一动态块并按稳定顺序排列，更利于缓存；系统提示词约束更强但更容易降低缓存命中。若同时启用长期记忆/记忆召回，推荐使用当前请求末尾，让召回内容与动态状态在尾部自然结合。",
@@ -1155,6 +1211,8 @@ const configDescriptions = {
   rest_reply_mode: "仅概率醒来只按概率放行；模型判断会让模型按消息重要性、是否明确叫醒、情绪/安全需要等打分。",
   rest_reply_probability: "仅概率醒来模式使用。越低越不容易在睡眠/休息中被普通消息叫醒。",
   rest_reply_llm_threshold: "模型判断模式使用。模型输出 0-100 分，达到该阈值才醒来回复；建议 60-75。",
+  rest_reply_active_windows: "只有当前时间落入这些时段时，日程里的睡眠/午休/休息才触发休息闸门。多个时段用逗号分隔，如 23:00-08:30,12:20-13:40；留空则按旧行为全天跟随日程休息词。",
+  rest_reply_awake_grace_minutes: "休息中被明确叫醒、模型放行或概率命中并回复后，这段时间内不再对紧接着的消息重复判定是否被吵醒。",
   enable_rest_backlog_reply: "休息闸门静默拦截的目标私聊会暂存成简短摘要；下一次醒来或被叫醒回复时，Bot 会像刚补看消息一样自然接上。只记录私聊，不记录群聊。",
   rest_backlog_max_messages: "休息期间最多保留多少条未回复私聊。超过后只留最近几条，避免醒来后被旧消息淹没。",
   REST_WAKEUP_PROVIDER_ID: "可选。用于休息醒来判断的轻量模型；留空时优先使用回复审校模型，再回退主模型。",
@@ -1163,7 +1221,7 @@ const configDescriptions = {
   holiday_country: "节假日识别地区。目前主要用于 CN，未安装依赖时会自动退化为周末/工作日。",
   enable_holiday_perception: "开启后会把节假日、调休和工作日判断注入环境感知。",
   enable_platform_perception: "开启后会识别平台、私聊/群聊和消息媒介类型。",
-  enable_model_perception: "开启后会把当前会话 LLM 和视觉转述模型作为环境信息注入；只供 Bot 判断能力边界，不要求主动报告模型名。",
+  enable_model_perception: "开启后会把当前会话 LLM、视觉转述模型，以及可用的生图后端/在线图片模型作为环境信息注入；只供 Bot 判断能力边界，不要求主动报告模型名。",
   enable_worldview_perception: "开启后才会把世界观适配片段注入被动回复。若 AstrBot 人设已经写了世界观，建议关闭以避免重复。",
   enable_lunar_perception: "开启后在依赖可用时注入农历日期。",
   enable_solar_term_perception: "开启后注入当天或近三天节气提示。",
@@ -1184,11 +1242,11 @@ const configDescriptions = {
   tts_conversion_provider_id: "用于后处理判断+翻译、快速标签自动语音、语种修正和中文释义补全的文本模型，不是语音合成模型。转换时会参考当前 AstrBot 人格的语气、称呼和距离感；留空时后处理模式会保持纯文本，显式标签仍可由插件处理。",
   tts_extra_prompt: "只填写本人格或声线的额外要求。基础 <pc_tts> 格式、目标语种和 provider 情绪标签适配规则会自动生成，留空最稳。",
   tts_frequency_control_mode: "选择频率规则。全局频控：用概率影响快速标签模式下 LLM 是否倾向输出 TTS，并控制后处理模式是否进入判断+翻译；弱约束下显式 <pc_tts>/<tts> 不再被概率剥离，只受 provider 和会话间隔保护；强约束下按约束强度硬拦。",
-  tts_constraint_mode: "仅快速标签模式 + 全局频控生效。弱约束用提示词引导模型默认少用语音；强约束会在概率未命中或冷却内反向提示本轮禁止语音，并在发送前阻止语音生成。后处理模式不使用该项。",
+  tts_constraint_mode: "仅快速标签模式 + 全局频控生效。弱约束只在概率命中时注入语音规则；强约束会在冷却内反向提示本轮禁止语音，并在发送前阻止语音生成。后处理模式不使用该项。",
   tts_session_min_interval_seconds: "仅全局频控生效。私聊/群聊未单独覆盖时使用的默认最小间隔；0 表示不限制。",
   tts_private_min_interval_seconds: "仅全局频控生效。私聊会话的最小间隔覆盖值；-1 表示继承默认间隔，0 表示私聊不限制。",
   tts_group_min_interval_seconds: "仅全局频控生效。群聊会话的最小间隔覆盖值；-1 表示继承默认间隔，0 表示群聊不限制。建议群聊比私聊更长。",
-  tts_trigger_probability: "仅全局频控生效。私聊/群聊未单独覆盖时使用的默认触发概率。概率未命中时会提示 LLM 在没有用户明确语音请求时必须纯文字，不主动输出 <pc_tts>、<tts> 或等价语音内容；弱约束不会剥离已输出的语音标签。",
+  tts_trigger_probability: "仅全局频控生效。私聊/群聊未单独覆盖时使用的默认触发概率。概率未命中时本轮不注入 TTS 提示词，也不进入后处理语音判断；弱约束不会剥离已输出的语音标签。",
   tts_private_trigger_probability: "仅全局频控生效。私聊触发概率覆盖值；-1 表示继承默认概率，0 表示私聊默认不主动使用 TTS。",
   tts_group_trigger_probability: "仅全局频控生效。群聊触发概率覆盖值；-1 表示继承默认概率。建议群聊低于私聊，避免打扰。",
   enable_tts_local_playback: "开启后，TTS 音频生成成功时会在运行 AstrBot 的电脑上直接播放。默认关闭，避免群聊自动语音频繁出声。",
@@ -1241,6 +1299,7 @@ const configDescriptions = {
   quote_skip_short_reply_chars: "回复正文不超过该字数时不附带引用。0 表示不按长度跳过。",
   quote_target_strategy: "current 引用用户当前这条触发消息；quoted/auto 在用户引用 Bot 旧消息追问时优先引用那条旧消息。",
   private_image_vision_wait_seconds: "私聊单图确认没有继续补充后，最多等待视觉转述多久。不是图片收口时间；视觉提前完成会立刻进入主链。",
+  private_image_provider_timeout_seconds: "每个视觉 provider 单次最多等待多久；超时后会临时降权并切下一个视觉模型，避免某个上游 503 或重试过久拖慢整条单图回复。",
   enable_private_image_gif_enhancement: "图片转述增强的可选子功能。开启后动态 GIF 会抽取代表帧，让视觉模型理解动作、表情变化和文字变化；关闭后按普通 GIF/图片路径处理。",
   private_image_gif_max_frames: "动态 GIF 进入视觉转述时最多抽取多少个代表帧。帧数越多越能理解动作变化，但会增加识图耗时和视觉输入量。",
   private_image_self_recognition_hint: "只补充当前角色自己的外观、头像、名字、表情包特征或聊天截图昵称，让视觉转述更容易判断图里是不是当前角色。不要写用户资料。",
@@ -1254,7 +1313,7 @@ const configDescriptions = {
   segmented_proactive_send_as_forward: "开启后，切出多段时优先打包成合并转发消息发送；平台不支持时自动回退为普通逐条分段。",
   segmented_proactive_split_mode: "regex 使用正则切句；words 使用分段词列表，更适合清理句号、空格等固定分隔符。网址会自动保护，不会被按点号或斜杠拆开。",
   segmented_proactive_regex: "分段模式为 regex 时使用的切分正则。",
-  segmented_proactive_split_words: "分段模式为 words 时使用的分段词。推荐一行一个；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部字符会自动保护，完整网址结束处可作为自然断点；括号或引号内部字符会跳过。",
+  segmented_proactive_split_words: "分段模式为 words 时使用的分段词。推荐一行一个；中文逗号要单独写一行，或写“逗号”。英文点号会把连续 ... 当成一个省略号边界；配置了“……”时会自动兼容单个“…”。网址内部字符会自动保护，完整网址结束处可作为自然断点；括号、标题引号和 <image>/<video> 这类尖括号媒体块内部字符会跳过。",
   enable_segmented_proactive_content_cleanup: "开启后会在分段时清理分隔符或无意义字符。",
   segmented_proactive_content_cleanup_scope: "全段清理会移除片段内所有匹配内容；仅句尾清理只移除每段末尾连续出现的清理词/正则。",
   segmented_proactive_content_cleanup_rule: "regex 模式下的后清理正则。",
@@ -1265,6 +1324,11 @@ const configDescriptions = {
   segmented_proactive_log_base: "对数间隔的底数。数值越小，长句间隔增长越明显。",
   group_conversation_followup_seconds: "群里用户叫过 Bot 后，后续未 @ 的消息在多久内可能被判断为仍在对 Bot 说。",
   group_conversation_followup_max_turns: "一次群聊连续对话最多自动续接几轮，防止 Bot 一直卷进对话。",
+  enable_group_context_injection: "开启后，群聊回复会参考最近群消息、当前话题、活跃成员和群内氛围；关闭后只按当前单条消息理解。",
+  enable_group_injection_guard: "开启后，会识别群里试图改称呼、改语气、改设定或改输出格式的注入话术；这些内容不会写进群观察、黑话、话题线或后续 prompt。",
+  enable_group_persona_denoise: "开启后，会主动压低群聊里的私聊腔、状态汇报和过于贴身的关系投射，让群聊发言更像在公共场合说话。",
+  enable_group_scene_awareness: "开启后，会判断当前这句话是在对 Bot、某个群友还是整个群说话，并结合上下文减少误接话。",
+  enable_group_privacy_guard: "开启后，群聊回复会额外防止把私聊记忆、私下关系细节或只适合一对一场景的信息带进群里。",
   group_interject_min_interval_minutes: "同一群两次主动插话之间的最小间隔。",
   group_interject_max_daily: "每个群每天最多允许几次主动插话。",
   group_repeat_trigger_threshold: "同一句话连续出现达到多少次后，才开始按概率跟读或打断。必须大于 2，默认 4；开启“复读只计不同用户”后，这里表示不同参与者数量。",
@@ -1312,6 +1376,9 @@ const configDescriptions = {
   group_slang_web_search_results: "黑话释义联网参考开启时，每个候选词最多保留多少条网页摘要给模型判断匹配程度。",
   memory_refresh_interval_minutes: "长期画像整理的最小间隔，越短越容易产生模型调用。",
   max_companion_memory_items: "每个私聊对象最多保留多少条长期画像条目。",
+  expression_learning_mode: "light 更克制；balanced 保持当前自然学习；aggressive 会参考更多通过审核的短句和句尾样本，建议搭配手动审核。",
+  enable_expression_manual_review: "开启后，新表达样本先进入用户详情的待审核列表，通过后才会参与表达注入。",
+  enable_expression_style_review: "开启后，回复复核会额外处理表达学习过头、异常逗号/断句、照抄样本等问题。",
   max_learned_expression_items: "每个私聊对象最多保留多少条短句、句尾和标点节奏样本；不作为长期记忆事实。",
   episode_memory_refresh_messages: "累计多少条私聊消息后尝试整理一次对话片段。",
   episode_memory_refresh_minutes: "距离上次整理多久后允许再次整理私聊片段。",
@@ -1354,22 +1421,34 @@ const configDescriptions = {
   qzone_life_publish_probability: "满足条件时发布生活说说的概率，按百分比填写。",
   enable_qzone_generated_image_publish: "开启后，生活说说或情绪说说发布前可按概率调用主动生图能力生成一张配图。需要同时启用 QQ 空间动态和可用的主动生图后端。",
   qzone_generated_image_probability: "满足发说说条件后尝试生成配图的概率，按百分比填写。",
+  enable_qzone_comment_inbox: "默认关闭。开启后低频拉取自己最近说说详情，解析评论列表，首次只记录已见评论；后续新评论由模型判断是否需要公开追加回复。",
+  qzone_comment_inbox_interval_minutes: "两次评论收件箱自动检查之间的最小间隔。",
+  qzone_comment_inbox_recent_posts: "每次向前扫描多少条自己的最近说说详情。",
+  qzone_comment_inbox_max_replies_per_tick: "每次后台检查最多公开回复多少条新评论，建议保持 1，避免刷屏。",
   photo_action_max_daily: "每个私聊对象每天最多生成几张主动图片。真实生成成功就消耗额度，避免失败重试时反复生图。",
   proactive_photo_text_probability: "在主动生图可用、额度未用完，且本轮主动有生活画面或视觉切口时，把普通文字主动升级成带图的概率，按百分比填写。",
-  photo_generation_backend: "auto 优先本地 ComfyUI；电脑高负荷且在线图片 API 可用时会绕开本地。comfyui 只用本地，external 只用在线。",
+  photo_generation_backend: "auto 会在在线图片 API 配置完整时优先尝试在线 API，失败后回退本地 ComfyUI/SDGen；未配置在线 API 时使用本地后端。comfyui/sdgen/external 可指定单一后端。",
   COMFYUI_TEXT2IMG_WORKFLOW_NAME: "用于普通随手拍、风景、桌面小物等 photo_text 的 ComfyUI 工作流名。",
-  COMFYUI_SELFIE_WORKFLOW_NAME: "用于自拍或人像类 photo_text 的 ComfyUI 工作流名。",
+  COMFYUI_SELFIE_WORKFLOW_NAME: "用于自拍或人像类 photo_text 的 ComfyUI 工作流名。若配置了人设参考图，会优先寻找 images=1 的自拍工作流。",
+  photo_persona_reference_image_path: "png/jpg/jpeg/webp 本地文件路径或 http(s) 图片 URL；URL 会在首次自拍/人像生图前下载一次并自动回写为本地缓存路径。仅在自拍/人像类主动生图时使用。ComfyUI 会把它作为图片输入传给支持 images=1 的自拍工作流；在线图片 API 会优先尝试 OpenAI 兼容 /images/edits 参考图接口，不支持时回退纯文生图；SDGen 仍按提示词生成。",
+  enable_daily_outfit_photo: "开启后，每天日程生成并保存后额外调用一次自拍/人像生图能力，根据当天日程、天气和状态生成角色当天穿搭照片，并替换拓展页左上角 Logo。失败会记录当天结果，不会因为刷新页面反复请求。",
+  daily_outfit_photo_prompt: "可选。给每日穿搭补充偏好，例如校服、便服、季节感、配色或固定饰品；留空则优先根据当天日程里的上课、出门、居家、雨天、换衣和饰品线索自动组织。",
+  enable_natural_language_photo_generation: "默认关闭，避免和独立生图插件抢触发。开启后，只有私聊里明确说“帮我画一张/生成图片/来张图”等图片请求才会调用生图；普通“生成/画/改成”不会触发。随消息带图或引用图片并明确要求改图、修图、重绘，或说“改成/加上/去掉……”时才会尝试改图。该入口只对主人私聊开放。",
+  natural_language_photo_generation_max_daily: "独立于主动生图额度和每日穿搭。成功生成或已实际请求后端但失败的情况会计入，避免接口异常时被反复请求。0 表示关闭自然语言生图/改图。",
   comfyui_photo_wait_seconds: "本地 ComfyUI 工作流最多等待多久。超时后不会假装已经拍照。",
-  enable_local_photo_load_guard: "开启后，本地 ComfyUI 生图前读取 CPU/内存负载；负载偏高时延后本次主动计划，或在 auto 模式下改走在线图片 API。",
-  local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI 生图。需要 psutil 可用；不可用时会放行。",
-  local_photo_memory_busy_percent: "内存使用率达到该百分比时，暂缓本地 ComfyUI 生图。",
-  local_photo_defer_minutes: "只有本地 ComfyUI 可用且电脑忙时，保留原主动计划并延后这么久再重试。",
-  EXTERNAL_IMAGE_API_BASE_URL: "OpenAI 兼容在线生图接口地址。API Key 仍在 AstrBot 原配置页维护，不在拓展页回显。",
-  EXTERNAL_IMAGE_API_MODEL: "在线图片模型名。填写后配合 API 地址和 Key 可作为 external 或 auto 的备选后端。",
+  enable_local_photo_load_guard: "开启后，本地 ComfyUI/SDGen 生图前读取 CPU/内存负载；负载偏高时延后本次主动计划，或在 auto 模式下改走在线图片 API。",
+  local_photo_cpu_busy_percent: "CPU 使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。需要 psutil 可用；不可用时会放行。",
+  local_photo_memory_busy_percent: "内存使用率达到该百分比时，暂缓本地 ComfyUI/SDGen 生图。",
+  local_photo_defer_minutes: "只有本地 ComfyUI/SDGen 可用且电脑忙时，保留原主动计划并延后这么久再重试。",
+  EXTERNAL_IMAGE_API_BASE_URL: "OpenAI 兼容在线生图接口地址。可填完整 /images/generations 地址，或 API 根地址。",
+  EXTERNAL_IMAGE_API_KEY: "在线图片 API 的鉴权 Key。保存后会写入插件配置；请只在可信本机环境填写。",
+  EXTERNAL_IMAGE_API_MODEL: "必须填写该平台的图片模型名，不能填写 gpt-5.5、deepseek、claude、qwen 等聊天/文本模型。填写后配合 API 地址和 Key 可作为 external 或 auto 的生图后端。",
   external_image_api_size: "在线生图尺寸，例如 1024x1024、768x1344。",
   external_image_api_timeout_seconds: "等待在线图片 API 返回结果的最长时间。",
   photo_generation_style: "影响主动生图提示词的整体风格倾向，可填 真实、二次元 或 其他。",
   photo_generation_style_custom_prompt: "当风格为“其他”时，把这里作为额外风格要求注入生图提示词。",
+  photo_generation_fixed_prompt: "所有生图提交后端前都会追加这段固定提示词，包括主动随手拍、每日穿搭、自然语言文生图和引用/携带图片改图。适合放固定画质、角色细节、安全区或负面约束；留空不追加。",
+  photo_generation_scene_presets: "格式参考通用生图插件，一行一个：预设名:提示词。内置已有角色自拍、COS自拍、镜前穿搭、头像特写、房间日常、可拍画面、表情包场景；自定义同名会覆盖内置。",
   private_reading_min_interval_hours: "两次私下阅读之间的最小间隔。",
   private_reading_max_photo_count: "只阅读页数不超过该值的素材，避免视觉理解成本过高。",
   private_reading_share_probability: "读完后主动提起阅读体验的概率，按百分比填写。",
@@ -1388,17 +1467,24 @@ const configDescriptions = {
   worldbook_auto_import: "启动或打开页面时自动从关系网资料源刷新用户/群资料。",
   worldbook_member_match_aliases: "提到别名或称呼时辅助匹配 QQ 锚点，但 QQ 号仍是身份主锚点。",
   worldbook_self_registration: "群成员 @Bot 说“我是 XX”时，允许进入二次确认的自登记流程。",
+  worldbook_self_registration_block_words: "命中这些词的自报名字、别名或原始自登记文本会被直接拒绝，不进入关系网待确认流程。",
+  worldbook_self_registration_block_reply: "自登记命中屏蔽词、称呼不合规或疑似冒领/冲突时，Bot 返回给用户的统一拒绝文案。留空时回退到默认回复。",
   worldbook_auto_pending_observations: "根据低频互动生成待确认观察，不直接写死到资料正文。",
   worldbook_member_inject_limit: "单次回复最多自动注入多少个相关用户词条。",
   worldbook_config_paths: "关系网资料来源路径。用于读取既有资料，不应写死在代码里。",
+  cross_user_memory_owner_only: "开启后，只有主人能在私聊里查询 Bot 与其他用户或群聊之间的近期互动摘要；关闭后所有目标私聊用户都可查询。",
   atrelay_require_worldbook_first: "转述或 @ 群友时优先用关系网解析，避免群名片变化导致认错人。",
   atrelay_member_cache_minutes: "群成员列表缓存时间，减少频繁查询。",
   atrelay_sensitive_confirm: "敏感、私密或带情绪的转述是否先向用户确认。",
   enable_atrelay_llm_rewrite: "开启后先用模型把要转述的话改成 Bot 自然会说的短句；关闭后直接发送解析出的正文，速度更快。",
   atrelay_default_relay_style: "默认转述方式：persona 按人格改写，soft 委婉，original 原话。",
   atrelay_multi_target_limit: "一次转述最多允许几个目标，防止刷屏。",
-  response_review_mode: "控制回复/主动复核范围。默认只处理高风险主动消息；full 会额外让较长被动回复参与模型改写，延迟更高。",
-  response_review_max_chars: "仅 full 模式使用。普通被动回复超过该长度才可能进入模型改写，避免短回复也被额外拖慢。",
+  response_review_mode: "控制回复/主动复核范围。主动消息发送前统一复核；full 会额外让较长被动回复参与模型改写，延迟更高。",
+  proactive_review_strength: "控制主动消息发送前复核的拦截力度。默认宽松，避免模型过度保守导致主动消息归零。",
+  proactive_review_hard_risk_threshold: "本地语义风险达到该值时会硬拦截主动候选。值越高越少拦截，按百分比填写。",
+  proactive_review_low_score_threshold: "标准/严格强度下，候选价值分低于该值且压力较高时会延后。值越低越少延后，按百分比填写。",
+  proactive_review_pressure_threshold: "标准/严格强度下，打扰压力达到该值且候选分偏低时会延后。值越高越少延后，按百分比填写。",
+  response_review_max_chars: "用于判断普通被动回复是否偏长。默认模式会处理短闲聊被扩写成建议清单、天气小作文的情况；full 模式会更积极复核普通偏长回复。",
   emotional_gate_hurt_threshold: "用户消息让 Bot 伤心、短期变安静的触发阈值；应低于生气触发阈值。",
   emotional_gate_refuse_threshold: "累计刺痛感让 Bot 生气、短暂回避的触发阈值；应高于伤心触发阈值。",
   emotional_gate_recovery_per_hour: "情绪余波每小时自然缓和多少分。",
@@ -1419,6 +1505,9 @@ const featureSettingGroups = {
     "memory_refresh_interval_minutes",
     "max_companion_memory_items",
     "enable_expression_learning",
+    "expression_learning_mode",
+    "enable_expression_manual_review",
+    "enable_expression_style_review",
     "max_learned_expression_items",
     "enable_intent_emotion_analysis",
     "enable_response_self_review",
@@ -1436,9 +1525,9 @@ const featureSettingGroups = {
     "enable_food_menu_recommendation",
   ],
   enable_companion_memory: ["memory_refresh_interval_minutes", "max_companion_memory_items"],
-  enable_expression_learning: ["max_learned_expression_items"],
+  enable_expression_learning: ["expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items"],
   enable_intent_emotion_analysis: [],
-  enable_response_self_review: ["response_review_mode", "response_review_max_chars"],
+  enable_response_self_review: ["response_review_mode", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "response_review_max_chars"],
   enable_passive_topic_suppression: ["passive_topic_memory_hours"],
   enable_relationship_state_machine: ["proactive_unanswered_slowdown_start", "proactive_unanswered_max_interval_multiplier", "friend_unanswered_max_cooldown_hours"],
   enable_emotion_simulation: ["enable_llm_emotion_judgement", "emotion_judgement_mode", "EMOTION_JUDGEMENT_PROVIDER_ID", "emotional_gate_hurt_threshold", "emotional_gate_refuse_threshold", "emotional_gate_recovery_per_hour", "emotional_gate_max_hurt_minutes", "enable_qzone_emotional_vent_publish", "qzone_emotional_vent_threshold", "qzone_emotional_vent_cooldown_hours", "qzone_emotional_vent_probability"],
@@ -1447,10 +1536,12 @@ const featureSettingGroups = {
   enable_user_habit_learning: ["user_habit_min_count", "user_habit_max_items"],
   enable_food_menu_recommendation: [],
   enable_proactive_only_mode: ["enable_llm_proactive_message", "proactive_prompt_template", "enable_llm_proactive_persona_judge", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "proactive_persona_judge_send_threshold", "proactive_persona_judge_cache_minutes"],
-  enable_humanized_states: ["humanized_state_intensity", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
-  enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
+  enable_humanized_states: ["humanized_state_intensity", "enable_health_state", "enable_hunger_state", "inject_passive_states", "enable_passive_state_delta_injection", "enable_rest_reply_simulation", "rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID", "enable_cycle_state"],
+  enable_rest_reply_simulation: ["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"],
   enable_segmented_proactive_reply: ["segmented_proactive_scope", "segmented_proactive_chat_scope", "segmented_proactive_threshold", "segmented_proactive_min_segment_chars", "segmented_proactive_max_segments", "segmented_proactive_send_as_forward", "segmented_proactive_split_mode", "segmented_proactive_regex", "segmented_proactive_split_words", "enable_segmented_proactive_content_cleanup", "segmented_proactive_content_cleanup_scope", "segmented_proactive_content_cleanup_rule", "segmented_proactive_content_cleanup_words", "segmented_proactive_interval_method", "segmented_proactive_interval_min", "segmented_proactive_interval_max", "segmented_proactive_log_base"],
   inject_passive_states: ["humanized_state_intensity", "enable_passive_state_delta_injection"],
+  enable_health_state: ["humanized_state_intensity"],
+  enable_hunger_state: ["humanized_state_intensity"],
   enable_cycle_state: ["humanized_state_intensity"],
   enable_skill_growth_simulation: ["skill_growth_rate", "enable_skill_growth_passive_injection", "enable_skill_growth_schedule_influence", "skill_growth_schedule_influence_strength"],
   enable_message_debounce: ["inbound_message_debounce_seconds", "text_message_debounce_seconds", "image_message_debounce_seconds", "forward_message_debounce_seconds", "text_message_debounce_max_wait_seconds", "message_debounce_max_merge_messages", "enable_smart_message_debounce", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "smart_message_debounce_model_timeout_seconds", "smart_message_debounce_wait_seconds", "smart_message_debounce_learning_window_seconds", "smart_message_debounce_examples_limit"],
@@ -1459,7 +1550,7 @@ const featureSettingGroups = {
   enable_recall_message_cache: ["enable_recall_transcribe_command", "recall_message_cache_ttl_seconds", "recall_message_cache_max_items"],
   enable_forbidden_word_recall: ["recall_forbidden_words", "recall_forbidden_scope", "recall_forbidden_word_case_sensitive"],
   enable_proactive_quote_trigger_message: ["enable_quote_group_reply", "enable_quote_group_interjection", "enable_quote_private_proactive", "quote_skip_short_reply_chars", "quote_target_strategy"],
-  enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
+  enable_private_image_self_recognition: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds", "enable_private_image_gif_enhancement", "private_image_gif_max_frames", "enable_private_image_vision_cache", "private_image_vision_cache_max_items", "private_image_self_recognition_hint"],
   enable_private_image_gif_enhancement: ["private_image_gif_max_frames"],
   enable_environment_perception: ["environment_perception_timezone", "holiday_country", "enable_holiday_perception", "enable_platform_perception", "enable_model_perception", "enable_worldview_perception", "enable_lunar_perception", "enable_solar_term_perception", "enable_almanac_perception"],
   enable_holiday_perception: ["holiday_country"],
@@ -1473,6 +1564,7 @@ const featureSettingGroups = {
     "max_group_recent_messages",
     "max_group_slang_terms",
     "enable_group_context_injection",
+    "enable_group_injection_guard",
     "enable_group_persona_denoise",
     "enable_group_scene_awareness",
     "group_scene_recent_limit",
@@ -1517,6 +1609,7 @@ const featureSettingGroups = {
     "enable_group_privacy_guard",
   ],
   enable_group_context_injection: ["max_group_recent_messages", "group_scene_recent_limit"],
+  enable_group_injection_guard: [],
   enable_group_persona_denoise: [],
   enable_forward_message_adaptation: ["forward_message_mode", "forward_message_max_messages", "forward_message_max_chars", "forward_message_parse_nested", "forward_message_image_vision", "forward_message_image_limit"],
   enable_group_scene_awareness: ["group_scene_recent_limit", "enable_group_conversation_followup", "group_conversation_followup_seconds", "group_conversation_followup_max_turns"],
@@ -1534,7 +1627,7 @@ const featureSettingGroups = {
   enable_group_repeat_follow: ["group_repeat_trigger_threshold", "group_repeat_count_distinct_users_only", "group_repeat_follow_probability", "group_repeat_interrupt_probability", "group_repeat_interrupt_probability_step", "group_repeat_interrupt_text", "group_repeat_interrupt_image_path"],
   enable_group_interjection_feedback: ["group_interject_min_interval_minutes", "group_interject_max_daily"],
   enable_group_privacy_guard: [],
-  enable_worldbook_member_recognition: ["worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
+  enable_worldbook_member_recognition: ["worldbook_auto_import", "worldbook_member_match_aliases", "worldbook_self_registration", "worldbook_self_registration_block_words", "worldbook_self_registration_block_reply", "worldbook_auto_pending_observations", "worldbook_member_inject_limit", "worldbook_config_paths"],
   enable_cross_user_memory_bridge: ["cross_user_memory_owner_only"],
   enable_atrelay_tools: ["atrelay_require_worldbook_first", "atrelay_member_cache_minutes", "atrelay_sensitive_confirm", "enable_atrelay_llm_rewrite", "atrelay_default_relay_style", "atrelay_multi_target_limit"],
   enable_livingmemory_integration: [],
@@ -1547,10 +1640,11 @@ const featureSettingGroups = {
   enable_external_event_self_link: ["external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_share_probability", "web_exploration_share_probability"],
   enable_web_exploration: ["web_exploration_interests", "enable_web_exploration_boredom_search", "web_exploration_min_interval_hours", "web_exploration_share_probability", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
   enable_web_exploration_boredom_search: ["web_exploration_interests", "web_exploration_min_interval_hours", "enable_external_event_self_link", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "web_exploration_max_results"],
-  enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability"],
+  enable_qzone_integration: ["QZONE_COOKIE", "enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability", "enable_qzone_comment_inbox", "qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
   enable_qzone_life_publish: ["qzone_life_publish_min_interval_hours", "qzone_life_publish_probability"],
   enable_qzone_generated_image_publish: ["qzone_generated_image_probability"],
-  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "photo_generation_style", "photo_generation_style_custom_prompt"],
+  enable_qzone_comment_inbox: ["qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
+  enable_photo_text_action: ["photo_action_max_daily", "proactive_photo_text_probability", "photo_generation_backend", "COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "photo_persona_reference_image_path", "enable_daily_outfit_photo", "daily_outfit_photo_prompt", "enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily", "comfyui_photo_wait_seconds", "enable_local_photo_load_guard", "local_photo_cpu_busy_percent", "local_photo_memory_busy_percent", "local_photo_defer_minutes", "EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds", "photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
   enable_private_reading_integration: ["enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_ask_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
@@ -1565,8 +1659,8 @@ const featureSettingGroups = {
 const featureSettingSections = {
   enable_proactive_only_mode: [
     {
-      title: "主动生成",
-      note: "调度层只决定念头和时机，文本层负责把它写成符合人格的自然开口。",
+      title: "保留主动链路",
+      note: "开启仅保留主动能力后，仍保留主动念头、调度和主动文本生成。",
       keys: ["enable_llm_proactive_message", "proactive_prompt_template"],
     },
     {
@@ -1584,12 +1678,12 @@ const featureSettingSections = {
     {
       title: "记忆与表达",
       note: "沉淀长期画像、表达习惯和共同经历。",
-      keys: ["enable_companion_memory", "memory_refresh_interval_minutes", "max_companion_memory_items", "enable_expression_learning", "max_learned_expression_items", "enable_dialogue_episode_memory", "episode_memory_refresh_messages", "episode_memory_refresh_minutes", "max_dialogue_episodes"],
+      keys: ["enable_companion_memory", "memory_refresh_interval_minutes", "max_companion_memory_items", "enable_expression_learning", "expression_learning_mode", "enable_expression_manual_review", "enable_expression_style_review", "max_learned_expression_items", "enable_dialogue_episode_memory", "episode_memory_refresh_messages", "episode_memory_refresh_minutes", "max_dialogue_episodes"],
     },
     {
       title: "回复策略",
       note: "意图画像、回复/主动复核和重复话题抑制。",
-      keys: ["enable_intent_emotion_analysis", "enable_response_self_review", "response_review_mode", "response_review_max_chars", "enable_passive_topic_suppression", "passive_topic_memory_hours"],
+      keys: ["enable_intent_emotion_analysis", "enable_response_self_review", "response_review_mode", "proactive_review_strength", "proactive_review_hard_risk_threshold", "proactive_review_low_score_threshold", "proactive_review_pressure_threshold", "response_review_max_chars", "enable_passive_topic_suppression", "passive_topic_memory_hours"],
     },
     {
       title: "关系与习惯",
@@ -1654,7 +1748,7 @@ const featureSettingSections = {
     {
       title: "视觉等待",
       note: "收口结束后等待图片转述结果；视觉提前完成会直接进入主链。",
-      keys: ["private_image_vision_wait_seconds"],
+      keys: ["private_image_vision_wait_seconds", "private_image_provider_timeout_seconds"],
     },
     {
       title: "GIF 动图强化",
@@ -1676,7 +1770,7 @@ const featureSettingSections = {
     {
       title: "基础群聊",
       note: "控制群聊消息量、黑话容量和基础上下文。",
-      keys: ["max_group_recent_messages", "max_group_slang_terms", "enable_group_context_injection", "enable_group_persona_denoise", "enable_group_privacy_guard"],
+      keys: ["max_group_recent_messages", "max_group_slang_terms", "enable_group_context_injection", "enable_group_injection_guard", "enable_group_persona_denoise", "enable_group_privacy_guard"],
     },
     {
       title: "场景与续接",
@@ -1745,6 +1839,11 @@ const featureSettingSections = {
       title: "生活说说",
       note: "根据状态、日程和日记余味低频发布公开生活动态。",
       keys: ["enable_qzone_life_publish", "qzone_life_publish_min_interval_hours", "qzone_life_publish_probability", "enable_qzone_generated_image_publish", "qzone_generated_image_probability"],
+    },
+    {
+      title: "评论收件箱",
+      note: "低频查看自己说说下的新评论，按需公开追加一句回复。",
+      keys: ["enable_qzone_comment_inbox", "qzone_comment_inbox_interval_minutes", "qzone_comment_inbox_recent_posts", "qzone_comment_inbox_max_replies_per_tick"],
     },
   ],
   enable_emotion_simulation: [
@@ -1840,13 +1939,23 @@ const featureSettingSections = {
     },
     {
       title: "后端选择",
-      note: "本地 ComfyUI 和在线图片 API 的优先关系。",
+      note: "本地 ComfyUI、SDGen 和在线图片 API 的优先关系。",
       keys: ["photo_generation_backend"],
     },
     {
       title: "本地 ComfyUI",
       note: "用于主动图片生成的工作流和等待时间。",
-      keys: ["COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "comfyui_photo_wait_seconds"],
+      keys: ["COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME", "photo_persona_reference_image_path", "comfyui_photo_wait_seconds"],
+    },
+    {
+      title: "每日穿搭",
+      note: "日程生成后额外生成一张角色当天穿搭照，用作拓展页左上角图像。",
+      keys: ["enable_daily_outfit_photo", "daily_outfit_photo_prompt"],
+    },
+    {
+      title: "自然语言生图/改图",
+      note: "私聊明确请求时直接调用生图后端；默认关闭，避免和独立生图插件抢触发。",
+      keys: ["enable_natural_language_photo_generation", "natural_language_photo_generation_max_daily"],
     },
     {
       title: "电脑负载保护",
@@ -1856,12 +1965,12 @@ const featureSettingSections = {
     {
       title: "在线图片 API",
       note: "作为 external 后端，或 auto 模式下本地忙时的备选后端。",
-      keys: ["EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds"],
+      keys: ["EXTERNAL_IMAGE_API_BASE_URL", "EXTERNAL_IMAGE_API_KEY", "EXTERNAL_IMAGE_API_MODEL", "external_image_api_size", "external_image_api_timeout_seconds"],
     },
     {
       title: "画面风格",
       note: "只影响提示词组织，不改变后端配置。",
-      keys: ["photo_generation_style", "photo_generation_style_custom_prompt"],
+      keys: ["photo_generation_style", "photo_generation_style_custom_prompt", "photo_generation_fixed_prompt", "photo_generation_scene_presets"],
     },
   ],
   enable_tts_enhancement: [
@@ -1899,9 +2008,12 @@ const featureSettingTypes = {
   tts_frequency_control_mode: { type: "select", options: [["global", "全局频控：间隔+概率控制双路径"], ["legacy", "旧版行为：按各路径原逻辑触发"]] },
   tts_constraint_mode: { type: "select", options: [["weak", "弱约束：提示词引导"], ["strong", "强约束：硬禁语音"]] },
   rest_reply_mode: { type: "select", options: [["probability", "仅概率醒来"], ["llm", "模型判断是否醒来"]] },
+  rest_reply_awake_grace_minutes: { type: "number", min: 0, max: 240, step: 5 },
   passive_injection_position: { type: "select", options: [["prompt", "当前请求末尾"], ["system_prompt", "系统提示词"], ["auto", "自动（缓存优先）"]] },
   framework_session_lock_mode: { type: "select", options: [["auto", "自动（仅旧版兼容）"], ["off", "关闭（新版本推荐）"], ["always", "始终启用（旧版排障）"]] },
-  response_review_mode: { type: "select", options: [["severe_only", "主动高风险调用模型"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
+  expression_learning_mode: { type: "select", options: [["light", "轻量：只学节奏"], ["balanced", "标准：当前行为"], ["aggressive", "激进：参考审核样本"]] },
+  response_review_mode: { type: "select", options: [["severe_only", "主动统一复核"], ["local_only", "仅本地识别并丢弃"], ["full", "含被动积极自检（延迟更高）"]] },
+  proactive_review_strength: { type: "select", options: [["lenient", "宽松：减少取消"], ["balanced", "标准：保留延后"], ["strict", "严格：按模型拦截"]] },
   emotion_judgement_mode: { type: "select", options: [["suspicious", "仅复核可疑项"], ["always", "总是复核普通文本"], ["off", "关闭复核"]] },
   group_high_intensity_merge_scope: { type: "select", options: [["group", "全群连续叫 Bot 合并"], ["same_user", "只合并同一发送者补话"]] },
   EMOTION_JUDGEMENT_PROVIDER_ID: { type: "provider" },
@@ -1909,6 +2021,7 @@ const featureSettingTypes = {
   proactive_prompt_template: { type: "textarea" },
   proactive_persona_judge_send_threshold: { type: "number", min: 0, max: 100, step: 1 },
   proactive_persona_judge_cache_minutes: { type: "number", min: 5, max: 720, step: 5 },
+  natural_language_photo_generation_max_daily: { type: "number", min: 0, max: 10, step: 1 },
   quote_target_strategy: { type: "select", options: [["current", "引用当前触发消息"], ["quoted", "引用 Bot 被回复的旧消息"], ["auto", "自动：回复 Bot 旧消息时引用旧消息"]] },
   quote_skip_short_reply_chars: { type: "number", min: 0, max: 120, step: 1 },
   rest_backlog_max_messages: { type: "number", min: 1, max: 12, step: 1 },
@@ -1922,7 +2035,8 @@ const featureSettingTypes = {
   tts_group_trigger_probability: { type: "number", min: -1, max: 100, step: 1 },
   SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: { type: "provider" },
   segmented_proactive_chat_scope: { type: "select", options: [["all", "全部"], ["private", "仅私聊"], ["group", "仅群聊"]] },
-  photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["external", "在线图片 API"]] },
+  photo_generation_backend: { type: "select", options: [["auto", "auto"], ["comfyui", "ComfyUI"], ["sdgen", "SDGen"], ["external", "在线图片 API"]] },
+  EXTERNAL_IMAGE_API_KEY: { type: "password" },
   photo_generation_style: { type: "select", options: [["真实", "真实"], ["二次元", "二次元"], ["其他", "其他"]] },
   segmented_proactive_scope: { type: "select", options: [["proactive_only", "仅插件主动"], ["all_llm", "全部 LLM 纯文本回复"]] },
   segmented_proactive_split_mode: { type: "select", options: [["regex", "正则"], ["words", "分段词列表"]] },
@@ -1931,7 +2045,9 @@ const featureSettingTypes = {
   recall_forbidden_scope: { type: "select", options: [["bot_and_group", "Bot 自己 + 群聊"], ["bot_only", "仅 Bot 自己"], ["group_only", "仅群聊"]] },
   atrelay_default_relay_style: { type: "select", options: [["persona", "语气转译"], ["soft", "委婉转述"], ["original", "原话模式"]] },
   worldbook_config_paths: { type: "textarea" },
+  worldbook_self_registration_block_words: { type: "textarea" },
   private_user_aliases: { type: "textarea" },
+  private_user_delivery_aliases: { type: "textarea" },
   tts_extra_prompt: { type: "textarea" },
   main_user_mention_voice_keywords: { type: "textarea" },
   main_user_mention_voice_prompt: { type: "textarea" },
@@ -1946,7 +2062,10 @@ const featureSettingTypes = {
   recall_forbidden_words: { type: "textarea" },
   roleplay_user_profile_prompt: { type: "textarea" },
   private_image_self_recognition_hint: { type: "textarea" },
+  daily_outfit_photo_prompt: { type: "textarea" },
   photo_generation_style_custom_prompt: { type: "textarea" },
+  photo_generation_fixed_prompt: { type: "textarea" },
+  photo_generation_scene_presets: { type: "textarea" },
   segmented_proactive_regex: { type: "textarea" },
   segmented_proactive_split_words: { type: "textarea" },
   segmented_proactive_content_cleanup_rule: { type: "textarea" },
@@ -1969,6 +2088,9 @@ const probabilitySettingKeys = new Set([
   "qzone_life_publish_probability",
   "qzone_generated_image_probability",
   "qzone_emotional_vent_probability",
+  "proactive_review_hard_risk_threshold",
+  "proactive_review_low_score_threshold",
+  "proactive_review_pressure_threshold",
   "private_reading_share_probability",
   "private_reading_ask_probability",
   "creative_inspiration_probability",
@@ -1980,11 +2102,16 @@ function isFractionalPercentSetting(key) {
   return probabilitySettingKeys.has(key);
 }
 
+function isPercentInputSetting(key) {
+  return isFractionalPercentSetting(key) || percentSettingKeys.has(key);
+}
+
 function displaySettingValue(key, value) {
-  if (isFractionalPercentSetting(key)) {
+  if (isPercentInputSetting(key)) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return value ?? "";
-    const percent = numeric * 100;
+    if (numeric < 0) return String(numeric);
+    const percent = numeric <= 1 ? numeric * 100 : numeric;
     return Number.isInteger(percent) ? String(percent) : String(Number(percent.toFixed(2)));
   }
   return value ?? "";
@@ -2018,6 +2145,7 @@ const percentSettingKeys = new Set([
   "main_user_voice_probability",
   "main_user_mention_voice_probability",
   "proactive_photo_text_probability",
+  "proactive_share_probability",
   "local_photo_cpu_busy_percent",
   "local_photo_memory_busy_percent",
 ]);
@@ -2069,26 +2197,42 @@ const tokenTaskLabels = {
   memory_profile: "长期画像",
   dialogue_episode: "私聊片段",
   response_review: "回复/主动复核",
+  emotion_judgement: "情绪判断",
   relationship: "关系分析",
   group_interject: "群聊插话",
   group_episode: "群聊片段",
   group_slang: "黑话释义",
+  group_question_wakeup_reply_review: "群聊答疑复核",
+  group_followup_judge: "群聊续接判断",
   worldbook_registration: "关系网自登记",
   web_exploration_query: "探索选题",
   web_exploration_digest: "探索笔记",
+  external_event_self_link: "外界信息关联",
   news_digest: "新闻整理",
   creative_project: "创作立项",
   creative_writing: "文本创作",
   photo_prompt: "生图提示",
   screen_narration: "识屏转述",
+  forward_message: "合并转发转述",
   private_reading_vision: "夹层视觉",
+  private_image_vision: "私聊图片识别",
+  private_image_only_framework: "单图回复主链",
+  private_image_only_fallback: "单图兜底回复",
   voice: "语音文本",
   proactive_framework: "主动主回复",
+  proactive_persona_judge: "主动人格判定",
   voice_framework: "框架语音",
   voice_repair: "语音格式修复",
+  smart_message_debounce: "智能收口防抖",
+  rest_wakeup_judge: "休息醒来判断",
   yesterday_summary: "昨日摘要",
   full_test_detail: "完整测试细化",
   provider_test: "模型测试",
+  qzone_comment: "空间评论",
+  qzone_comment_inbox_decision: "空间评论判断",
+  qzone_publish: "空间说说",
+  qzone_publish_test: "空间发布测试",
+  qzone_publish_sanitize: "空间文案清理",
   astrbot_private_reply: "非插件私聊主回复",
   astrbot_group_reply: "非插件群聊主回复",
   astrbot_reply: "非插件主回复",
@@ -2165,6 +2309,45 @@ async function hydrateBookshelfImages(root = document) {
       img.dataset.loading = "0";
     }
   }));
+}
+
+async function hydrateDailyOutfitLogo() {
+  const plate = document.querySelector(".folio-plate");
+  const img = $("#dailyOutfitLogo");
+  if (!plate || !img) return;
+  const outfit = state.overview?.daily_outfit || {};
+  const endpoint = String(outfit.image_data_url || "");
+  if (!outfit.available || !endpoint) {
+    plate.classList.remove("has-daily-outfit");
+    img.removeAttribute("src");
+    img.dataset.source = "";
+    img.dataset.loading = "0";
+    plate.title = "";
+    return;
+  }
+  if (img.dataset.source === endpoint && plate.classList.contains("has-daily-outfit")) return;
+  if (img.dataset.loading === "1" && img.dataset.source === endpoint) return;
+  img.dataset.source = endpoint;
+  img.dataset.loading = "1";
+  try {
+    const result = await fetchJson(endpoint);
+    if (img.dataset.source !== endpoint) return;
+    if (!result?.data_url) throw new Error("每日穿搭图片为空");
+    img.src = result.data_url;
+    img.alt = `今日穿搭照片${outfit.date ? ` · ${outfit.date}` : ""}`;
+    plate.classList.add("has-daily-outfit");
+    plate.title = [
+      outfit.date ? `每日穿搭：${outfit.date}` : "每日穿搭",
+      outfit.backend ? `后端：${outfit.backend}` : "",
+      outfit.generated_at ? `生成：${outfit.generated_at}` : "",
+    ].filter(Boolean).join(" · ");
+  } catch (error) {
+    plate.classList.remove("has-daily-outfit");
+    img.removeAttribute("src");
+    img.dataset.source = "";
+  } finally {
+    img.dataset.loading = "0";
+  }
 }
 
 async function fetchJson(path, options = {}) {
@@ -2263,6 +2446,18 @@ function downloadJson(filename, data) {
   URL.revokeObjectURL(url);
 }
 
+function unwrapConfigPackagePayload(value) {
+  let current = value;
+  for (let index = 0; index < 8; index += 1) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return current;
+    if (current.kind === "private_companion_config_backup" || (current.overview && (current.users || current.groups))) return current;
+    const next = current.package || current.data || current.payload || current.result;
+    if (!next || typeof next !== "object" || Array.isArray(next) || next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
 function formatBackupTime(value) {
   const timestamp = Number(value || 0);
   if (!timestamp) return "未知时间";
@@ -2348,13 +2543,14 @@ function renderConfigImportChecks() {
 function renderConfigMigrationPreview() {
   const box = $("#configMigrationPreview");
   if (!box) return;
+  const modeSelect = $("#configImportMode");
   const conflictSelect = $("#configImportConflict");
   if (conflictSelect) {
-    conflictSelect.disabled = ($("#configImportMode")?.value || "merge") === "replace";
+    conflictSelect.disabled = (modeSelect?.value || "merge") === "replace";
   }
   const preview = state.configImportPreview;
   if (!state.configImportPackage) {
-    box.innerHTML = "还没有选择备份文件。";
+    box.innerHTML = "还没有选择备份或快照文件。";
     $("#previewConfigImportBtn").disabled = true;
     $("#applyConfigImportBtn").disabled = true;
     return;
@@ -2362,10 +2558,14 @@ function renderConfigMigrationPreview() {
   $("#previewConfigImportBtn").disabled = false;
   $("#applyConfigImportBtn").disabled = !preview;
   if (!preview) {
-    box.innerHTML = "已选择备份文件，先点“预览导入”看看会改动哪些内容。";
+    box.innerHTML = "已选择备份/快照文件，先点“预览导入”看看会改动哪些内容。";
     return;
   }
   const sections = Array.isArray(preview.sections) ? preview.sections : [];
+  if (preview.legacy_snapshot && modeSelect && modeSelect.value === "replace") {
+    modeSelect.value = "merge";
+    if (conflictSelect) conflictSelect.disabled = false;
+  }
   const sectionHtml = sections.length
     ? sections.map((item) => `
         <span>
@@ -2390,6 +2590,9 @@ function renderConfigMigrationPreview() {
   const included = Array.isArray(preview.included_sections) && preview.included_sections.length
     ? `<p class="migration-note">备份包含：${escapeHtml(preview.included_sections.map(migrationSectionLabel).join("、"))}</p>`
     : "";
+  const legacy = preview.legacy_snapshot
+    ? `<p class="migration-warn">这是旧版页面快照，只会按合并方式导入可识别的配置、名单、开关和模型指向；页面里的私聊/群聊摘要不会写回数据文件。</p>`
+    : "";
   const ignored = Array.isArray(preview.ignored) && preview.ignored.length
     ? `<p class="migration-warn">已忽略 ${preview.ignored.length} 个未知字段：${escapeHtml(preview.ignored.slice(0, 8).join("、"))}</p>`
     : "";
@@ -2406,6 +2609,7 @@ function renderConfigMigrationPreview() {
     <div class="migration-section-list">${sectionHtml}</div>
     ${compatibilityHtml}
     ${included}
+    ${legacy}
     ${ignored}
     <p class="migration-note">导入前会自动保存当前可迁移配置；Token、缓存、最近消息、审计日志和临时队列不会导入。</p>
   `;
@@ -2424,14 +2628,14 @@ async function readConfigImportFile(file) {
   const text = await file.text();
   let data = null;
   try {
-    data = JSON.parse(text);
+    data = JSON.parse(text.replace(/^\uFEFF/, ""));
   } catch (error) {
     throw new Error("备份文件不是有效 JSON");
   }
-  state.configImportPackage = data;
+  state.configImportPackage = unwrapConfigPackagePayload(data);
   state.configImportPreview = null;
   renderConfigMigrationPreview();
-  showToast("备份文件已读取，请先预览");
+  showToast("备份/快照文件已读取，请先预览");
 }
 
 async function previewConfigImport() {
@@ -2450,7 +2654,7 @@ async function applyConfigImport() {
     showToast("请先预览备份内容", "error");
     return;
   }
-  const mode = $("#configImportMode")?.value || "merge";
+  const mode = state.configImportPreview?.legacy_snapshot ? "merge" : ($("#configImportMode")?.value || "merge");
   const conflict = $("#configImportConflict")?.value || "use_backup";
   const conflictText = {
     use_backup: "使用备份内容",
@@ -2524,47 +2728,133 @@ async function loadTroubleshooting() {
 async function loadAll() {
   $("#subtitle").textContent = "读取运行态中...";
   try {
-    const [overview, users, groups, diagnostics, availableProviders, tokenStats, configBackups] = await Promise.all([
+    const [overview, users, groups] = await Promise.all([
       fetchJson("/overview"),
       fetchJson("/users?limit=300"),
       fetchJson("/groups?limit=300"),
-      fetchJson("/diagnostics"),
-      fetchJson("/providers/available"),
-      fetchJson("/token/stats"),
-      fetchJson("/config/backups").catch(() => ({ items: [] })),
     ]);
     state.overview = overview;
+    hydrateTokenStatsFromOverview(overview);
     state.users = users.items || [];
     state.groups = groups.items || [];
-    state.diagnostics = diagnostics.items || [];
-    state.availableProviders = availableProviders.items || [];
-    state.tokenStats = tokenStats || null;
-    state.configBackups = configBackups.items || [];
     state.featureDraft = featureDraftFromOverview(overview);
     if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
     if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
     renderAll();
+    void ensureTabData(state.activeTab, true);
     $("#subtitle").textContent = `${overview.plugin.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
   } catch (error) {
     $("#subtitle").textContent = `加载失败：${error.message}`;
   }
 }
 
+function hydrateTokenStatsFromOverview(overview) {
+  const tokenStats = overview?.token_stats;
+  if (!tokenStats || typeof tokenStats !== "object") return;
+  state.tokenStats = tokenStats;
+  state.tokenStatsPartial = true;
+  state.lazyLoaded.tokenStats = false;
+}
+
 function renderAll() {
+  hydrateDailyOutfitLogo();
   renderStats();
   renderDashboard();
-  renderUsers();
-  renderGroups();
-  renderWorldbook();
-  renderMemory();
-  renderProactiveCandidates();
-  renderBookshelf();
-  renderImageCache();
-  renderTroubleshooting();
-  renderTokens();
-  renderModuleSettings();
-  renderConfig();
-  // renderProviders() removed — models/provider tab UI has been removed from HTML
+  renderActiveTab(state.activeTab);
+}
+
+function renderActiveTab(tabName = state.activeTab || "dashboard") {
+  if (tabName === "private") {
+    renderUsers();
+  } else if (tabName === "group") {
+    renderGroups();
+  } else if (tabName === "worldbook") {
+    renderWorldbook();
+  } else if (tabName === "memory") {
+    renderMemory();
+  } else if (tabName === "proactive") {
+    renderProactiveCandidates();
+  } else if (tabName === "bookshelf") {
+    renderBookshelf();
+  } else if (tabName === "image-cache") {
+    renderImageCache();
+  } else if (tabName === "troubleshooting") {
+    renderTroubleshooting();
+  } else if (tabName === "tokens") {
+    renderTokens();
+  } else if (tabName === "roleplay" || tabName === "modules") {
+    renderModuleSettings();
+    renderRoleplayPersonaDraftPanel();
+  } else if (tabName === "config") {
+    renderConfig();
+  } else if (tabName === "models") {
+    renderProviders();
+  }
+}
+
+async function loadDashboardDiagnostics(force = false) {
+  if (state.lazyLoaded.diagnostics && !force) return state.diagnostics;
+  const diagnostics = await fetchJson("/diagnostics");
+  state.diagnostics = diagnostics.items || [];
+  state.lazyLoaded.diagnostics = true;
+  if (state.activeTab === "dashboard") {
+    renderDiagnostics();
+    renderDashboardPulse();
+  }
+  return state.diagnostics;
+}
+
+async function loadTokenStats(force = false) {
+  if (state.lazyLoaded.tokenStats && !force && !state.tokenStatsPartial) return state.tokenStats;
+  const tokenStats = await fetchJson("/token/stats");
+  state.tokenStats = tokenStats || null;
+  state.tokenStatsPartial = false;
+  state.lazyLoaded.tokenStats = true;
+  renderStats();
+  if (state.activeTab === "tokens") renderTokens();
+  if (state.activeTab === "dashboard") renderDashboardPulse();
+  return state.tokenStats;
+}
+
+async function loadAvailableProviders(force = false) {
+  if (state.lazyLoaded.providers && !force) return state.availableProviders;
+  const availableProviders = await fetchJson("/providers/available");
+  state.availableProviders = availableProviders.items || [];
+  state.lazyLoaded.providers = true;
+  if (state.activeTab === "models") renderProviders();
+  if (state.activeTab === "modules" || state.activeTab === "roleplay") renderModuleSettings();
+  return state.availableProviders;
+}
+
+async function loadConfigBackups(force = false) {
+  if (state.lazyLoaded.configBackups && !force) return state.configBackups;
+  const configBackups = await fetchJson("/config/backups").catch(() => ({ items: [] }));
+  state.configBackups = configBackups.items || [];
+  state.lazyLoaded.configBackups = true;
+  if (state.activeTab === "config") renderConfigBackups();
+  return state.configBackups;
+}
+
+async function ensureTabData(tabName, force = false) {
+  if (tabName === "dashboard") {
+    loadDashboardDiagnostics(force).catch(() => {});
+    return;
+  }
+  if (tabName === "tokens") {
+    await loadTokenStats(force);
+  } else if (tabName === "models") {
+    await loadAvailableProviders(force);
+  } else if (tabName === "modules" || tabName === "roleplay") {
+    loadAvailableProviders(force).catch(() => {});
+  } else if (tabName === "config") {
+    await loadConfigBackups(force);
+  } else if (tabName === "image-cache") {
+    renderImageCache();
+    await loadImageCache();
+  } else if (tabName === "troubleshooting") {
+    renderTroubleshooting();
+    await loadTroubleshooting();
+  }
 }
 
 function renderStats() {
@@ -2684,8 +2974,20 @@ function renderDashboardPulse() {
   const shortcuts = [
     ["group", "群聊观测", `${overview.group?.enabled_group_count || 0}/${overview.group?.group_count || 0} 个群`],
     ["worldbook", "关系网", `${overview.worldbook?.enabled_member_count || 0}/${overview.worldbook?.member_count || 0} 个节点`],
-    ["tokens", "Token", `${formatCompactNumber(state.tokenStats?.totals?.total_tokens || 0)} · ${formatCompactNumber(state.tokenStats?.totals?.calls || 0)} 次`],
-    ["troubleshooting", "排障中心", `${(state.diagnostics || []).filter((item) => ["warn", "error"].includes(item.level)).length} 个诊断项`],
+    [
+      "tokens",
+      "Token",
+      state.tokenStats
+        ? `${formatCompactNumber(state.tokenStats?.totals?.total_tokens || 0)} · ${formatCompactNumber(state.tokenStats?.totals?.calls || 0)} 次`
+        : "后台加载中",
+    ],
+    [
+      "troubleshooting",
+      "排障中心",
+      state.lazyLoaded.diagnostics
+        ? `${(state.diagnostics || []).filter((item) => ["warn", "error"].includes(item.level)).length} 个诊断项`
+        : "后台轻量检查中",
+    ],
     ["image-cache", "图片缓存", `${overview.cache?.private_image_vision?.items || 0}/${overview.cache?.private_image_vision?.max_items || "不限"} 条`],
     ["modules", "模块工作台", moduleShortcutNote(overview)],
     ["config", "名单与开关", `${overview.group?.access_mode || "whitelist"} · 白 ${overview.group?.whitelist?.length || 0} / 黑 ${overview.group?.blacklist?.length || 0}`],
@@ -3050,6 +3352,7 @@ function renderTroubleshooting() {
   const chainEl = $("#troubleshootingChainTests");
   const injectionsEl = $("#troubleshootingPromptInjections");
   const debounceEl = $("#troubleshootingDebounceTrace");
+  const faqEl = $("#troubleshootingFaq");
   if (!summaryEl || !checksEl || !eventsEl || !sqliteEl || !chainEl || !injectionsEl) return;
   const data = state.troubleshooting || {};
   const summary = data.summary || {};
@@ -3109,8 +3412,9 @@ function renderTroubleshooting() {
       </section>
     `).join("")
     : `<div class="empty small">没有检测到候选 SQLite 数据库文件</div>`;
-  chainEl.innerHTML = troubleshootingChainTestMarkup(data.chain_tests || {});
+  chainEl.innerHTML = troubleshootingChainTestMarkup(data.chain_tests || {}, data.recent_photo_generations || []);
   injectionsEl.innerHTML = troubleshootingPromptInjectionMarkup(data.prompt_injections || {});
+  if (faqEl) faqEl.innerHTML = troubleshootingFaqMarkup(data);
   if (debounceEl) {
     debounceEl.innerHTML = troubleshootingDebounceTraceMarkup(state.overview?.message_debounce || {});
   }
@@ -3200,13 +3504,119 @@ function troubleshootingEventMarkup(item) {
   `;
 }
 
-function troubleshootingChainTestMarkup(results) {
+function troubleshootingFaqMarkup(data = {}) {
+  const chainTests = data.chain_tests || {};
+  const proactiveTest = chainTests.proactive_message || {};
+  const imageTest = chainTests.image_generation_text2img || chainTests.image_generation || {};
+  const promptMessages = Array.isArray(data.prompt_injections?.messages) ? data.prompt_injections.messages : [];
+  const proactiveMeta = proactiveTest.pending
+    ? "最近主动测试：已预约，稍后刷新看结果"
+    : proactiveTest.ran_at_text
+      ? `最近主动测试：${proactiveTest.ok ? "通过" : "失败"} · ${proactiveTest.ran_at_text}`
+      : "尚未运行主动链路测试";
+  const imageMeta = imageTest.ran_at_text
+    ? `最近文生图测试：${imageTest.ok ? "通过" : "失败"} · ${imageTest.ran_at_text}`
+    : "尚未运行文生图链路测试";
+  const injectionMeta = promptMessages.length
+    ? `当前保留最近 ${Math.min(promptMessages.length, 10)} 次回复的注入链路`
+    : "当前没有可展示的注入链路记录";
+  const items = [
+    {
+      title: "为什么没有主动消息？",
+      meta: proactiveMeta,
+      body: [
+        "先确认私聊对象已启用，并且没有处在静默、休息、冷却、每日上限、未回复降频或主动人格判定拦截中。",
+        "再看上方“最近问题”和主动审计记录：如果显示 dropped/deferred，通常是时间窗、关系压力、内容重复或链路依赖不可用。",
+        "最直接的验证方式是点“测试主动消息”，它会预约一次临时主动，检查生成、复核、发送和归档是否完整。",
+      ],
+      actions: [
+        { label: "看主动页", tab: "proactive" },
+        { label: "看私聊对象", tab: "private" },
+        { label: "测试主动消息", test: "proactive_message" },
+      ],
+    },
+    {
+      title: "为什么生图失败？",
+      meta: imageMeta,
+      body: [
+        "先看在线/本地后端是否选对：在线后端要检查平台、Base URL、Key、模型名、尺寸和超时；本地 ComfyUI 要检查工作流名称和服务是否可连。",
+        "如果是自拍或参考图链路，再检查参考图路径/URL 是否可读，以及本地负载保护有没有因为 CPU、内存或队列压力而延后。",
+        "排障里的“测试文生图/测试自拍”会实际生成文件，比只看配置更可靠。",
+      ],
+      actions: [
+        { label: "测试文生图", test: "image_generation_text2img", workflowKind: "text2img" },
+        { label: "测试自拍", test: "image_generation_selfie", workflowKind: "selfie" },
+        { label: "看模型页", tab: "models" },
+      ],
+    },
+    {
+      title: "为什么回复像被注入或带偏？",
+      meta: "优先看“最近注入内容”和群聊防注入记录",
+      body: [
+        "先点开最近回复对应的注入链路，区分真实用户消息、插件动态注入、TTS 规则和模型生成内容。",
+        "群聊里如果有人要求改称呼、改设定、改格式或要求忽略人格，确认“群聊防注入”和“群聊人格降噪”开启。",
+        "如果污染来自关系网自登记、黑话或成员画像，去关系网/群聊页检查对应条目。",
+      ],
+      actions: [
+        { label: "看群聊页", tab: "group" },
+        { label: "看关系网", tab: "worldbook" },
+      ],
+    },
+    {
+      title: "为什么排障页没有注入记录？",
+      meta: injectionMeta,
+      body: [
+        "注入记录按最近回复聚合，只保留最近 10 次；需要实际发生一次主链请求或请求级提示词注入后才会出现。",
+        "非陪伴私聊现在会放行默认主链，这类消息不会强行生成陪伴注入记录，这是正常现象。",
+        "如果刚刚才触发回复，先点“重新检查”；如果仍没有，说明该轮可能没有进入插件被动增强链路，或被主动-only/休息/目标用户判断提前放行。",
+      ],
+      actions: [
+        { label: "重新检查", refresh: true },
+        { label: "看最近注入", anchor: "troubleshootingPromptInjections" },
+      ],
+    },
+  ];
+  return items.map((item, index) => `
+    <details class="troubleshooting-faq-item" ${index < 2 ? "open" : ""}>
+      <summary>
+        <span>
+          <b>${escapeHtml(item.title)}</b>
+          <small>${escapeHtml(item.meta)}</small>
+        </span>
+      </summary>
+      <div class="troubleshooting-faq-body">
+        ${item.body.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
+        <footer>
+          ${item.actions.map((action) => {
+            if (action.tab) return `<button type="button" data-jump-tab="${escapeHtml(action.tab)}">${escapeHtml(action.label)}</button>`;
+            if (action.test) {
+              return `<button type="button" data-troubleshooting-test="${escapeHtml(action.test)}"${action.workflowKind ? ` data-troubleshooting-workflow-kind="${escapeHtml(action.workflowKind)}"` : ""}>${escapeHtml(action.label)}</button>`;
+            }
+            if (action.refresh) return `<button type="button" data-troubleshooting-refresh>${escapeHtml(action.label)}</button>`;
+            if (action.anchor) return `<button type="button" data-scroll-target="${escapeHtml(action.anchor)}">${escapeHtml(action.label)}</button>`;
+            return "";
+          }).join("")}
+        </footer>
+      </div>
+    </details>
+  `).join("");
+}
+
+function troubleshootingChainTestMarkup(results, recentPhotoGenerations = []) {
   const tests = [
     {
-      type: "image_generation",
-      title: "图片生成",
-      text: "实际调用图片生成后端并检查返回文件",
-      button: "测试图片生成",
+      type: "image_generation_text2img",
+      workflowKind: "text2img",
+      title: "文生图",
+      text: "实际调用普通文生图链路并检查返回文件",
+      button: "测试文生图",
+    },
+    {
+      type: "image_generation_selfie",
+      workflowKind: "selfie",
+      title: "自拍参考图",
+      text: "实际调用自拍/人像链路；有参考图时会测试参考图输入",
+      button: "测试自拍",
     },
     {
       type: "tts_generation",
@@ -3227,14 +3637,20 @@ function troubleshootingChainTestMarkup(results) {
       button: "运行模型排障",
     },
   ];
-  return tests.map((test) => {
-    const result = results?.[test.type] || (test.type === "model_diagnostics" ? results?.skill_similarity : {}) || {};
+  const testsMarkup = tests.map((test) => {
+    const result = results?.[test.type]
+      || (test.type === "image_generation_text2img" ? results?.image_generation : null)
+      || (test.type === "model_diagnostics" ? results?.skill_similarity : null)
+      || {};
     const ok = Boolean(result.ok);
     const pending = Boolean(result.pending);
     const hasResult = Boolean(result.ran_at || result.ran_at_text || result.error || result.detail);
     const status = hasResult ? (pending ? "info" : ok ? "ok" : "error") : "info";
     const meta = [
       result.backend || result.provider || "",
+      result.image_model ? `模型 ${result.image_model}` : "",
+      result.workflow_kind ? `类型 ${result.workflow_kind}` : "",
+      result.used_reference ? "已带参考图" : "",
       result.elapsed_ms ? `${result.elapsed_ms}ms` : "",
       result.file_size ? `${formatBytes(result.file_size)}` : "",
       result.ran_at_text || "",
@@ -3252,10 +3668,11 @@ function troubleshootingChainTestMarkup(results) {
           ${previewMarkup}
           ${stepsMarkup}
         </div>
-        <button type="button" data-troubleshooting-test="${escapeHtml(test.type)}">${escapeHtml(test.button)}</button>
+        <button type="button" data-troubleshooting-test="${escapeHtml(test.type)}" ${test.workflowKind ? `data-troubleshooting-workflow-kind="${escapeHtml(test.workflowKind)}"` : ""}>${escapeHtml(test.button)}</button>
       </section>
     `;
   }).join("");
+  return `${testsMarkup}${troubleshootingRecentPhotoGenerationMarkup(recentPhotoGenerations)}`;
 }
 
 function troubleshootingChainDetailText(test, result, hasResult) {
@@ -3310,7 +3727,56 @@ function troubleshootingChainPreviewMarkup(type, result) {
       </details>
     `;
   }
-  return result.text_preview ? `<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>` : "";
+  const parts = [];
+  if (result.text_preview) parts.push(`<small class="path">文本预览：${escapeHtml(result.text_preview)}</small>`);
+  if (result.prompt) parts.push(`<small class="path">提示词：${escapeHtml(result.prompt)}</small>`);
+  return parts.join("");
+}
+
+function troubleshootingRecentPhotoGenerationMarkup(itemsRaw) {
+  const items = Array.isArray(itemsRaw) ? itemsRaw.filter(Boolean) : [];
+  if (!items.length) {
+    return `
+      <section class="troubleshooting-chain-test info">
+        <div>
+          <b>最近生图提示词</b>
+          <p>暂无真实生图记录；运行一次主动拍照、每日穿搭、自然语言生图或生图排障后会显示。</p>
+        </div>
+      </section>
+    `;
+  }
+  return `
+    <section class="troubleshooting-chain-test info">
+      <div>
+        <b>最近生图提示词</b>
+        <p>展示最近 ${escapeHtml(String(items.length))} 次真实生图调用，便于排查构图、模型、参考图和后端回退问题。</p>
+        <details class="chain-test-steps chain-test-preview">
+          <summary>查看最近生图记录</summary>
+          ${items.map((item) => {
+            const meta = [
+              item.ok ? "成功" : "失败",
+              item.backend || "",
+              item.kind ? `类型 ${item.kind}` : "",
+              item.image_size ? `尺寸 ${item.image_size}` : "",
+              item.reference ? "带参考图" : "",
+              item.elapsed_ms ? `${item.elapsed_ms}ms` : "",
+              item.time || "",
+              item.trace ? `trace ${item.trace}` : "",
+            ].filter(Boolean).join(" · ");
+            return `
+              <div class="chain-test-preview-section">
+                <b>${escapeHtml(meta || "生图记录")}</b>
+                ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
+                ${item.path ? `<small class="path">${escapeHtml(item.path)}</small>` : ""}
+                ${item.reference_path ? `<small class="path">参考图：${escapeHtml(item.reference_path)}</small>` : ""}
+                <p>${escapeHtml(item.prompt || item.prompt_preview || "")}</p>
+              </div>
+            `;
+          }).join("")}
+        </details>
+      </div>
+    </section>
+  `;
 }
 
 function troubleshootingDebounceTraceMarkup(data) {
@@ -3386,45 +3852,97 @@ function debounceDecisionLabel(decision) {
   }[decision] || decision || "记录";
 }
 
-function troubleshootingPromptInjectionMarkup(data) {
-  const groups = [
-    ["tts", "TTS 规则注入", "基础规则 / 频率控制 / 主用户倾向 / 用户语音请求；最近 8 条"],
-    ["request", "请求附加规则", "工具 / 环境 / 群聊边界等直接追加到本轮请求的规则"],
-    ["passive", "被动回复注入", "状态 / 身份 / 环境等聚合片段"],
-    ["proactive", "主动消息注入", "主动主链提示词"],
-  ];
-  return groups.map(([key, title, note]) => {
-    const items = Array.isArray(data?.[key]) ? data[key] : [];
-    return `
-      <section class="troubleshooting-injection-group">
-        <header>
-          <div>
-            <b>${escapeHtml(title)}</b>
-            <span>${escapeHtml(note)} · 最近 ${escapeHtml(items.length || 0)} 条</span>
-          </div>
-        </header>
-        ${items.length ? items.map((item) => troubleshootingPromptInjectionItemMarkup(item)).join("") : `<div class="empty small">暂无${escapeHtml(title)}记录</div>`}
-      </section>
-    `;
-  }).join("");
+function promptInjectionKindLabel(kind) {
+  return {
+    request: "请求附加",
+    passive: "被动回复",
+    proactive: "主动消息",
+    tts: "TTS 规则",
+  }[kind] || kind || "注入记录";
 }
 
-function troubleshootingPromptInjectionItemMarkup(item) {
+function promptInjectionMessagePreview(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "未记录触发消息";
+  const internalMarkers = ["【语音消息规则】", "<pc_tts>", "</pc_tts>", "语音消息规则", "提示词片段", "当前语音正文目标语种"];
+  if (internalMarkers.some((marker) => text.includes(marker))) return "未记录触发消息";
+  return text.length > 72 ? `${text.slice(0, 72)}…` : text;
+}
+
+function troubleshootingPromptInjectionMarkup(data) {
+  const messages = Array.isArray(data?.messages) ? data.messages.slice(0, 10) : [];
+  const total = Number(data?.message_total || messages.length || 0);
+  return `
+    <section class="troubleshooting-injection-group">
+      <header>
+        <div>
+          <b>最近回复的 10 次消息</b>
+          <span>按消息聚合展示注入链路；点开某条消息即可查看这次回复的完整注入模块。当前 ${escapeHtml(Math.min(total || messages.length, 10))} 条</span>
+        </div>
+      </header>
+      ${messages.length ? messages.map((item) => troubleshootingPromptInjectionMessageMarkup(item)).join("") : `<div class="empty small">暂无可查看的注入记录</div>`}
+    </section>
+  `;
+}
+
+function troubleshootingPromptInjectionMessageMarkup(message) {
+  const items = Array.isArray(message?.items) ? message.items : [];
+  const kinds = Array.isArray(message?.kinds) ? message.kinds.map((kind) => promptInjectionKindLabel(kind)).filter(Boolean) : [];
+  const meta = [
+    message?.time || "",
+    message?.sender_label || "",
+    items.length ? `${items.length} 段注入` : "",
+    Number(message?.module_count || 0) ? `${Number(message.module_count)} 个模块` : "",
+    kinds.length ? kinds.join(" / ") : "",
+  ].filter(Boolean).join(" · ");
+  const messagePreview = promptInjectionMessagePreview(message?.message_preview || (items[0]?.metadata?.["触发消息"]) || "");
+  const metaRows = [
+    ["发送者", message?.sender_label || ""],
+    ["会话", message?.session || ""],
+    ["跟踪", message?.trace_id || ""],
+    ["首次记录", message?.first_time || ""],
+    ["最后更新", message?.time || ""],
+  ].filter(([, value]) => value);
+  return `
+    <details class="troubleshooting-injection-item troubleshooting-injection-message">
+      <summary>
+        <span>
+          <b>${escapeHtml(messagePreview)}</b>
+          <small>${escapeHtml(message?.session || "")}</small>
+        </span>
+        <em>${escapeHtml(meta)}</em>
+      </summary>
+      ${metaRows.length ? `
+        <dl>
+          ${metaRows.map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}
+        </dl>
+      ` : ""}
+      ${items.map((item) => troubleshootingPromptInjectionItemMarkup(item, { nested: true })).join("")}
+    </details>
+  `;
+}
+
+function troubleshootingPromptInjectionItemMarkup(item, options = {}) {
+  const nested = Boolean(options?.nested);
   const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
   const metaRows = Object.entries(metadata).filter(([key, value]) => key && value);
   const modules = Array.isArray(item?.modules) ? item.modules : [];
   const meta = [
+    nested ? "" : promptInjectionKindLabel(item.kind || ""),
     item.time || "",
     item.mode ? `mode=${item.mode}` : "",
     item.chars ? `${item.chars} chars` : "",
     modules.length ? `${modules.length} 个模块` : "",
     item.truncated ? "已截断" : "",
   ].filter(Boolean).join(" · ");
+  const title = nested
+    ? `${promptInjectionKindLabel(item.kind || "")} · ${item.title || "注入内容"}`
+    : (item.title || "注入内容");
   return `
     <details class="troubleshooting-injection-item">
       <summary>
         <span>
-          <b>${escapeHtml(item.title || "注入内容")}</b>
+          <b>${escapeHtml(title)}</b>
           <small>${escapeHtml(item.session || "")}</small>
         </span>
         <em>${escapeHtml(meta)}</em>
@@ -3784,7 +4302,7 @@ function groupTopicThreadsView(threads) {
 function renderFeatureMatrix() {
   const groups = [
     ["陪伴", ["enable_mai_style_integration", "enable_expression_learning", "enable_response_self_review", "enable_dialogue_episode_memory"]],
-    ["群聊", ["enable_group_companion", "enable_group_context_injection", "enable_group_slang_learning", "enable_group_topic_threads", "enable_group_relationship_graph"]],
+    ["群聊", ["enable_group_companion", "enable_group_context_injection", "enable_group_injection_guard", "enable_group_slang_learning", "enable_group_topic_threads", "enable_group_relationship_graph"]],
     ["记忆", ["enable_companion_memory", "enable_open_loop_tracking", "enable_livingmemory_integration"]],
     ["主动联动", ["enable_proactive_quote_trigger_message", "enable_unanswered_screen_peek_followup", "enable_bilibili_integration", "enable_bilibili_boredom_watch", "enable_news_integration", "enable_ai_daily_watch", "enable_private_reading_integration", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_creative_writing", "creative_hidden_mode"]],
   ];
@@ -4348,7 +4866,15 @@ function tokenTable(headers, rows, mapper, emptyText) {
 }
 
 function tokenTaskLabel(key) {
-  return tokenTaskLabels[key] || key || "其他调用";
+  const normalized = String(key || "").trim();
+  if (!normalized) return "其他调用";
+  if (tokenTaskLabels[normalized]) return tokenTaskLabels[normalized];
+  if (normalized.startsWith("qzone_") && normalized.endsWith("_photo_prompt")) return "空间配图提示";
+  if (normalized.startsWith("qzone_")) return "QQ 空间任务";
+  if (normalized.startsWith("astrbot_")) return "AstrBot 主回复";
+  if (normalized.startsWith("private_image_")) return "私聊图片处理";
+  if (normalized.startsWith("web_exploration_")) return "主动搜索";
+  return normalized;
 }
 
 function formatNumber(value) {
@@ -4461,7 +4987,7 @@ async function renderUserDetail(forceFetch = false) {
       ${scoreGauge("关系分", detail.relationship_score || 0, -20, 40)}
       ${scoreGauge("今日主动", detail.sent_today || 0, 0, Math.max(1, detail.effective_daily_limit || state.overview?.private?.max_daily_messages || 8))}
       ${miniStat("片段", detail.dialogue_episode_count || (detail.dialogue_episodes || []).length)}
-      ${miniStat("未完话头", detail.open_loop_count || (detail.open_loops || []).length)}
+      ${miniStat("未完话头", Array.isArray(detail.open_loops) ? activeOpenLoopItems(detail.open_loops).length : (detail.open_loop_count || 0))}
       ${miniStat("习惯", detail.habit_count || detail.behavior_habits?.items?.length || 0)}
     </div>
     <div class="detail-grid">
@@ -4471,7 +4997,8 @@ async function renderUserDetail(forceFetch = false) {
       ${detailBlock("行为习惯", detail.behavior_habits?.updated_at ? `更新于 ${detail.behavior_habits.updated_at}` : "", userHabitPairs(detail.behavior_habits))}
       ${detailBlock("最近对话", "", [["用户消息", detail.last_user_message || ""], ["陪伴回复", detail.last_companion_message || ""]])}
       ${detailBlock("对话片段", "", (detail.dialogue_episodes || []).map((item, index) => [`#${index + 1}`, item.summary || item.title || JSON.stringify(item)]))}
-      ${detailBlock("未完话头", "", (detail.open_loops || []).map((item, index) => [`#${index + 1}`, item.text || item.topic || JSON.stringify(item)]))}
+      ${renderExpressionProfileBlock(detail)}
+      ${renderOpenLoopBlock(detail)}
     </div>
   `;
   bindUserActions(detail);
@@ -4564,7 +5091,155 @@ function userHabitPairs(habits) {
     : [["-", habits?.enabled ? "暂无达到阈值的习惯样本" : "习惯学习未开启"]];
 }
 
+function normalizeOpenLoopItem(item) {
+  const raw = item && typeof item === "object" ? item : {};
+  return {
+    text: String(raw.text || raw.topic || raw.summary || "").trim(),
+    status: String(raw.status || "待自然延续").trim() || "待自然延续",
+    source: String(raw.source || "").trim(),
+  };
+}
+
+function activeOpenLoopItems(items) {
+  return (Array.isArray(items) ? items : [])
+    .map(normalizeOpenLoopItem)
+    .filter((item) => item.text && !["已完成", "已取消"].includes(item.status));
+}
+
+function resolvedOpenLoopItems(items) {
+  return (Array.isArray(items) ? items : [])
+    .map(normalizeOpenLoopItem)
+    .filter((item) => item.text && ["已完成", "已取消"].includes(item.status));
+}
+
+function openLoopStatusClass(status) {
+  if (status === "已完成") return "ok";
+  if (status === "已取消") return "off";
+  return "";
+}
+
+function openLoopStatusText(item) {
+  const parts = [item.status || "待自然延续"];
+  if (item.source === "dialogue_episode") parts.push("片段整理");
+  if (item.source === "user_message") parts.push("即时记录");
+  return parts.join("｜");
+}
+
+function renderOpenLoopBlock(detail) {
+  const activeItems = activeOpenLoopItems(detail?.open_loops);
+  const resolvedItems = resolvedOpenLoopItems(detail?.open_loops);
+  return `
+    <section class="detail-block open-loop-block">
+      <div class="detail-block-head">
+        <h2>未完话头</h2>
+        ${activeItems.length ? `
+          <div class="open-loop-actions">
+            <button type="button" class="danger-outline" data-open-loop-clear="${escapeHtml(detail.user_id || "")}">清空未完话头</button>
+          </div>
+        ` : ""}
+      </div>
+      ${activeItems.length ? `
+        <div class="open-loop-list">
+          ${activeItems.map((item, index) => `
+            <article class="open-loop-item">
+              <div class="open-loop-main">
+                <b class="open-loop-text">${escapeHtml(item.text)}</b>
+                <span class="badge ${openLoopStatusClass(item.status)}">${escapeHtml(openLoopStatusText(item))}</span>
+              </div>
+              <button type="button" class="danger-outline" data-open-loop-remove="${escapeHtml(item.text)}" data-open-loop-index="${index}">删除</button>
+            </article>
+          `).join("")}
+        </div>
+      ` : `<div class="empty small">暂无未完话头</div>`}
+      ${resolvedItems.length ? `
+        <details class="open-loop-archive">
+          <summary>已结束话头 ${escapeHtml(resolvedItems.length)}</summary>
+          <div class="open-loop-list archived">
+            ${resolvedItems.map((item) => `
+              <article class="open-loop-item archived">
+                <div class="open-loop-main">
+                  <b class="open-loop-text">${escapeHtml(item.text)}</b>
+                  <span class="badge ${openLoopStatusClass(item.status)}">${escapeHtml(openLoopStatusText(item))}</span>
+                </div>
+              </article>
+            `).join("")}
+          </div>
+        </details>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderExpressionProfileBlock(detail) {
+  const profile = detail?.expression_profile && typeof detail.expression_profile === "object" ? detail.expression_profile : {};
+  const pending = Array.isArray(profile.pending_samples) ? profile.pending_samples : [];
+  const samples = Array.isArray(profile.samples) ? profile.samples : [];
+  const endings = Array.isArray(profile.endings) ? profile.endings.filter(Boolean) : [];
+  const phrases = Array.isArray(profile.recent_phrases) ? profile.recent_phrases.filter(Boolean) : [];
+  return `
+    <section class="detail-block expression-profile-block">
+      <div class="detail-block-head">
+        <h2>表达画像</h2>
+        <div class="open-loop-actions">
+          <span class="badge">${escapeHtml(profile.mode || "balanced")}</span>
+          ${profile.manual_review ? `<span class="badge ok">手动审核</span>` : ""}
+          ${pending.length ? `<button type="button" class="danger-outline" data-expression-action="clear_pending">清空待审</button>` : ""}
+        </div>
+      </div>
+      <p class="muted small">已入库 ${escapeHtml(profile.sample_count || samples.length || 0)} 条 · 待审核 ${escapeHtml(profile.pending_count || pending.length || 0)} 条 · ${profile.style_review ? "发送前审核开启" : "发送前审核关闭"}</p>
+      ${profile.prompt_preview ? `<pre class="compact-pre">${escapeHtml(profile.prompt_preview)}</pre>` : `<div class="empty small">暂无足够表达样本</div>`}
+      ${endings.length || phrases.length ? `
+        <div class="worldbook-chip-row">
+          ${endings.slice(0, 8).map((item) => `<span>句尾：${escapeHtml(item)}</span>`).join("")}
+          ${phrases.slice(0, 8).map((item) => `<span>短句：${escapeHtml(item)}</span>`).join("")}
+        </div>
+      ` : ""}
+      ${pending.length ? `
+        <h3 class="subhead">待审核样本</h3>
+        <div class="open-loop-list">
+          ${pending.map((item, index) => expressionSampleItem(item, index, true)).join("")}
+        </div>
+      ` : `<div class="empty small">暂无待审核表达样本</div>`}
+      ${samples.length ? `
+        <details class="open-loop-archive">
+          <summary>已入库样本 ${escapeHtml(samples.length)}</summary>
+          <div class="open-loop-list archived">
+            ${samples.map((item, index) => expressionSampleItem(item, index, false)).join("")}
+          </div>
+        </details>
+      ` : ""}
+    </section>
+  `;
+}
+
+function expressionSampleItem(item, index, pending) {
+  const text = item?.text || item?.phrase || item?.ending || "";
+  const meta = [
+    item?.time || "",
+    item?.length ? `${item.length} 字` : "",
+    item?.punctuation ? `标点 ${item.punctuation}` : "",
+    item?.ending ? `句尾 ${item.ending}` : "",
+  ].filter(Boolean).join("｜");
+  return `
+    <article class="open-loop-item ${pending ? "" : "archived"}">
+      <div class="open-loop-main">
+        <b class="open-loop-text">${escapeHtml(text || "空样本")}</b>
+        <span class="badge">${escapeHtml(meta || `#${index + 1}`)}</span>
+      </div>
+      <div class="open-loop-actions">
+        ${pending ? `<button type="button" data-expression-action="approve" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(index)}">通过</button>` : ""}
+        <button type="button" class="danger-outline" data-expression-action="${pending ? "reject" : "delete_sample"}" data-expression-sample-id="${escapeHtml(item?.id || "")}" data-expression-sample-index="${escapeHtml(index)}">删除</button>
+      </div>
+    </article>
+  `;
+}
+
 function bindUserActions(detail) {
+  const refreshSelectedUserDetail = async () => {
+    if (state.selectedUserId === detail.user_id) {
+      await renderUserDetail(true);
+    }
+  };
   $("#userEditForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -4576,6 +5251,7 @@ function bindUserActions(detail) {
       relationship_role: selectedRole,
       proactive_daily_limit: Number(form.get("proactive_daily_limit") || -1),
     }), "已保存私聊对象", event.submitter);
+    await refreshSelectedUserDetail();
   });
   document.querySelectorAll("[data-user-action]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -4593,6 +5269,49 @@ function bindUserActions(detail) {
         body.clear_learning = true;
       }
       await runAction(() => postJson("/user/update", body), "已更新私聊对象", button);
+      await refreshSelectedUserDetail();
+    });
+  });
+  document.querySelectorAll("[data-open-loop-remove]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const text = String(button.dataset.openLoopRemove || "").trim();
+      if (!text) return;
+      if (!requireSecondClick(button, `open-loop:${detail.user_id}:${text}`, "再次点击删除这条未完话头", "再次点击删除")) return;
+      await runAction(
+        () => postJson("/user/update", { user_id: detail.user_id, remove_open_loop_text: text }),
+        "",
+        button,
+      );
+      await refreshSelectedUserDetail();
+    });
+  });
+  document.querySelectorAll("[data-open-loop-clear]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!requireSecondClick(button, `open-loop-clear:${detail.user_id}`, "再次点击清空该用户的未完话头", "再次点击清空")) return;
+      await runAction(
+        () => postJson("/user/update", { user_id: detail.user_id, clear_open_loops: true }),
+        "",
+        button,
+      );
+      await refreshSelectedUserDetail();
+    });
+  });
+  document.querySelectorAll("[data-expression-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const action = button.dataset.expressionAction || "";
+      if (action === "clear_pending" && !requireSecondClick(button, `expression-clear:${detail.user_id}`, "再次点击清空待审核表达样本", "再次点击清空")) return;
+      if (action === "delete_sample" && !requireSecondClick(button, `expression-delete:${detail.user_id}:${button.dataset.expressionSampleId || button.dataset.expressionSampleIndex || ""}`, "再次点击删除这条表达样本", "再次点击删除")) return;
+      await runAction(
+        () => postJson("/user/update", {
+          user_id: detail.user_id,
+          expression_action: action,
+          sample_id: button.dataset.expressionSampleId || "",
+          sample_index: Number(button.dataset.expressionSampleIndex || -1),
+        }),
+        action === "approve" ? "已通过表达样本" : "",
+        button,
+      );
+      await refreshSelectedUserDetail();
     });
   });
 }
@@ -4701,6 +5420,7 @@ async function renderGroupDetail(forceFetch = false) {
         <button data-group-action="toggle">${escapeHtml(detail.enabled ? "停用" : "启用")}</button>
         <button data-group-action="reset_interjection">重置插话</button>
         <button data-group-action="clear_observation" class="danger">清空观测</button>
+        <button data-group-action="delete" class="danger">删除群聊</button>
       </div>
     </div>
     <div class="visual-strip group-visual-strip">
@@ -4712,7 +5432,7 @@ async function renderGroupDetail(forceFetch = false) {
     </div>
     <div class="detail-grid group-detail-grid">
       ${groupDetailPanel("群状态", groupStateOverview(detail), { wide: true, className: "group-state-panel" })}
-      ${groupDetailPanel("黑话检视", groupSlangManagerView(detail.slang_items || []), { wide: true, className: "group-slang-panel" })}
+      ${groupDetailPanel("黑话检视", groupSlangManagerView(detail.slang_items || []), { wide: true, className: "group-slang-panel", collapsed: true, meta: `${(detail.slang_items || []).length || 0} 条` })}
       ${groupDetailPanel("活跃群友", groupActiveMembersView(detail.members || {}), { className: "group-compact-panel" })}
       ${groupDetailPanel("插话反馈", groupInterjectionFeedbackView(detail), { className: "group-compact-panel" })}
       ${groupDetailPanel("消息活跃", groupMessageActivityView(detail.recent_messages || []), { wide: true, className: "group-message-panel" })}
@@ -5046,6 +5766,15 @@ function bindGroupActions(detail) {
         if (!requireSecondClick(button, `group-clear:${detail.group_id}`, "再次点击清空该群的观测数据", "再次点击清空")) return;
         body.clear_observation = true;
       }
+      if (action === "delete") {
+        if (!requireSecondClick(button, `group-delete:${detail.group_id}`, "再次点击删除该群聊记录和名单 ID", "再次点击删除")) return;
+        await runAction(async () => {
+          await postJson("/group/delete", body);
+          state.selectedGroupId = "";
+          await loadAll();
+        }, "已删除群聊记录", button);
+        return;
+      }
       await runAction(() => postJson("/group/update", body), "已更新群聊观测", button);
     });
   });
@@ -5109,6 +5838,7 @@ function renderWorldbook() {
     worldbookStat("身份节点", worldbook.enabled_member_count || 0, `${worldbook.member_count || 0} 个关系节点`),
     worldbookStat("群资料", worldbook.group_count || 0, "可用于群聊上下文"),
     worldbookStat("待确认观察", worldbook.pending_observation_total || 0, "确认后才写入重要记忆"),
+    worldbookStat("自登记拒绝词", worldbook.self_registration_block_word_count || 0, worldbook.self_registration ? "命中后直接拒绝" : "自登记已关闭"),
     worldbookStat("识别方式", worldbook.enabled ? "QQ 精确" : "关闭", worldbook.match_aliases ? "称呼辅助开启" : "仅 QQ 确认"),
   ].join("");
   const clearPendingButton = $("#worldbookClearPendingBtn");
@@ -5120,6 +5850,8 @@ function renderWorldbook() {
   renderDl("#worldbookImportState", {
     last_import: worldbook.last_import || "未导入",
     auto_import: worldbook.auto_import ? "开启" : "关闭",
+    self_registration: worldbook.self_registration ? "开启" : "关闭",
+    self_registration_block_word_count: worldbook.self_registration_block_word_count || 0,
     inject_limit: worldbook.inject_limit || 0,
   });
   $("#worldbookMembers").innerHTML = filteredMembers.length
@@ -6227,6 +6959,12 @@ function renderBookshelf() {
   $("#bookshelfDiaryCount").textContent = bookshelf.diary_count ?? 0;
   $("#bookshelfJmCount").textContent = bookshelf.jm_album_count ?? 0;
   $("#bookshelfLockState").textContent = bookshelf.unlocked ? "已解锁" : "未解锁";
+  const passwordHint = String(bookshelf.password_hint || "").trim();
+  const passwordHintEl = $("#bookshelfPasswordHint");
+  if (passwordHintEl) {
+    passwordHintEl.textContent = passwordHint ? `提示：${passwordHint}` : "";
+    passwordHintEl.hidden = !passwordHint;
+  }
   $("#bookshelfIntro").textContent = creative.enabled
     ? "上层书架"
     : "创作未开启";
@@ -7167,8 +7905,17 @@ function renderProactiveCandidates() {
     proactiveSummaryCard("执行审计", taskData.audit_total || 0, `${Object.keys(taskData.audit_status_counts || {}).length || 0} 类结果`),
     proactiveSummaryCard("循环状态", runtime.healthy ? "正常" : "待确认", runtime.last_tick_started_ts ? `最近 ${runtime.last_tick_started}` : "尚无心跳"),
   ].join("");
-  $("#proactiveSourceChart").innerHTML = donutChart(sourceCounts);
-  $("#proactiveStatusChart").innerHTML = donutChart(counts || {});
+  $("#proactiveSourceChart").innerHTML = donutChart(sourceCounts, {
+    emptyText: "暂无来源数据",
+    labelFormatter: (label) => proactiveCandidateSourceLabel(label),
+    maxSegments: 6,
+    mergeBelowPercent: 0.035,
+    otherLabel: "其他来源",
+  });
+  $("#proactiveStatusChart").innerHTML = donutChart(counts || {}, {
+    emptyText: "暂无状态数据",
+    labelFormatter: (label) => proactiveStatusLabel(label),
+  });
   renderProactiveTasks();
   renderProactiveCandidateFilters(users, selectedFilter, data.total || allItems.length, total, items.length);
   if (!items.length) {
@@ -7180,13 +7927,14 @@ function renderProactiveCandidates() {
     const repeat = Number(item.repeat_count || 1);
     const userLabel = item.user_label || item.user_id || "-";
     const roleLabel = item.user_role_label || (item.user_role === "owner" ? "主人" : "朋友");
+    const sourceLabel = item.source_label || proactiveCandidateSourceLabel(item.source);
     const semanticMeta = proactiveSemanticMeta(item);
     return `
       <section class="proactive-candidate ${escapeHtml(item.status || "unknown")}">
         <div class="proactive-candidate-head">
           <div>
             <b>${escapeHtml(item.topic || item.reason_label || item.reason || "未命名候选")}</b>
-            <span>${escapeHtml(userLabel)} · ${escapeHtml(roleLabel)} · ${escapeHtml(item.source || "-")} · ${escapeHtml(item.reason_label || item.reason || "-")} · ${escapeHtml(item.action || "message")}</span>
+            <span>${escapeHtml(userLabel)} · ${escapeHtml(roleLabel)} · ${escapeHtml(sourceLabel)} · ${escapeHtml(item.reason_label || item.reason || "-")} · ${escapeHtml(item.action || "message")}</span>
           </div>
           <span class="badge">${escapeHtml(repeat > 1 ? `${status} x${repeat}` : status)}</span>
         </div>
@@ -7363,9 +8111,11 @@ function proactiveAuditHtml(items) {
   return visibleItems.slice(0, 30).map((item) => {
     const status = proactiveAuditStatusLabel(item.status);
     const title = item.topic || item.reason_label || item.reason || item.note || "主动执行记录";
+    const sourceLabel = item.source_label || proactiveCandidateSourceLabel(item.source);
     const semanticMeta = proactiveSemanticMeta(item);
     const meta = [
       `用户：${item.user_label || item.user_id || "-"}`,
+      `来源：${sourceLabel}`,
       `动作：${item.action || "message"}`,
       item.reason_label ? `原因：${item.reason_label}` : (item.reason ? `原因：${item.reason}` : ""),
       item.reason_detail ? `为什么：${item.reason_detail}` : "",
@@ -7383,7 +8133,7 @@ function proactiveAuditHtml(items) {
         <div class="proactive-task-head">
           <div>
             <b>${escapeHtml(title)}</b>
-            <span>${escapeHtml(item.user_label || item.user_id || "-")} · ${escapeHtml(item.user_role_label || "-")} · ${escapeHtml(item.source || "proactive")}</span>
+            <span>${escapeHtml(item.user_label || item.user_id || "-")} · ${escapeHtml(item.user_role_label || "-")} · ${escapeHtml(sourceLabel)}</span>
           </div>
           <span class="badge">${escapeHtml(status)}</span>
         </div>
@@ -7425,9 +8175,35 @@ function proactiveAuditStatusLabel(status) {
 function proactiveTaskSourceLabel(source, hasTimerEvent = false) {
   if (source === "timer" || hasTimerEvent) return "官方定时计划";
   if (source === "candidate") return "主动候选";
-  if (source === "followup") return "链式追问";
+  if (source === "followup" || source === "pending_followup") return "补一句";
+  if (source === "state") return "身体小需求";
+  if (source === "daily_greeting") return "日常招呼";
   if (source === "external") return "外部主动能力";
   return source || "插件主动";
+}
+
+function proactiveCandidateSourceLabel(source) {
+  return {
+    random: "轻微想念",
+    daily_greeting: "日常招呼",
+    pending_followup: "补一句",
+    state: "身体小需求",
+    event: "生活事件",
+    story: "日常剧情",
+    habit: "习惯关心",
+    bilibili: "B站分享",
+    bookshelf_reading: "私密阅读",
+    creative_writing: "创作灵感",
+    group_share: "群聊见闻",
+    web_exploration: "主动搜索",
+    news: "新闻阅读",
+    candidate: "主动候选",
+    followup: "补一句",
+    external: "外部主动能力",
+    timer: "官方定时计划",
+    proactive: "插件主动",
+    unknown: "未记录来源",
+  }[source] || source || "插件主动";
 }
 
 function validProactiveCandidateFilter(data, value) {
@@ -7775,7 +8551,7 @@ function renderLongTermStrategyOverview(selector, { creative = {}, bili = {}, qz
     {
       title: "QQ 空间",
       tone: qzone.enabled && qzone.available ? "ok" : qzone.enabled ? "warn" : "off",
-      meta: [qzone.enabled ? (qzone.available ? "可用" : "待服务") : "关闭", qzone.life_publish_enabled ? "生活说说开启" : "生活说说关闭"],
+      meta: [qzone.enabled ? (qzone.available ? "可用" : "待服务") : "关闭", qzone.life_publish_enabled ? "生活说说开启" : "生活说说关闭", qzone.comment_inbox_enabled ? "评论收件箱开启" : ""].filter(Boolean),
       text: qzone.last_text || "暂无最近说说",
     },
     {
@@ -7924,6 +8700,7 @@ function renderModuleWorkbench(settings) {
       body: `${worldbook.enabled_member_count || 0}/${worldbook.member_count || 0} 个节点启用，用来稳定识别昵称、群名片和关系备注。`,
       meta: [
         toBool(settings.worldbook_self_registration) ? "允许群聊自登记" : "自登记关闭",
+        `自登记拒绝词 ${worldbook.self_registration_block_word_count || 0} 条`,
         toBool(settings.enable_atrelay_tools) ? "跨群转述工具开启" : "跨群转述关闭",
       ],
       actions: [
@@ -8376,7 +9153,7 @@ const roleplayExamples = {
     "tone": "轻柔、细腻、日常，像真实存在的人在过日子，不像任务规划列表。",
     "rules": "诺星缘拥有一点特殊感知，但只作为对天气、光线、梦境、心情和关系更敏感的背景，不高调介入日常。",
     "scenes": "卧室、洗漱台、家里餐桌、教室、走廊、楼梯口、操场边、午休座位、放学后的校门口、回家路上等。",
-    "network": "珝环（同样是小说角色，先于星缘创造，是能控制时间的姐姐，但群里的珝环通常是比折）、林枫（同上，是哥哥）、黎欣（同上，是聪明的妹妹）、石明烛雨（黎欣的师傅，也是比折的一重身份）。",
+    "network": "珝环（同样是小说角色，先于星缘创造，是能控制时间的姐姐；若群聊里有人使用珝环名片，仍需以 QQ 号确认身份，不能只凭昵称判断为比折）、林枫（同上，是哥哥）、黎欣（同上，是聪明的妹妹）、石明烛雨（黎欣的师傅，也是比折的一重身份）。",
     "extra": "星缘知道自己是出身于小说中的人物，但也不会主动提及。",
     translations: {
       "群聊": "",
@@ -8687,8 +9464,7 @@ function syncRoleplayCoreFieldsFromPersona() {
 
 function hydrateRoleplayUserFields() {
   const primaryText = document.querySelector('#roleplayProfileForm [name="roleplay_user_profile_prompt"]')?.value || "";
-  const legacyText = document.querySelector('#roleplayProfileForm [name="private_image_self_recognition_hint"]')?.value || "";
-  const text = String(primaryText || "").trim() ? primaryText : legacyText;
+  const text = primaryText;
   const legacyPersonaText = document.querySelector('#roleplayProfileForm [name="schedule_persona_prompt"]')?.value || "";
   const labels = roleplayVisionParts.map(([, label]) => label);
   roleplayVisionParts.forEach(([key, label]) => {
@@ -8945,10 +9721,10 @@ function escapeRegex(value) {
 }
 
 function segmentedProtectedCleanupChunks(value) {
-  const urlPattern = /\b(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/gi;
-  const bracketPairs = { "(": ")", "（": "）", "[": "]", "【": "】", "{": "}" };
+  const protectedPattern = /<(?:image|img|video|record|audio|file)\b[^>]*(?:>.*?<\/(?:image|img|video|record|audio|file)>|\/?>)|<tts\b[^>]*>.*?<\/tts>|<[^>\n]{1,240}\bpath="[^"]{1,500}"[^>\n]*>|<[^>\n]{1,240}\b(?:url|src)="[^"]{1,500}"[^>\n]*>|\b(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/gis;
+  const bracketPairs = { "(": ")", "（": "）", "[": "]", "【": "】", "{": "}", "「": "」", "『": "』", "《": "》" };
   const bracketOpeners = new Set(Object.keys(bracketPairs));
-  const quotePairs = { "\"": "\"", "“": "”" };
+  const quotePairs = { "\"": "\"", "“": "”", "'": "'", "‘": "’" };
   const chunks = [];
   let current = "";
   let protectedChunk = false;
@@ -8998,7 +9774,7 @@ function segmentedProtectedCleanupChunks(value) {
     }
   });
   let match = null;
-  while ((match = urlPattern.exec(text)) !== null) {
+  while ((match = protectedPattern.exec(text)) !== null) {
     feedPlain(text.slice(lastIndex, match.index));
     flush();
     chunks.push([match[0], true]);
@@ -9586,7 +10362,7 @@ function renderFeatureSwitches() {
     <section class="feature-summary-card ${riskyEnabled ? "warn" : ""}">
       <span>${escapeHtml(proactiveOnlyModeEnabled() ? "模式锁定" : "高主动子项")}</span>
       <b>${escapeHtml(proactiveOnlyModeEnabled() ? proactiveLocked : riskyEnabled)}</b>
-      <small>${escapeHtml(proactiveOnlyModeEnabled() ? "被主动消息专用模式覆盖" : "含详情页子开关")}</small>
+      <small>${escapeHtml(proactiveOnlyModeEnabled() ? "被动能力已关闭" : "含详情页子开关")}</small>
     </section>
   `;
 
@@ -9596,6 +10372,7 @@ function renderFeatureSwitches() {
   if (state.selectedFeatureKey && state.selectedFeatureKey !== "enable_proactive_only_mode" && !visibleFeatureSwitchKey(state.selectedFeatureKey)) {
     state.selectedFeatureKey = "";
   }
+  syncFeatureFooterAction();
   if (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft, state.selectedFeatureKey)) {
     $("#featureFlags").innerHTML = featureDetailPage(state.selectedFeatureKey);
     bindFeatureDetailActions();
@@ -9640,6 +10417,14 @@ function renderFeatureSwitches() {
   bindProactiveOnlyTempUnlockActions($("#featureFlags"));
 }
 
+function syncFeatureFooterAction() {
+  const button = $("#saveFeaturesBtn");
+  if (!button) return;
+  const inDetail = Boolean(state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey));
+  button.textContent = inDetail ? "返回功能列表" : "保存功能开关";
+  button.dataset.action = inDetail ? "back" : "save";
+}
+
 function renderProactiveOnlyModeCard() {
   const root = $("#proactiveOnlyModeCard");
   if (!root) return;
@@ -9650,23 +10435,9 @@ function renderProactiveOnlyModeCard() {
   const frameworkLockMode = String(settings.framework_session_lock_mode || "auto");
   root.innerHTML = `
     <div class="proactive-mode-stack">
-      <section class="proactive-mode-card ${checked ? "on" : "off"}">
-        <label class="feature-toggle-hit proactive-mode-toggle" aria-label="${escapeHtml(featureLabel(key))}">
-          <input type="checkbox" data-proactive-only-mode-toggle ${checked ? "checked" : ""}>
-          <span class="feature-toggle-visual"></span>
-        </label>
-        <div class="proactive-mode-main">
-          <div class="proactive-mode-kicker">运行模式 · 缓存友好</div>
-          <h3>${escapeHtml(featureLabel(key))}</h3>
-          <p>只保留主动私聊调度、生成和发送；普通私聊/群聊不再进入本插件被动增强、TTS、图片/转发、群聊观察或工具链。</p>
-          <p>由于被动回复不再混入大量动态提示词，主模型 prompt 更稳定，能显著提高缓存命中率；下方被覆盖的被动功能会自动锁定但保留原配置。</p>
-          <small class="proactive-mode-code">${escapeHtml(key)}</small>
-        </div>
-        <button type="button" class="proactive-mode-detail proactive-mode-button soft" data-feature-open="${escapeHtml(key)}">查看说明</button>
-      </section>
       <form class="proactive-mode-injection-card" data-proactive-injection-form>
         <div class="proactive-mode-copy">
-          <div class="proactive-mode-kicker">注入策略 · 缓存前缀</div>
+          <div class="proactive-mode-kicker">被动注入</div>
           <h3>${escapeHtml(configLabel("passive_injection_position"))}</h3>
           <p>${escapeHtml(configDescriptions.passive_injection_position || "")}</p>
           <small class="proactive-mode-code">${escapeHtml("passive_injection_position")}</small>
@@ -9681,13 +10452,26 @@ function renderProactiveOnlyModeCard() {
           </select>
           <div class="proactive-mode-actions">
             <button type="submit" class="proactive-mode-button primary">保存位置</button>
-            <button type="button" class="proactive-mode-button soft" data-proactive-injection-reset>恢复默认</button>
           </div>
         </div>
       </form>
-      <form class="proactive-mode-injection-card" data-framework-lock-form>
+      <div class="proactive-mode-settings-row">
+        <section class="proactive-mode-card ${checked ? "on" : "off"}">
+          <label class="feature-toggle-hit proactive-mode-toggle" aria-label="${escapeHtml(featureLabel(key))}">
+            <input type="checkbox" data-proactive-only-mode-toggle ${checked ? "checked" : ""}>
+            <span class="feature-toggle-visual"></span>
+          </label>
+          <div class="proactive-mode-main">
+            <div class="proactive-mode-kicker">兼容与隔离</div>
+            <h3>${escapeHtml(featureLabel(key))}</h3>
+            <p>只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给 AstrBot 默认主链或其他插件。</p>
+            <small class="proactive-mode-code">${escapeHtml(key)}</small>
+          </div>
+          <button type="button" class="proactive-mode-detail proactive-mode-button soft" data-feature-open="${escapeHtml(key)}">查看说明</button>
+        </section>
+        <form class="proactive-mode-injection-card" data-framework-lock-form>
         <div class="proactive-mode-copy">
-          <div class="proactive-mode-kicker">兼容模式 · 旧版 AstrBot</div>
+          <div class="proactive-mode-kicker">兼容与隔离</div>
           <h3>${escapeHtml(configLabel("framework_session_lock_mode"))}</h3>
           <p>${escapeHtml(configDescriptions.framework_session_lock_mode || "")}</p>
           <small class="proactive-mode-code">${escapeHtml("framework_session_lock_mode")}</small>
@@ -9705,6 +10489,7 @@ function renderProactiveOnlyModeCard() {
           </div>
         </div>
       </form>
+      </div>
     </div>
   `;
   root.querySelector("[data-proactive-only-mode-toggle]")?.addEventListener("change", (event) => {
@@ -9723,16 +10508,6 @@ function renderProactiveOnlyModeCard() {
       () => postJson("/settings/update", { settings: { passive_injection_position: value } }),
       "已保存动态提示词注入位置",
       form.querySelector("button[type='submit']"),
-    );
-  });
-  root.querySelector("[data-proactive-injection-reset]")?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    const select = root.querySelector('[name="passive_injection_position"]');
-    if (select) select.value = "prompt";
-    await runAction(
-      () => postJson("/settings/update", { settings: { passive_injection_position: "prompt" } }),
-      "已恢复默认注入位置",
-      button,
     );
   });
   root.querySelector("[data-framework-lock-form]")?.addEventListener("submit", async (event) => {
@@ -9754,10 +10529,10 @@ function featureSwitchItem(key) {
   const displayOn = checked || tempUnlocked;
   const related = proactiveOnlyRelatedUnlocks(key);
   const stateText = locked ? (tempUnlocked ? "临时放行" : "已锁定") : checked ? "开启" : "关闭";
-  const lockNote = tempUnlocked ? "已临时放行，关闭主动专用模式后清空" : "主动专用模式覆盖，原配置保留";
+  const lockNote = tempUnlocked ? "已临时放行，关闭仅保留主动能力后清空" : "仅保留主动能力中，原配置保留";
   const relatedText = related.length ? `建议同步：${related.map((item) => item.label || item.key).join("、")}` : "";
   return `
-    <section class="feature-switch-item ${displayOn ? "on" : "off"} ${locked ? "locked" : ""}" title="${escapeHtml(locked ? "主动消息专用模式开启时，此功能在普通被动链路中被锁定覆盖，原配置会保留。" : featureDescription(key))}">
+    <section class="feature-switch-item ${displayOn ? "on" : "off"} ${locked ? "locked" : ""}" title="${escapeHtml(locked ? "仅保留主动能力开启时，本功能在本插件普通被动链路中被跳过，原配置会保留。" : featureDescription(key))}">
       <label class="feature-toggle-hit" aria-label="${escapeHtml(featureLabel(key))}">
         <input type="checkbox" data-feature-key="${escapeHtml(key)}" ${displayOn ? "checked" : ""} ${locked ? "disabled" : ""}>
         <span class="feature-toggle-visual"></span>
@@ -9779,7 +10554,7 @@ function featureSwitchItem(key) {
 }
 
 function featureGroupForKey(key) {
-  if (key === "enable_proactive_only_mode") return "运行模式";
+  if (key === "enable_proactive_only_mode") return "兼容与隔离";
   const parentKey = topLevelFeatureKey(key);
   const group = featureGroups.find((item) => item.keys.includes(parentKey));
   return group ? group.title : "其他";
@@ -9789,6 +10564,50 @@ function featureRelatedSettings(key) {
   const settings = state.overview?.settings || {};
   const providers = state.overview?.providers || {};
   const keys = featureSettingGroups[key] || [];
+  const fallbackValue = (name) => {
+    const defaults = {
+      inbound_message_debounce_seconds: 3,
+      text_message_debounce_seconds: 8,
+      image_message_debounce_seconds: 8,
+      forward_message_debounce_seconds: 0,
+      text_message_debounce_max_wait_seconds: 12,
+      message_debounce_max_merge_messages: 8,
+      enable_smart_message_debounce: false,
+      SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: "",
+      smart_message_debounce_model_timeout_seconds: 0.8,
+      smart_message_debounce_wait_seconds: 3,
+      smart_message_debounce_learning_window_seconds: 8,
+      smart_message_debounce_examples_limit: 8,
+      tts_generation_mode: "fast_tag",
+      tts_voice_language: "ja",
+      tts_conversion_provider_id: "",
+      tts_extra_prompt: "",
+      tts_frequency_control_mode: "global",
+      tts_constraint_mode: "weak",
+      tts_session_min_interval_seconds: 120,
+      tts_private_min_interval_seconds: -1,
+      tts_group_min_interval_seconds: -1,
+      tts_trigger_probability: 25,
+      tts_private_trigger_probability: -1,
+      tts_group_trigger_probability: -1,
+      enable_tts_local_playback: false,
+      enable_tts_local_playback_live_only: false,
+      tts_local_playback_volume: 35,
+      tts_local_playback_min_interval_seconds: 0,
+      enable_tts_live_subtitle_sync: false,
+      tts_live_subtitle_url: "",
+      auto_voice_enabled: true,
+      auto_voice_full_conversion_enabled: true,
+      auto_voice_max_chars: 80,
+      auto_voice_probability: 20,
+      auto_voice_cooldown_seconds: 180,
+      main_user_voice_probability: 0,
+      main_user_mention_voice_keywords: "",
+      main_user_mention_voice_probability: 0,
+      main_user_mention_voice_prompt: "",
+    };
+    return Object.prototype.hasOwnProperty.call(defaults, name) ? defaults[name] : undefined;
+  };
   return keys
     .filter((item) => visibleConfigKey(item))
     .filter((item) => featureSettingVisibleForCurrentMode(key, item, settings))
@@ -9796,6 +10615,7 @@ function featureRelatedSettings(key) {
       Object.prototype.hasOwnProperty.call(settings, item)
       || Object.prototype.hasOwnProperty.call(providers, item)
       || Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item)
+      || fallbackValue(item) !== undefined
     ))
     .map((item) => ({
       key: item,
@@ -9803,9 +10623,11 @@ function featureRelatedSettings(key) {
         ? settings[item]
         : Object.prototype.hasOwnProperty.call(providers, item)
           ? providers[item]
-          : state.featureDraft[item],
+          : Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item)
+            ? state.featureDraft[item]
+            : fallbackValue(item),
       feature: Object.prototype.hasOwnProperty.call(state.featureDraft || {}, item),
-      description: configDescriptions[item] || "这个参数会影响该功能的触发频率、上下文范围或行为边界。",
+      description: configDescriptions[item] || featureDescription(item) || "这个参数会影响该功能的触发频率、上下文范围或行为边界。",
     }));
 }
 
@@ -9826,7 +10648,7 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     return true;
   }
   if (featureKey === "enable_humanized_states") {
-    const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
+    const restChildren = new Set(["rest_reply_mode", "rest_reply_probability", "rest_reply_llm_threshold", "rest_reply_active_windows", "rest_reply_awake_grace_minutes", "enable_rest_backlog_reply", "rest_backlog_max_messages", "REST_WAKEUP_PROVIDER_ID"]);
     if (restChildren.has(settingKey)) {
       const restEnabled = boolSetting("enable_rest_reply_simulation");
       if (!restEnabled) return false;
@@ -9834,6 +10656,12 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
       if (["rest_reply_llm_threshold", "REST_WAKEUP_PROVIDER_ID"].includes(settingKey)) return String(valueSetting("rest_reply_mode", "probability")) === "llm";
       if (settingKey === "rest_backlog_max_messages") return boolSetting("enable_rest_backlog_reply");
       return true;
+    }
+    return true;
+  }
+  if (featureKey === "enable_worldbook_member_recognition") {
+    if (["worldbook_self_registration_block_words", "worldbook_self_registration_block_reply"].includes(settingKey)) {
+      return boolSetting("worldbook_self_registration");
     }
     return true;
   }
@@ -9871,6 +10699,11 @@ function featureSettingVisibleForCurrentMode(featureKey, settingKey, settings = 
     if (settingKey === "response_review_max_chars") {
       return String(valueSetting("response_review_mode", "severe_only")) === "full";
     }
+    return true;
+  }
+  if (featureKey === "enable_photo_text_action") {
+    if (settingKey === "daily_outfit_photo_prompt") return boolSetting("enable_daily_outfit_photo");
+    if (settingKey === "natural_language_photo_generation_max_daily") return boolSetting("enable_natural_language_photo_generation");
     return true;
   }
   if (featureKey === "enable_emotion_simulation") {
@@ -9984,14 +10817,16 @@ function featureSettingInput(key, value) {
   if (spec.type === "textarea") {
     return `<textarea data-feature-param="${safeKey}" rows="3"${disabledAttr}>${escapeHtml(Array.isArray(value) ? value.join("\n") : value ?? "")}</textarea>`;
   }
+  const password = spec.type === "password";
   const numeric = spec.type === "number" || typeof value === "number";
-  const step = isFractionalPercentSetting(key) ? "1" : (spec.step ?? (percentSettingKeys.has(key) ? "1" : key === "skill_growth_rate" ? "0.01" : "any"));
-  const min = isFractionalPercentSetting(key) ? "0" : (spec.min ?? (percentSettingKeys.has(key) ? "0" : ""));
-  const max = isFractionalPercentSetting(key) ? "100" : (spec.max ?? (percentSettingKeys.has(key) ? "100" : ""));
+  const percentInput = isPercentInputSetting(key);
+  const step = percentInput ? (spec.step ?? "1") : (spec.step ?? (key === "skill_growth_rate" ? "0.01" : "any"));
+  const min = percentInput ? (spec.min ?? "0") : (spec.min ?? "");
+  const max = percentInput ? (spec.max ?? "100") : (spec.max ?? "");
   const displayValue = displaySettingValue(key, value);
   return `
     <input
-      type="${numeric ? "number" : "text"}"
+      type="${password ? "password" : numeric ? "number" : "text"}"
       data-feature-param="${safeKey}"
       value="${escapeHtml(displayValue)}"
       ${numeric ? `step="${step}"` : ""}
@@ -10062,10 +10897,25 @@ function collectFeatureDetailPayload(featureKey, root = document) {
   return { features, settings, providers };
 }
 
+async function saveCurrentFeatureDetail(control = null, successMessage = "已保存功能参数") {
+  const featureKey = state.selectedFeatureKey || "";
+  if (!featureKey) return true;
+  const form = Array.from(document.querySelectorAll("[data-feature-param-form]"))
+    .find((item) => item.dataset.featureParamForm === featureKey);
+  if (!form) return true;
+  const payload = collectFeatureDetailPayload(featureKey, form);
+  const result = await runAction(
+    () => postJson("/settings/update", payload),
+    successMessage,
+    control || form.querySelector(".feature-param-save"),
+  );
+  return Boolean(result);
+}
+
 function featureDependencyLines(key) {
   const dependencies = [];
-  if (featureLockedByProactiveOnlyMode(key)) dependencies.push(["运行模式覆盖", "主动消息专用模式已开启；此功能在普通被动链路中被锁定，原配置保留，关闭该模式后恢复生效。"]);
-  if (key === "enable_proactive_only_mode") dependencies.push(["注意", "开启后被动增强与群聊观察会被总模式跳过"]);
+  if (featureLockedByProactiveOnlyMode(key)) dependencies.push(["仅保留主动能力", "普通被动链路中此功能被本插件跳过，原配置保留；关闭仅保留主动能力后生效。"]);
+  if (key === "enable_proactive_only_mode") dependencies.push(["注意", "只跳过本插件的普通被动增强，不会阻止默认回复或其他插件"]);
   if (key !== "enable_group_companion" && key.startsWith("enable_group_")) dependencies.push(["依赖", "群聊总开关"]);
   if (key === "enable_group_conversation_followup") dependencies.push(["依赖", "群聊场景感知"]);
   if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_response_self_review", "enable_passive_topic_suppression", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
@@ -10073,10 +10923,10 @@ function featureDependencyLines(key) {
   }
   if (["enable_bilibili_boredom_watch"].includes(key)) dependencies.push(["依赖", "B 站能力可用"]);
   if (["enable_web_exploration", "enable_web_exploration_boredom_search"].includes(key)) dependencies.push(["依赖", "AstrBot 网页搜索"]);
-  if (["enable_qzone_life_publish"].includes(key)) dependencies.push(["依赖", "QQ 空间动态层"]);
+  if (["enable_qzone_life_publish", "enable_qzone_comment_inbox"].includes(key)) dependencies.push(["依赖", "QQ 空间动态层"]);
   if (key === "enable_qzone_generated_image_publish") dependencies.push(["依赖", "QQ 空间动态层 + 主动拍照/生图"]);
   if (key === "enable_qzone_emotional_vent_publish") dependencies.push(["依赖", "情绪模拟 + QQ 空间动态层"]);
-  if (key === "enable_photo_text_action") dependencies.push(["依赖", "ComfyUI 或在线图片 API"]);
+  if (key === "enable_photo_text_action") dependencies.push(["依赖", "ComfyUI、SDGen 或在线图片 API"]);
   if (key === "enable_tts_enhancement") dependencies.push(["依赖", "当前会话 TTS provider"]);
   if (key === "enable_yesterday_screen_diary_context") dependencies.push(["依赖", "screen_companion 昨日观察日记"]);
   if (key.startsWith("enable_private_reading_")) dependencies.push(["依赖", "素材能力可用"]);
@@ -10089,9 +10939,9 @@ function featureDependencyLines(key) {
 
 const featureDetailGuides = {
   enable_proactive_only_mode: {
-    summary: "把插件收束成“只负责主动来找用户”的模式，适合不想让它参与普通私聊/群聊被动回复的人。",
+    summary: "让本插件只负责主动来找用户的链路，并放行普通聊天给 AstrBot 默认主链或其他插件。",
     trigger: "普通私聊、群聊事件和非主动框架 LLM 请求到达时生效。",
-    enabled: "插件仍会跑日程、状态、主动意愿和私聊主动发送；普通聊天不会注入本插件状态、TTS、图片/转发摘要或群聊上下文，也不会使用插件工具。普通被动 prompt 更稳定，缓存命中率更高；用户回复主动消息仍会被轻量记录为已回应。",
+    enabled: "插件仍会跑日程、状态、主动意愿和私聊主动发送；普通聊天不会注入本插件状态、TTS、图片/转发摘要或群聊上下文，也不会使用插件工具。插件不会拦截默认回复或其他插件处理。用户回复主动消息仍会被轻量记录为已回应。",
     disabled: "按各功能开关正常参与私聊被动增强、群聊观察、图片/转发处理和提示词注入。",
   },
   enable_mai_style_integration: {
@@ -10109,8 +10959,20 @@ const featureDetailGuides = {
   enable_expression_learning: {
     summary: "统计用户常用句长、标点、句尾味道和短句节奏，让回复更像同一段聊天里的自然接话。",
     trigger: "每次私聊文本到达时本地更新统计，不调用模型。",
-    enabled: "Bot 只会参考节奏和语气轻重，不会把样本当成称呼规则、身份事实或长期偏好。",
+    enabled: "Bot 只会参考节奏和语气轻重，不会把样本当成称呼规则、身份事实或长期偏好；激进模式可搭配手动审核。",
     disabled: "不会继续更新表达节奏统计，回复更接近 AstrBot 默认人格的原始表达。",
+  },
+  enable_expression_manual_review: {
+    summary: "把新表达样本先放进待审核池，避免激进学习把噪音、群友口癖或复制内容直接写入画像。",
+    trigger: "私聊文本到达并通过本地过滤后。",
+    enabled: "用户详情里会出现待审核表达样本，通过后才会用于表达注入。",
+    disabled: "通过本地过滤的样本会直接进入表达画像。",
+  },
+  enable_expression_style_review: {
+    summary: "回复发送前检查表达学习是否过头，重点处理异常逗号、奇怪断句、照抄用户样本和提示词泄露。",
+    trigger: "被动回复自检阶段；主动消息仍走主动发送前复核。",
+    enabled: "命中表达风险时最多调用一次复核模型改写，不会反复循环。",
+    disabled: "只保留普通回复复核，不额外检查表达学习污染。",
   },
   enable_tts_enhancement: {
     summary: "支持聊天文本保留中文、<tts> 内生成外语语音，并把 TTS 生成路径、标签规范化、语种控制、语音后中文释义和发送前朗读文本清洗统一收口处理。",
@@ -10125,9 +10987,9 @@ const featureDetailGuides = {
     disabled: "不再注入本轮意图策略；情绪模拟和关系距离感仍可基于自身开关使用轻量状态。",
   },
   enable_response_self_review: {
-    summary: "主动消息发送前做轻量润色，重点避免主动开口写成“好呀/确实/刚看到你说”这类像在回复空气的话。",
+    summary: "主动消息发送前统一做价值复核和轻量润色，重点避免主动开口写成“好呀/确实/刚看到你说”这类像在回复空气的话。",
     trigger: "主动消息生成后、发送前；普通被动回复只保留防漏、防复读和突然换话题等本地保护，full 模式才会积极改写被动回复。",
-    enabled: "主动消息命中回复空气风险时会尝试模型重写；重写后仍不对就丢弃本轮主动，宁可不发。",
+    enabled: "主动消息会在发送前判断原样发送、轻改写、延后或取消；默认宽松强度会减少直接取消，避免模型过度保守导致主动消息归零。",
     disabled: "不再调用模型润色主动消息；本地仍会尽量丢弃明显错误的主动消息。",
   },
   enable_passive_topic_suppression: {
@@ -10177,6 +11039,18 @@ const featureDetailGuides = {
     trigger: "日程生成、状态刷新、主动消息和被动回复注入时。",
     enabled: "当前扮演状态会影响日程、主动行为和被动回复的语气、长短、节奏。",
     disabled: "状态退化为较平稳的基础信息，拟人生活感会明显减少。",
+  },
+  enable_health_state: {
+    summary: "控制健康、不舒服和恢复尾声这类身体余波是否参与当前扮演状态。",
+    trigger: "拟人身体状态刷新或手动增添状态时；开启后不再额外做人格适用性拦截。",
+    enabled: "状态可能出现轻微不适、头疼、恢复期等健康底色，并影响精力、日程和语气。",
+    disabled: "不会新增健康异常状态；手动增添明显生病/不舒服状态也会被拦截。",
+  },
+  enable_hunger_state: {
+    summary: "控制饥饿、胃口和想吃东西这类身体余波是否参与当前扮演状态。",
+    trigger: "拟人身体状态刷新、饭点饥饿窗口或手动增添状态时；开启后不再额外做人格适用性拦截。",
+    enabled: "状态可能出现饿、胃口不好、想吃甜的等底色，并可能产生吃什么类身体小需求。",
+    disabled: "不会新增饥饿/胃口状态；吃什么类身体小需求和手动饥饿状态会被拦截。",
   },
   enable_segmented_proactive_reply: {
     summary: "把纯文本回复按自然聊天节奏拆成短句，并合并过短片段，避免刷屏或突兀附和。",
@@ -10247,7 +11121,7 @@ const featureDetailGuides = {
   enable_environment_perception: {
     summary: "提供当前时间、日期、平台、聊天类型和消息媒介，让日程与回复不脱离现实语境。",
     trigger: "日程生成、状态刷新和回复前。",
-    enabled: "Bot 会知道现在大概是什么时间、在哪个平台、面对私聊还是群聊。主动消息专用模式下，普通被动回复里的环境感知注入会被锁定；后台状态和主动链路仍可使用。",
+    enabled: "Bot 会知道现在大概是什么时间、在哪个平台、面对私聊还是群聊。仅保留主动能力开启时，本插件普通被动回复里的环境感知注入会被跳过；后台状态和主动链路仍可使用。",
     disabled: "只使用较基础的上下文，时间与场景贴合度下降。",
   },
   enable_holiday_perception: {
@@ -10263,9 +11137,9 @@ const featureDetailGuides = {
     disabled: "媒介信息减少，复杂消息的场景判断会变弱。",
   },
   enable_model_perception: {
-    summary: "识别当前对话 LLM，以及图片转述使用的视觉模型。",
+    summary: "识别当前对话 LLM、图片转述视觉模型，以及可用的生图后端/图片模型。",
     trigger: "环境感知注入时。",
-    enabled: "Bot 能知道当前文本模型和视觉转述模型的大致来源，遇到不同配置时更容易判断自己的能力边界。",
+    enabled: "Bot 能知道当前文本模型、视觉转述模型，以及生图后端或在线图片模型的大致来源，遇到不同配置时更容易判断自己的能力边界。",
     disabled: "Bot 不再获得模型环境信息，只按普通对话上下文回复。",
   },
   enable_worldview_perception: {
@@ -10309,6 +11183,12 @@ const featureDetailGuides = {
     trigger: "Bot 准备在群聊回复时。",
     enabled: "Bot 更容易知道刚才在聊什么、提到的是谁。",
     disabled: "群回复主要依赖原始消息，上下文感会弱。",
+  },
+  enable_group_injection_guard: {
+    summary: "识别群里试图改称呼、改语气、改设定或改输出格式的注入话术，并阻断学习和后续再注入。",
+    trigger: "群聊消息进入观察写入和群聊回复前。",
+    enabled: "群内起哄或恶搞更难污染黑话、话题线、成员观察和后续 prompt。",
+    disabled: "群聊里的改设定话术可能继续沉淀成上下文，长期更容易把 Bot 带偏。",
   },
   enable_group_persona_denoise: {
     summary: "群聊回复时降低人格外溢，减少私聊腔、状态汇报和私聊关系直出。",
@@ -10514,6 +11394,12 @@ const featureDetailGuides = {
     enabled: "发布前会尝试生成一张符合说说内容的图片；失败时回退纯文字，不阻断发布。",
     disabled: "空间说说只发文字或用户指令中明确提供的图片。",
   },
+  enable_qzone_comment_inbox: {
+    summary: "低频拉取自己最近说说详情，解析评论列表，记录已见评论，并按需公开追加回复。",
+    trigger: "长线主动维护任务到达评论检查间隔时。",
+    enabled: "首次开启只记录现有评论；后续新评论会先经过模型判断，再决定跳过或追加一句公开回复。",
+    disabled: "不会自动读取或回复自己说说下的评论。",
+  },
   enable_private_reading_integration: {
     summary: "启用书柜夹层的私下阅读素材入口；仅在检测到对应素材能力时显示相关配置。",
     trigger: "素材能力可用、书柜打开或私下阅读检查时。",
@@ -10591,7 +11477,7 @@ function featureImpactLines(key) {
   const lines = [];
   const group = featureGroupForKey(key);
   lines.push(["模块", group]);
-  if (["enable_humanized_states", "inject_passive_states", "enable_cycle_state", "enable_skill_growth_simulation"].includes(key)) {
+  if (["enable_humanized_states", "inject_passive_states", "enable_health_state", "enable_hunger_state", "enable_cycle_state", "enable_skill_growth_simulation"].includes(key)) {
     lines.push(["场景", "日程 / 状态 / 私聊 / 群聊"]);
   } else if (key === "enable_segmented_proactive_reply") {
     lines.push(["场景", "主动消息 / LLM 纯文本回复"]);
@@ -10620,8 +11506,8 @@ function featureImpactLines(key) {
 }
 
 function configLabel(name) {
-  const label = configLabels[name] || name.replace(/^enable_/, "").replaceAll("_", " ");
-  if ((isFractionalPercentSetting(name) || percentSettingKeys.has(name)) && !/[（(]%[）)]/.test(label)) {
+  const label = configLabels[name] || featureLabel(name) || name.replace(/^enable_/, "").replaceAll("_", " ");
+  if (isPercentInputSetting(name) && !/[（(]%[）)]/.test(label)) {
     return `${label}（%）`;
   }
   return label;
@@ -10701,7 +11587,7 @@ function featureDetailPage(key) {
       </nav>
       <div class="feature-state-strip ${displayEnabled ? "on" : "off"}">
         <b>${escapeHtml(locked ? (tempUnlocked ? "临时放行" : "已锁定") : enabled ? "开启" : "关闭")}</b>
-        ${locked ? `<span>${escapeHtml(tempUnlocked ? "主动消息专用模式仍开启，但此功能已被临时放行；关闭主动专用模式后放行项会清空。" : "主动消息专用模式正在覆盖这个功能；保存的原始开关值不会被修改。")}</span>` : ""}
+        ${locked ? `<span>${escapeHtml(tempUnlocked ? "仅保留主动能力仍开启，但此功能已被临时放行；关闭后放行项会清空。" : "当前处于仅保留主动能力模式；保存的原始开关值不会被修改。")}</span>` : ""}
       </div>
       <header class="feature-detail-head">
         <div>
@@ -10718,7 +11604,7 @@ function featureDetailPage(key) {
       ${locked ? `
         <section class="feature-detail-card feature-temp-unlock-panel">
           <h3>主动专用临时放行</h3>
-          <p>${escapeHtml(tempUnlocked ? "此功能已在主动消息专用模式下临时放行。关闭主动消息专用模式后，放行项会自动清空。" : "此功能当前被主动消息专用模式覆盖。你可以二次确认后临时放行，不会改写原配置。")}</p>
+          <p>${escapeHtml(tempUnlocked ? "此功能已在仅保留主动能力时临时放行。关闭后，放行项会自动清空。" : "此功能当前被仅保留主动能力覆盖。你可以二次确认后临时放行，不会改写原配置。")}</p>
           ${relatedUnlocks.length ? `<p>建议同步：${escapeHtml(relatedUnlocks.map((item) => item.label || item.key).join("、"))}</p>` : ""}
           <div class="feature-temp-unlock-actions">
             <button type="button" data-proactive-temp-unlock="${escapeHtml(key)}" data-action="${tempUnlocked ? "clear" : "unlock"}">${escapeHtml(tempUnlocked ? "取消临时放行" : "临时放行")}</button>
@@ -10756,7 +11642,9 @@ function featureDetailPage(key) {
 
 function bindFeatureDetailActions() {
   document.querySelectorAll("[data-feature-back]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
+      const saved = await saveCurrentFeatureDetail(button, "已保存并返回功能列表");
+      if (!saved) return;
       state.selectedFeatureKey = "";
       renderFeatureSwitches();
     });
@@ -10789,11 +11677,13 @@ function bindFeatureDetailActions() {
             state.selectedFeatureKey === "enable_tts_enhancement"
             && ["auto_voice_enabled", "enable_tts_local_playback", "enable_tts_live_subtitle_sync"].includes(input.dataset.featureParam)
           ) {
+            state.featureDraft[input.dataset.featureParam] = input.checked;
             state.overview.settings = state.overview.settings || {};
             state.overview.settings[input.dataset.featureParam] = input.checked;
             renderFeatureSwitches();
           }
           if (state.selectedFeatureKey === "enable_emotion_simulation" && input.dataset.featureParam === "enable_llm_emotion_judgement") {
+            state.featureDraft.enable_llm_emotion_judgement = input.checked;
             state.overview.settings = state.overview.settings || {};
             state.overview.settings.enable_llm_emotion_judgement = input.checked;
             renderFeatureSwitches();
@@ -10802,6 +11692,7 @@ function bindFeatureDetailActions() {
             state.selectedFeatureKey === "enable_group_slang_learning"
             && ["enable_group_slang_meanings", "enable_group_slang_web_search"].includes(input.dataset.featureParam)
           ) {
+            state.featureDraft[input.dataset.featureParam] = input.checked;
             state.overview.settings = state.overview.settings || {};
             state.overview.settings[input.dataset.featureParam] = input.checked;
             renderFeatureSwitches();
@@ -10821,6 +11712,13 @@ function bindFeatureDetailActions() {
         input.addEventListener("change", () => {
           state.overview.settings = state.overview.settings || {};
           state.overview.settings.emotion_judgement_mode = input.value || "suspicious";
+          renderFeatureSwitches();
+        });
+      }
+      if (state.selectedFeatureKey === "enable_response_self_review" && input.dataset.featureParam === "response_review_mode") {
+        input.addEventListener("change", () => {
+          state.overview.settings = state.overview.settings || {};
+          state.overview.settings.response_review_mode = input.value || "severe_only";
           renderFeatureSwitches();
         });
       }
@@ -11051,6 +11949,10 @@ function renderProviderSummary(providers) {
   const qualityRecommended = keys.filter((key) => providerGuides[key]?.preference === "quality").length;
   const vision = providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述";
   $("#providerSummary").innerHTML = `
+    <div class="provider-cost-notice">
+      <b>成本提醒</b>
+      <span>火山方舟协作计划免费额度将在 2026-06-30 结束。使用火山方舟 Provider 时，请检查每日 Token 限额和后台任务开关，注意成本控制。</span>
+    </div>
     <div class="provider-summary-card strong">
       <span>单独配置</span>
       <b>${configured}/${keys.length}</b>
@@ -11531,14 +12433,46 @@ function shortName(value, limit) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
-function donutChart(data) {
-  const entries = Object.entries(data).filter(([, value]) => Number(value) > 0);
-  if (!entries.length) return `<div class="empty small">暂无记忆数据</div>`;
-  const total = entries.reduce((sum, [, value]) => sum + Number(value), 0);
+function donutChart(data, options = {}) {
+  const {
+    emptyText = "暂无记忆数据",
+    labelFormatter = null,
+    maxSegments = 0,
+    mergeBelowPercent = 0,
+    otherLabel = "其他",
+  } = options;
+  const grouped = new Map();
+  for (const [rawLabel, rawValue] of Object.entries(data || {})) {
+    const value = Number(rawValue);
+    if (value <= 0) continue;
+    const label = String(labelFormatter ? labelFormatter(rawLabel, value) : rawLabel || "未命名");
+    grouped.set(label, (grouped.get(label) || 0) + value);
+  }
+  let entries = Array.from(grouped.entries())
+    .map(([label, value]) => ({ label, value }))
+    .sort((a, b) => b.value - a.value);
+  if (!entries.length) return `<div class="empty small">${escapeHtml(emptyText)}</div>`;
+  const total = entries.reduce((sum, item) => sum + item.value, 0);
+  if (mergeBelowPercent > 0 || maxSegments > 0) {
+    const kept = [];
+    let otherValue = 0;
+    entries.forEach((item, index) => {
+      const pct = total > 0 ? item.value / total : 0;
+      const overflow = maxSegments > 0 && index >= maxSegments;
+      const tooSmall = mergeBelowPercent > 0 && pct < mergeBelowPercent;
+      if (overflow || tooSmall) {
+        otherValue += item.value;
+      } else {
+        kept.push(item);
+      }
+    });
+    entries = kept;
+    if (otherValue > 0) entries.push({ label: otherLabel, value: otherValue });
+  }
   let offset = 0;
   const colors = ["#2f7566", "#8a6f3e", "#4d7ea8", "#a15f26", "#6e7f3f"];
-  const circles = entries.map(([label, value], index) => {
-    const pct = (Number(value) / total) * 100;
+  const circles = entries.map((item, index) => {
+    const pct = (item.value / total) * 100;
     const circle = `<circle r="42" cx="60" cy="60" pathLength="100" stroke="${colors[index % colors.length]}" stroke-dasharray="${pct} ${100 - pct}" stroke-dashoffset="${-offset}"></circle>`;
     offset += pct;
     return circle;
@@ -11548,10 +12482,19 @@ function donutChart(data) {
       <svg class="donut" viewBox="0 0 120 120">
         <circle r="42" cx="60" cy="60" class="donut-bg"></circle>
         ${circles}
-        <text x="60" y="64" text-anchor="middle">${escapeHtml(total)}</text>
+        <text x="60" y="64" text-anchor="middle">${escapeHtml(formatNumber(total))}</text>
       </svg>
       <div class="donut-legend">
-        ${entries.map(([label, value], index) => `<span><i style="background:${colors[index % colors.length]}"></i>${escapeHtml(label)} ${escapeHtml(value)}</span>`).join("")}
+        ${entries.map((item, index) => {
+          const pct = total > 0 ? (item.value / total) * 100 : 0;
+          const pctText = pct >= 1 ? `${pct.toFixed(1)}%` : (pct > 0 ? `${pct.toFixed(1)}%` : "0%");
+          return `
+            <span class="donut-legend-item">
+              <span class="donut-legend-label"><i style="background:${colors[index % colors.length]}"></i>${escapeHtml(item.label)}</span>
+              <span class="donut-legend-value">${escapeHtml(formatNumber(item.value))} · ${escapeHtml(pctText)}</span>
+            </span>
+          `;
+        }).join("")}
       </div>
     </div>
   `;
@@ -11718,16 +12661,11 @@ async function runAction(action, successMessage = "", control = null) {
 }
 
 function switchTab(tabName) {
+  state.activeTab = tabName || "dashboard";
   document.querySelectorAll(".tab").forEach((item) => item.classList.toggle("is-active", item.dataset.tab === tabName));
   document.querySelectorAll(".panel").forEach((item) => item.classList.toggle("is-active", item.id === `panel-${tabName}`));
-  if (tabName === "image-cache") {
-    renderImageCache();
-    loadImageCache().catch((error) => showToast(`图片缓存加载失败：${error.message}`, "error"));
-  }
-  if (tabName === "troubleshooting") {
-    renderTroubleshooting();
-    loadTroubleshooting().catch((error) => showToast(`排障信息加载失败：${error.message}`, "error"));
-  }
+  renderActiveTab(state.activeTab);
+  ensureTabData(state.activeTab).catch((error) => showToast(`页面数据加载失败：${error.message}`, "error"));
 }
 
 document.querySelectorAll(".tab").forEach((button) => {
@@ -11763,12 +12701,22 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
+  const scrollTarget = element?.closest("[data-scroll-target]");
+  if (scrollTarget) {
+    const targetId = scrollTarget.dataset.scrollTarget || "";
+    const targetEl = targetId ? document.getElementById(targetId) : null;
+    if (targetEl) {
+      targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    return;
+  }
   const troubleshootingTest = element?.closest("[data-troubleshooting-test]");
   if (troubleshootingTest) {
     const testType = troubleshootingTest.dataset.troubleshootingTest || "";
+    const workflowKind = troubleshootingTest.dataset.troubleshootingWorkflowKind || "";
     setActionBusy(troubleshootingTest, true);
     try {
-      const result = await postJson("/troubleshooting/test", { type: testType });
+      const result = await postJson("/troubleshooting/test", { type: testType, workflow_kind: workflowKind });
       state.troubleshooting = state.troubleshooting || {};
       state.troubleshooting.chain_tests = {
         ...(state.troubleshooting.chain_tests || {}),
@@ -12358,20 +13306,14 @@ $("#addGroupForm").addEventListener("submit", async (event) => {
   event.currentTarget.reset();
 });
 
-$("#exportSnapshotBtn").addEventListener("click", () => {
-  const snapshot = {
-    exported_at: new Date().toISOString(),
-    overview: state.overview,
-    users: state.users,
-    groups: state.groups,
-  };
-  const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `private-companion-snapshot-${new Date().toISOString().slice(0, 10)}.json`;
-  link.click();
-  URL.revokeObjectURL(url);
+$("#exportSnapshotBtn").addEventListener("click", async () => {
+  await runAction(async () => {
+    const params = new URLSearchParams();
+    params.set("sections", "basic,relations,food_skills,providers");
+    const snapshot = await fetchJson(`/config/export?${params.toString()}`);
+    const date = new Date().toISOString().slice(0, 10);
+    downloadJson(`private-companion-snapshot-${date}.json`, snapshot);
+  }, "快照已导出，可在配置迁移中导入", $("#exportSnapshotBtn"));
 });
 
 $("#exportConfigBtn").addEventListener("click", async () => {
@@ -12457,7 +13399,15 @@ $("#accessQuickGroups").addEventListener("click", async (event) => {
   }), "已更新群聊名单", button);
 });
 
-$("#saveFeaturesBtn").addEventListener("click", async () => {
+$("#saveFeaturesBtn").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (button?.dataset?.action === "back" || (state.selectedFeatureKey && Object.prototype.hasOwnProperty.call(state.featureDraft || {}, state.selectedFeatureKey))) {
+    const saved = await saveCurrentFeatureDetail(button, "已保存并返回功能列表");
+    if (!saved) return;
+    state.selectedFeatureKey = "";
+    renderFeatureSwitches();
+    return;
+  }
   const overviewSettings = state.overview?.settings || {};
   const features = {};
   const settings = {};
@@ -12469,7 +13419,7 @@ $("#saveFeaturesBtn").addEventListener("click", async () => {
       features[key] = toBool(value);
     }
   });
-  await runAction(() => postJson("/settings/update", { features, settings }), "已保存功能开关", $("#saveFeaturesBtn"));
+  await runAction(() => postJson("/settings/update", { features, settings }), "已保存功能开关", button);
 });
 
 $("#enableSafeFeaturesBtn").addEventListener("click", () => {

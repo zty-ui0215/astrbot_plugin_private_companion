@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import codecs
 import gc
 import hashlib
 import html
@@ -77,7 +78,6 @@ from .constants import (
     PLUGIN_NAME,
     DATA_VERSION,
     PROACTIVE_ABILITY_REGISTRY,
-    STYLE_TEMPLATES,
     VOICE_FALLBACK_TEMPLATES,
     TIMER_TAG_PATTERN,
     SUPPORTED_TIMER_FORMATS,
@@ -104,7 +104,7 @@ from .dreaming import (
     recent_diary_tags,
     weighted_unique_fragment_sample,
 )
-from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _today_key
+from .helpers import _date_key, _now_ts, _safe_float, _safe_int, _single_line, _strip_internal_message_blocks, _text_looks_garbled, _today_key
 from .planning import (
     build_daily_plan_prompt,
     build_detail_enhancement_prompt,
@@ -241,6 +241,161 @@ _PLATFORM_DISPLAY_NAMES = {
     "wechat": "微信",
     "discord": "Discord",
 }
+_NEWS_BINARY_CONTENT_TYPE_PREFIXES = ("image/", "audio/", "video/", "font/")
+_NEWS_BINARY_CONTENT_TYPES = {
+    "application/octet-stream",
+    "application/pdf",
+    "application/zip",
+    "application/x-gzip",
+    "application/x-protobuf",
+}
+_NEWS_TEXTUAL_CONTENT_TYPES = {
+    "application/xhtml+xml",
+    "application/xml",
+    "application/rss+xml",
+    "application/atom+xml",
+    "image/svg+xml",
+    "text/html",
+    "text/plain",
+    "text/xml",
+}
+_NEWS_BINARY_SIGNATURES = (
+    b"\xff\xd8\xff",
+    b"JFIF\x00",
+    b"Exif\x00\x00",
+    b"\x89PNG\r\n\x1a\n",
+    b"GIF87a",
+    b"GIF89a",
+    b"RIFF",
+    b"%PDF-",
+    b"PK\x03\x04",
+)
+_NEWS_MOJIBAKE_MARKERS = ("Ã", "â", "鈥", "銆", "鏉", "锟", "Ð", "Ê", "¤", "\ufffd")
+
+
+def _news_content_type_base(content_type: Any) -> str:
+    return str(content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _news_charset_from_content_type(content_type: Any) -> str:
+    match = re.search(r"charset\s*=\s*['\"]?\s*([A-Za-z0-9._-]+)", str(content_type or ""), flags=re.I)
+    return match.group(1).strip() if match else ""
+
+
+def _news_meta_charset(raw_bytes: bytes) -> str:
+    head = raw_bytes[:4096].decode("ascii", errors="ignore")
+    for pattern in (
+        r"<meta[^>]+charset=['\"]?\s*([A-Za-z0-9._-]+)",
+        r"<meta[^>]+content=['\"][^>]*charset\s*=\s*([A-Za-z0-9._-]+)",
+    ):
+        match = re.search(pattern, head, flags=re.I)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _normalize_news_charset(name: Any) -> str:
+    normalized = str(name or "").strip().lower().replace("_", "-")
+    aliases = {
+        "gb2312": "gb18030",
+        "gbk": "gb18030",
+        "x-gbk": "gb18030",
+        "utf8": "utf-8",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _news_response_looks_binary(raw_bytes: bytes, *, content_type: Any = "") -> bool:
+    sample = raw_bytes[:2048]
+    base_type = _news_content_type_base(content_type)
+    if base_type:
+        if any(base_type.startswith(prefix) for prefix in _NEWS_BINARY_CONTENT_TYPE_PREFIXES):
+            return True
+        if base_type in _NEWS_BINARY_CONTENT_TYPES:
+            return True
+        if base_type not in _NEWS_TEXTUAL_CONTENT_TYPES and not base_type.startswith("text/"):
+            lowered = sample[:512].lower()
+            if b"<html" not in lowered and b"<!doctype html" not in lowered and b"<article" not in lowered:
+                return True
+    for signature in _NEWS_BINARY_SIGNATURES:
+        if sample.startswith(signature):
+            return True
+    if sample.count(b"\x00") > 0:
+        return True
+    control_bytes = sum(1 for byte in sample if byte < 32 and byte not in (9, 10, 13))
+    if sample and control_bytes / len(sample) > 0.2:
+        return True
+    return False
+
+
+def _score_news_decoded_text(text: str) -> tuple[int, int]:
+    if not text:
+        return (10**9, 0)
+    sample = text[:6000]
+    replacement_count = sample.count("\ufffd")
+    mojibake_count = sum(sample.count(marker) for marker in _NEWS_MOJIBAKE_MARKERS if marker != "\ufffd")
+    control_count = sum(1 for ch in sample if ord(ch) < 32 and ch not in "\n\r\t")
+    html_markers = len(re.findall(r"<(?:html|body|article|div|p|meta|title)\b", sample, flags=re.I))
+    readable_count = sum(
+        1
+        for ch in sample
+        if ch.isalnum() or ch in " \n\r\t，。！？；：、“”‘’（）《》【】—-.,!?;:()[]/%&+#@_=<>\"'"
+    )
+    score = replacement_count * 24 + mojibake_count * 8 + control_count * 40
+    score -= min(html_markers * 6, 60)
+    score -= min(readable_count // 24, 40)
+    return (score, -len(sample))
+
+
+def _decode_news_response_text(
+    raw_bytes: bytes,
+    *,
+    content_type: Any = "",
+    declared_charset: Any = "",
+) -> str:
+    if not raw_bytes:
+        return ""
+    candidates: list[str] = []
+    if raw_bytes.startswith(codecs.BOM_UTF8):
+        candidates.append("utf-8-sig")
+    elif raw_bytes.startswith(codecs.BOM_UTF16_LE):
+        candidates.append("utf-16-le")
+    elif raw_bytes.startswith(codecs.BOM_UTF16_BE):
+        candidates.append("utf-16-be")
+    candidates.extend(
+        [
+            _normalize_news_charset(declared_charset),
+            _normalize_news_charset(_news_charset_from_content_type(content_type)),
+            _normalize_news_charset(_news_meta_charset(raw_bytes)),
+            "utf-8",
+            "utf-8-sig",
+            "gb18030",
+            "big5",
+            "latin1",
+        ]
+    )
+    seen: set[str] = set()
+    best_text = ""
+    best_score = (10**9, 0)
+    for encoding in candidates:
+        if not encoding or encoding in seen:
+            continue
+        seen.add(encoding)
+        for error_mode, penalty in (("strict", 0), ("replace", 12)):
+            try:
+                decoded = raw_bytes.decode(encoding, errors=error_mode)
+            except Exception:
+                continue
+            if not decoded.strip():
+                continue
+            score = _score_news_decoded_text(decoded)
+            adjusted = (score[0] + penalty, score[1])
+            if adjusted < best_score:
+                best_score = adjusted
+                best_text = decoded
+    if best_text:
+        return best_text
+    return raw_bytes.decode("utf-8", errors="ignore")
 
 class NewsExplorationMixin:
     """新闻阅读/网页探索"""
@@ -273,6 +428,122 @@ class NewsExplorationMixin:
             link = link.split("?", 1)[0]
         compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", title)
         return "|".join(part for part in (_single_line(source_type, 24).lower(), source[:24], compact[:64], link[:96]) if part)
+
+    def _external_event_title_fingerprint(self, payload: dict[str, Any], *, source_type: str = "") -> str:
+        title = _single_line(payload.get("headline") or payload.get("topic") or payload.get("title") or payload.get("source_title"), 140).lower()
+        if not title:
+            return ""
+        title = re.sub(r"https?://\S+", "", title)
+        title = re.sub(r"\b\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?\b", "", title)
+        title = re.sub(r"\b\d{1,2}:\d{2}\b", "", title)
+        title = re.sub(r"(?:第?\d+[期条]|今日|今天|昨夜|昨天|早报|日报|周报|速览|合集|汇总)", "", title)
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", title)
+        if len(compact) < 8:
+            return ""
+        digest = hashlib.sha1(compact.encode("utf-8", "ignore")).hexdigest()[:20]
+        return f"{_single_line(source_type, 24).lower()}:title:{digest}"
+
+    def _external_event_self_link_cache(self) -> dict[str, Any]:
+        raw = self.data.setdefault("external_event_self_link_cache", {})
+        if not isinstance(raw, dict):
+            raw = {}
+            self.data["external_event_self_link_cache"] = raw
+        return raw
+
+    def _cleanup_external_event_self_link_cache(self, *, now: float | None = None) -> dict[str, Any]:
+        now = _now_ts() if now is None else now
+        cache = self._external_event_self_link_cache()
+        kept: dict[str, Any] = {}
+        ranked: list[tuple[float, str, dict[str, Any]]] = []
+        for key, item in cache.items():
+            if not isinstance(item, dict):
+                continue
+            created = _safe_float(item.get("created_ts"), 0)
+            if created <= 0 or now - created > 72 * 3600:
+                continue
+            ranked.append((_safe_float(item.get("last_hit_ts"), created), str(key), item))
+        ranked.sort(key=lambda row: row[0])
+        for _, key, item in ranked[-240:]:
+            kept[key] = item
+        self.data["external_event_self_link_cache"] = kept
+        return kept
+
+    def _external_event_self_link_cache_keys(self, payload: dict[str, Any], *, source_type: str = "") -> list[str]:
+        keys: list[str] = []
+        for key in (
+            self._external_event_signature(payload, source_type=source_type),
+            self._external_event_title_fingerprint(payload, source_type=source_type),
+        ):
+            key = _single_line(key, 220)
+            if key and key not in keys:
+                keys.append(key)
+        return keys
+
+    def _cached_external_event_wish(self, payload: dict[str, Any], *, source_type: str = "") -> dict[str, Any]:
+        keys = self._external_event_self_link_cache_keys(payload, source_type=source_type)
+        if not keys:
+            return {}
+        now = _now_ts()
+        cache = self._cleanup_external_event_self_link_cache(now=now)
+        for key in keys:
+            item = cache.get(key)
+            if not isinstance(item, dict):
+                continue
+            wish = item.get("wish")
+            if not isinstance(wish, dict):
+                continue
+            item["hit_count"] = _safe_int(item.get("hit_count"), 0, 0) + 1
+            item["last_hit_ts"] = now
+            result = dict(wish)
+            result["cache_hit"] = True
+            result["cache_key"] = key
+            logger.info(
+                "[PrivateCompanion] 外界信息自我关联命中缓存: source=%s key=%s hit=%s",
+                source_type,
+                key,
+                item["hit_count"],
+            )
+            return result
+        return {}
+
+    def _remember_external_event_wish_cache(self, payload: dict[str, Any], wish: dict[str, Any], *, source_type: str = "") -> None:
+        if not isinstance(wish, dict) or not wish:
+            return
+        keys = self._external_event_self_link_cache_keys(payload, source_type=source_type)
+        if not keys:
+            return
+        now = _now_ts()
+        cache = self._cleanup_external_event_self_link_cache(now=now)
+        stored_wish = {
+            key: value
+            for key, value in dict(wish).items()
+            if key
+            in {
+                "relevance",
+                "desire",
+                "should_share",
+                "share_probability",
+                "self_link",
+                "motive",
+                "tone",
+                "boundary",
+                "source_type",
+                "boost_reason",
+            }
+        }
+        stored_wish["created_ts"] = now
+        stored_wish["source_type"] = _single_line(source_type, 24)
+        title = _single_line(payload.get("headline") or payload.get("topic") or payload.get("title") or payload.get("source_title"), 120)
+        for key in keys:
+            cache[key] = {
+                "wish": stored_wish,
+                "title": title,
+                "source_type": _single_line(source_type, 24),
+                "created_ts": now,
+                "last_hit_ts": now,
+                "hit_count": _safe_int((cache.get(key) or {}).get("hit_count") if isinstance(cache.get(key), dict) else 0, 0, 0),
+            }
+        self._cleanup_external_event_self_link_cache(now=now)
 
     def _external_event_recently_seen(self, payload: dict[str, Any], *, source_type: str = "", now: float | None = None) -> bool:
         now = _now_ts() if now is None else now
@@ -1131,12 +1402,17 @@ class NewsExplorationMixin:
         keywords = [str(token) for token in source.get("keywords") or [] if str(token).strip()] or ["早报", "日报"]
         queries: list[str] = []
         for keyword in keywords[:4]:
+            compact_keyword = f"AI{keyword}"
             queries.extend(
                 [
-                    f"site:bilibili.com/video {author} AI {keyword} {today}",
-                    f"site:bilibili.com/video {author} AI{keyword} {date_tokens[2]}",
-                    f"site:mp.weixin.qq.com/s {author} AI {keyword} {today}",
-                    f"{author} AI {keyword} 最新 文字版",
+                    f"AI {keyword} {today}",
+                    f"{compact_keyword} {today}",
+                    f"AI {keyword} {date_tokens[2]}",
+                    f"{compact_keyword} {date_tokens[2]}",
+                    f"site:mp.weixin.qq.com/s AI {keyword} {today}",
+                    f"site:mp.weixin.qq.com/s {compact_keyword} {today}",
+                    f"site:bilibili.com/video AI {keyword} {today}",
+                    f"site:bilibili.com/video {compact_keyword} {today}",
                 ]
             )
         queries = list(dict.fromkeys(queries))
@@ -1271,15 +1547,21 @@ class NewsExplorationMixin:
                     if resp.status >= 400:
                         return {}
                     raw_bytes = await resp.read()
-                    try:
-                        raw = raw_bytes.decode(resp.charset or "utf-8", errors="ignore")
-                    except Exception:
-                        raw = raw_bytes.decode("utf-8", errors="ignore")
-                    if "璞" in raw[:5000] or "鏃╂姤" in raw[:5000] or "鈥" in raw[:5000]:
-                        try:
-                            raw = raw.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
-                        except Exception:
-                            pass
+                    content_type = resp.headers.get("Content-Type", "")
+                    if _news_response_looks_binary(raw_bytes, content_type=content_type):
+                        logger.debug(
+                            "[PrivateCompanion] 新闻文字版跳过非文本响应 %s content-type=%s",
+                            _single_line(safe_url, 120),
+                            _single_line(content_type, 80),
+                        )
+                        return {}
+                    raw = _decode_news_response_text(
+                        raw_bytes,
+                        content_type=content_type,
+                        declared_charset=resp.charset or "",
+                    )
+                    if not raw.strip():
+                        return {}
         except Exception as exc:
             logger.debug("[PrivateCompanion] 新闻文字版抓取失败 %s: %s", _single_line(safe_url, 120), exc)
             return {}
@@ -1297,6 +1579,8 @@ class NewsExplorationMixin:
             if match:
                 title = match.group(1).strip()
                 break
+        if _text_looks_garbled(title):
+            title = ""
 
         body = text
         article_match = re.search(r'<div[^>]+id=["\']js_content["\'][^>]*>(.*?)</div>\s*</div>\s*</div>', text, flags=re.I | re.S)
@@ -1318,7 +1602,7 @@ class NewsExplorationMixin:
         ]
         article_text = "\n".join(lines)
         article_text = re.sub(r"\n{3,}", "\n\n", article_text).strip()
-        if len(article_text) < 80:
+        if len(article_text) < 80 or _text_looks_garbled(article_text[:600]):
             return {}
         return {
             "title": _single_line(title, 120),
@@ -2124,12 +2408,7 @@ class NewsExplorationMixin:
     def _external_event_self_link_provider_id(self) -> str:
         return self._task_provider(self.aux_provider_id, self.llm_provider_id)
 
-    def _format_external_event_self_context(self) -> str:
-        state = self.data.get("daily_state", {}) if isinstance(self.data.get("daily_state"), dict) else {}
-        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
-        mood = _single_line(state.get("mood_bias"), 40)
-        energy = _safe_int(state.get("energy"), 70, 0, 100)
-        activity = _single_line((current_item or {}).get("activity"), 120)
+    def _format_external_event_stable_self_context(self) -> str:
         model_lines = []
         plugin_main = self._task_provider(self.llm_provider_id)
         if plugin_main:
@@ -2138,14 +2417,32 @@ class NewsExplorationMixin:
             part
             for part in (
                 f"Bot 名称：{self.bot_name}",
-                f"当前状态：{mood or '平稳'}，心理能量 {energy}/100",
-                f"当前日程：{activity}" if activity else "",
                 "当前模型环境：" + "；".join(model_lines) if model_lines else "",
                 f"人格：{_single_line(self._get_default_persona_prompt(), 900)}",
                 self._format_worldview_adaptation_prompt(),
             )
             if part
         )
+
+    def _format_external_event_current_self_context(self) -> str:
+        state = self.data.get("daily_state", {}) if isinstance(self.data.get("daily_state"), dict) else {}
+        current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
+        mood = _single_line(state.get("mood_bias"), 40)
+        energy = _safe_int(state.get("energy"), 70, 0, 100)
+        activity = _single_line((current_item or {}).get("activity"), 120)
+        return "\n".join(
+            part
+            for part in (
+                f"当前状态：{mood or '平稳'}，心理能量 {energy}/100",
+                f"当前日程：{activity}" if activity else "",
+            )
+            if part
+        )
+
+    def _format_external_event_self_context(self) -> str:
+        stable = self._format_external_event_stable_self_context()
+        current = self._format_external_event_current_self_context()
+        return "\n".join(part for part in (stable, current) if part)
 
     def _external_event_fallback_wish(self, payload: dict[str, Any], *, source_type: str) -> dict[str, Any]:
         title = _single_line(payload.get("headline") or payload.get("topic") or payload.get("source_title"), 100)
@@ -2200,15 +2497,22 @@ class NewsExplorationMixin:
     async def _build_external_event_wish(self, payload: dict[str, Any], *, source_type: str) -> dict[str, Any]:
         if not self.enable_external_event_self_link or not isinstance(payload, dict):
             return {}
+        cached = self._cached_external_event_wish(payload, source_type=source_type)
+        if cached:
+            return cached
         provider_id = self._external_event_self_link_provider_id()
         fallback = self._external_event_fallback_wish(payload, source_type=source_type)
         life_wish = self._external_event_life_opportunity_wish(payload, source_type=source_type)
         if not provider_id:
-            return life_wish or fallback
+            result = life_wish or fallback
+            self._remember_external_event_wish_cache(payload, result, source_type=source_type)
+            return result
         title = _single_line(payload.get("headline") or payload.get("topic") or payload.get("source_title"), 120)
         impression = _single_line(payload.get("impression") or payload.get("note") or payload.get("summary"), 360)
         source = _single_line(payload.get("selected_source") or payload.get("source_title") or payload.get("source"), 80)
         link = _single_line(payload.get("selected_link") or payload.get("source_url") or payload.get("link"), 420)
+        stable_self_context = self._format_external_event_stable_self_context()
+        current_self_context = self._format_external_event_current_self_context()
         prompt = f"""
 请判断 Bot 刚读到的一条外界信息,是否会在它心里产生“和我自己有关,想找用户说说”的主动意愿。
 
@@ -2232,6 +2536,9 @@ class NewsExplorationMixin:
   "boundary": "主动时要避开的表达,80字内"
 }}
 
+【Bot 稳定自我上下文】
+{stable_self_context}
+
 【来源类型】
 {source_type}
 
@@ -2241,13 +2548,15 @@ class NewsExplorationMixin:
 链接：{link}
 内部印象：{impression}
 
-【Bot 当前自我上下文】
-{self._format_external_event_self_context()}
+【Bot 当前短时状态】
+{current_self_context}
 """.strip()
         raw = await self._llm_call(prompt, max_tokens=360, provider_id=provider_id, task="external_event_self_link")
         parsed = self._parse_json_object(raw)
         if not isinstance(parsed, dict):
-            return life_wish or fallback
+            result = life_wish or fallback
+            self._remember_external_event_wish_cache(payload, result, source_type=source_type)
+            return result
         relevance = _safe_int(parsed.get("relevance"), fallback["relevance"], 0, 10)
         desire = _safe_int(parsed.get("desire"), fallback["desire"], 0, 10)
         probability = _safe_float(parsed.get("share_probability"), fallback["share_probability"])
@@ -2277,6 +2586,7 @@ class NewsExplorationMixin:
                     "boundary": life_wish["boundary"],
                     "boost_reason": life_wish["boost_reason"],
                 }
+        self._remember_external_event_wish_cache(payload, result, source_type=source_type)
         return result
 
     def _bot_currently_bored_enough_for_news(self) -> bool:

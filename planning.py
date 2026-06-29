@@ -85,7 +85,22 @@ async def generate_detail_enhancement(
     normalized["today_events"] = filter_items_to_segment(plugin, normalized.get("today_events"), segment)
     normalized["proactive_events"] = filter_items_to_segment(plugin, normalized.get("proactive_events"), segment)
     normalized["summary"] = _single_line(payload.get("summary"), 160)
+    social_fact_sanitizer = getattr(plugin, "_sanitize_daily_plan_social_fact_text", None)
+    if callable(social_fact_sanitizer):
+        normalized["summary"] = social_fact_sanitizer(
+            normalized["summary"],
+            field="detail.summary",
+        )
     normalized["state_variables"] = normalize_state_variables(payload.get("state_variables"))
+    if callable(social_fact_sanitizer):
+        for index, item in enumerate(normalized["state_variables"]):
+            if not isinstance(item, dict):
+                continue
+            for key in ("value", "note"):
+                item[key] = social_fact_sanitizer(
+                    item.get(key),
+                    field=f"detail.state_variables.{index}.{key}",
+                )
     normalized["presence_status"] = normalize_presence_status(payload.get("presence_status"))
     return normalized
 
@@ -254,10 +269,20 @@ def normalize_story_plan(plugin, payload: dict[str, Any]) -> dict[str, Any]:
     summary = _single_line(payload.get("summary"), 160) or "这一段按原日程慢慢推进。"
     if callable(social_fact_sanitizer):
         summary = social_fact_sanitizer(summary, field="detail.summary")
+    state_variables = normalize_state_variables(payload.get("state_variables"))
+    if callable(social_fact_sanitizer):
+        for index, item in enumerate(state_variables):
+            if not isinstance(item, dict):
+                continue
+            for key in ("value", "note"):
+                item[key] = social_fact_sanitizer(
+                    item.get(key),
+                    field=f"detail.state_variables.{index}.{key}",
+                )
     return {
         "date": _today_key(),
         "summary": summary,
-        "state_variables": normalize_state_variables(payload.get("state_variables")),
+        "state_variables": state_variables,
         "presence_status": normalize_presence_status(payload.get("presence_status")),
         "today_events": today_events[:8],
         "proactive_events": normalized_proactive,
@@ -551,7 +576,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 
 【生成要求】
 1. 先隐式判断今天的“日程类型”：普通工作/学习日、普通休息日、假期、考试/复查/聚会/旅行/研学/活动日、长线日程中的某一天,或由天气/星期/重要日期造成的特殊日子。不要把这个判断写出来,但日程必须明显受它影响。
-2. 时间从起床覆盖到入睡前,安排本次输入指定数量的时间点；相邻节点通常间隔 30-90 分钟。每一项都必须有 time、activity、mood、message_seed。
+2. 时间从起床覆盖到入睡前,安排本次输入指定数量的时间点；相邻节点通常间隔 30-90 分钟。每一项都必须有 time、activity、mood、message_seed；但 message_seed 可以是空字符串。
 3. 用第三人称写 activity,像旁观这个人过日子：写「午休后靠着桌沿醒神」「傍晚出门慢慢走一段」,不要写第一人称自述、任务标签或功能词。
 4. 日程主线必须跟身份一致：学生才写校园,上班族才写工作,居家、自由职业、旅途、营地或非人设定就写对应的生活节奏。可做事项只能安插在缝隙里。
 5. 必须区分普通日、休息日和特殊日：如果今天是周末或节假日,且没有明确例外,就不要安排上课、放学、作业、教室、食堂、上班、下班、会议这类普通工作日主线；如果今天有考试、旅行、聚会、复查、演出、研学等线索,主线要围绕这件事展开。
@@ -560,6 +585,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 7.0 如果“今日互动造成的日程偏移”不为空,要先判断它的强度和影响范围：强干涉会改变当前段、下一段甚至今日后续的节奏；中等干涉至少改变情绪、等待、分享欲、任务进度或主动策略；轻微回应也要留下短暂余味。不能只在 message_seed 里提一句就结束。
 7.1 如果昨日完整对话摘要里有饮食、作息、运动、天气暴露、情绪刺激、约定、礼物、争执、安慰、共同完成/未完成的事等线索,可以让它们以抽象后果影响今日：体力、胃口、身体小不适、心情余波、主动话题、出门意愿、梦境碎片或某个时段的小停顿。影响强度要跟摘要一致,可以很轻,也可以没有；不要为了戏剧性强行安排事故。
 7.1.1 如果昨日屏幕观察日记可用,只能把它当作用户昨日作息和活动类型的脱敏背景：例如昨天长时间编程、社交消息较多、视频放松、很晚仍在电脑前等。它可以影响今天的问候、体力判断、主动话题和是否显得担心,但不能直接引用窗口名、账号、具体聊天、页面标题,也不要说“我昨天看到你”。
+7.1.2 饮食、零食、物件和梦境意象有自然衰退：最近几天反复出现的具体菜名、气味、小物件或梗,只说明“近期聊过/需要避重”,不能每天复刻进日程。用户表达“不吃/不喜欢/不要/避开某食物”时,这只是避错规则,不能反向生成“今天给用户准备替代餐食/带饭/约饭”的任务。除非今天的输入明确要求,不要把同一道菜、同一种食物香气或同一个小物件连续安排成午饭、梦境、主动话题或带给用户的东西。
 7.2 必须主动避开最近日程骨架的重复：不要连续几天都写同一套“醒来/洗漱/整理/学习或做事/休息/收尾/睡前”。如果某类活动无法避免,要换具体场景、地点、对象、阻碍、小意外、关系伏笔或情绪走向,让今天读起来像新的一天。
 7.3 不要把“草稿纸上画圆圈/随手涂鸦/笔尖划来划去/盯着同一张纸发呆”当作通用生活感反复使用。除非输入材料明确提到这件事,否则优先换成更具体的当日物件、地点、声音、气味、人物互动或真实占用时间的事项。
 7.4 如果“技能成长对日程的能力边界影响”不为空,必须让相关能力表现和技能等级连续一致,不要二分处理。Lv.1 可被基础概念绊住；Lv.2 可照着例子慢慢做；Lv.3 能独立推进常规任务但效率一般；Lv.4 常规任务不应卡死,只会检查细节或换思路；Lv.5 普通相关任务应熟练、能优化或教别人；Lv.6 可创造新做法或在未知条件下表现出明显优势。这里的任务可以是题目、创作、料理、训练、战斗、交涉、研究、手工或任何符合人格的活动。它主要约束“能不能做、会不会卡、卡多久、如何解决”,不是强行增加训练频率。
@@ -574,11 +600,11 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 12.1 不要把小意外写成高确定性社交事实：除非输入材料明确给出,不要凭空写“遇见某个具体熟人/同学/朋友/老师”“朋友用户发来消息/约夜宵/约饭”“给朋友用户回消息”“朋友用户提醒/找她聊天”“约好下周一起做某事”“答应替用户带某样东西”“顺带给用户买饮品/食物”。可以写成“路过便利店看到某样东西,想起用户可能会吐槽/喜欢”,但不能写成已经替用户安排或承诺。
 13. 如果身份是学生,校园段要具体到“哪类课/哪件小事/哪种迟到或作业压力”；休息日也可以写作业、刷手机、追番、帮家里做点小事、出门买饮料这类生活段落。职场、旅行、研学、营地同理,写真实占用时间的事情,少写任何身份都能套用的通用动作。
 14. 至少让 3 个时间点自然带出和用户的关系伏笔：可以是想起对方、忍住没发、看到某物想吐槽给对方、睡前打开对话框又删掉、等对方回复。关系伏笔要轻,藏在 message_seed 或 activity 末尾,不要每次直说“想你”。
-15. 不是每一段都要涉及用户。没有关系伏笔的段落,message_seed 可以写成很短的普通吐槽或留空感的句子,例如“这段没什么想说的”“先不吵你”“脑子空空的”。不要为了凑互动把所有事件都拐到用户身上。
+15. 不是每一段都要涉及用户。没有自然开口、没有关系伏笔、没有值得分享的小切口时,message_seed 必须写成空字符串 ""。不要写“这段没什么想说的”“先不打扰/不吵你”“脑子空空的”“这段先留白”这类为了表示留白而发出的占位句；没有内容就不要说。
 16. 温柔或内敛的人设可以有烦躁、委屈、低落,但表达要收着：写成沉默、停顿、把东西放远、攥着笔、少说两句、绕开争执；不要写“想砸东西、想摔东西、想打人、报复、毁掉”这类破坏性或攻击性冲动,除非人格设定明确要求。
 17. 消极状态只是当天的天气,不是身份本身。最近日记里的低落/失眠/烦躁只能作为淡淡余波,不能连续放大成全天负面；至少安排一两处回稳、松开或被用户互动带来的柔和偏移。
 18. mood 用 2-3 个中文词,用逗号分隔,反映真实感受或身体状态,例如“慵懒,不想起”“放松,胃口一般”“认真,有点卡住”“困倦,脑子还转”。不要只写一个笼统词。
-19. message_seed 是如果这一刻想顺手找用户说一句,嘴边最先冒出来的话。它可以是第一人称口语,要短,像私聊碎片；不要用它解释背景,让背景藏在语气和话题里。少一点“我突然想到你了”,多一点“刚刚那一下也太离谱了”“窗外这会儿不好看”“这段我先安静一下”。
+19. message_seed 是如果这一刻确实有话想找用户说,嘴边最先冒出来的话。它可以是第一人称口语,要短,像私聊碎片；不要用它解释背景,让背景藏在语气和话题里。少一点“我突然想到你了”,多一点“刚刚那一下也太离谱了”“窗外这会儿不好看”。如果只能想到“没什么可说/先安静/不打扰”这类元表达,就留空。
 20. message_seed 也要遵守状态转译：不要写“今天状态/心情/情绪/能量怎么样”,而是写能承载状态的小画面、小吐槽、小动作或一句轻轻的问题。
 21. 每个日程段都应该是一小段连续生活,而不是一个瞬时动作。不要把“看一眼、拍一下、翻个身、关掉闹钟”这种几秒钟就结束的动作单独立成一项；如果写到它们,要把它们嵌进更完整的时段里。
 22. 如果多条参考信息冲突,优先服从日期语境和身份主线,再服从状态与天气,再服从今日互动偏移,最后才参考日记和可做事项。
@@ -589,7 +615,8 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 格式：
 {{
   "schedule": [
-    {{"time": "09:10", "activity": "闹钟响过以后又在被窝里赖了几分钟,看到今天是星期一才慢慢坐起来,一边找校服一边想今天第一节别又点名。", "mood": "启动困难", "message_seed": "星期一真的有点难开机。"}},
+    {{"time": "09:10", "activity": "闹钟响过以后又在被窝里赖了几分钟,看到今天是星期一才慢慢坐起来,一边找校服一边想今天第一节别又点名。", "mood": "起得很慢", "message_seed": "星期一早上真的好难起。"}},
+    {{"time": "13:40", "activity": "午后窝在沙发角落刷了一会儿短视频,后来把手机扣下,慢慢把桌上的杯子推回杯垫中间。", "mood": "放空,平稳", "message_seed": ""}},
     {{"time": "17:20", "activity": "放学后没有立刻回消息,先在校门口被风吹了一会儿,看到路边水洼里反着天色,才摸出手机想拍给用户看。", "mood": "松一口气", "message_seed": "刚刚那个水洼反光还挺像电影里的。"}}
   ]
 }}
@@ -706,10 +733,11 @@ def build_detail_enhancement_prompt(
 · 消极状态不能滚雪球式升级。最近日记和拟人状态只提供余波,当前段需要给出一点自然回稳、压下去、被接住或转移注意的可能。
 · 用第三人称旁观：today_events 和 why/scene 都像在看这个人过日子,不是角色自己写日记。
 · 主动意愿要真实——不是每段都要发消息,允许“想了想算了”。
-· 主动内容不要只围绕问候、天气和当前状态。先从“内容选择菜单”里选一个方向,再根据当前时间段、日程、人格和最近聊天生成新的具体内容。不要照抄菜单示例,不要把类别名写进输出。
-· 主动能力要先检索再使用：从“主动能力检索”里挑当前可用且贴合场景的 action；不要凭空造新 action,也不要为了触发而触发。这个检索过程只供内部规划,不得写进 today_events、why、topic、motive 或最终聊天内容。
+· 主动内容不要只围绕问候、天气和当前状态。先从“内容选择菜单”里单选一个正文锚点；当前时间段、日程、人格和最近聊天只用于筛选锚点和调整语气,不要各取一段拼成一条。不要照抄菜单示例,不要把类别名写进输出。
+· 主动 action 只使用“主动能力检索”清单里的名字；没有合适动作时就是 message。
 · 主动图片能力状态：{photo_action_hint}
-· 主动能力要融入当前情境。{photo_menu_hint}只有在独处、半独处、课间、路上、睡前、发呆、刚拿到手机等合适时机才触发。
+· 主动动作贴当前情境。{photo_menu_hint}图片动作常见于独处、半独处、课间、路上、睡前、发呆、刚拿到手机等时机。
+· 早安只适合作为当天早上的第一句主动消息；如果今天已经有别的主动、或者已经和对方有来回互动，就别再产出 morning_greeting，改成 check_in、activity_share 或 quiet_care。
 · {photo_instruction_hint}
 · {photo_detail_hint}
 · 如果 action 是 voice,topic 或 motive 要像语音本身或语音前后的自然文字,例如“我跟你说啊……”；不要写成“发了一段语音给你”这种旁白式命令。
@@ -723,7 +751,7 @@ def build_detail_enhancement_prompt(
 · {photo_mix_hint}
 · motive 是心里一闪而过的念头,10–40 字。
 · scene / tone / impulse 是可选的抽象引导：scene 是当时场景,tone 是语气底色,impulse 是想靠近的那股劲。
-· 如果是起床/早安/试探,可以带 chain 做分支逻辑：先只叫名字,没回->隔久一点再轻轻放一句；早晨未回复不需要马上追,也不要把没回理解成故意不理。
+· 如果是当天早上的第一句主动开口,可以带 chain 做分支逻辑：先只叫名字,没回->隔久一点再轻轻放一句；早晨未回复不需要马上追,也不要把没回理解成故意不理。若当天已经有别的主动或已有互动,就不要再走 morning_greeting。
 · 输出中的 summary 要相当于“更新后的角色状态摘要”：一句话写出当前段结束后的情绪、体力走向和最多两个残留状态,方便下一时间段承接。例如“情绪平淡但有点等回复,体力约 58/100,还惦记刚才那张没发出去的图。”
 · 同时输出 state_variables,作为这个时间段的状态机变量。它们既要描述无用户干预时自然发展到当前段结束的大致状态,也要吸收“今日互动造成的日程偏移”里已经发生的用户介入。例如作业完成度、情绪、体力、等待回复、是否想发消息、特殊能力冷却、是否预留空档等。变量要短,方便后续用户事件做局部更新。
 · 同时输出 presence_status,由细化模型决定这个时间段适合的 QQ 全局状态表现。它只用于平台侧同步,不是角色正文。mode 只能使用 online / custom / sleep / unchanged；禁止输出 away / invisible / dnd / do_not_disturb / 请勿打扰 / 勿扰。普通可聊天时 online；想表现“写作业/发呆/吃饭/路上/看剧/专注”等生活状态时优先用 custom,并必须填写 custom_text（2-8 个中文字符,像“写题中”“路上”“犯困中”“看剧中”）；睡眠段倾向 sleep；不确定或不想影响账号时 unchanged。不要频繁改变,一段最多一个状态。
@@ -744,7 +772,7 @@ def build_detail_enhancement_prompt(
   ],
   "proactive_events": [
     {{"window": "10:05-10:18", "reason": "check_in", "action": "screen_peek", "why": "主人设备上有授权屏幕观察,手头刚好空了一小会儿,想确认主人是不是还在电脑前忙", "topic": "本机屏幕看一眼", "motive": "想轻轻确认主人是不是还在忙", "scene": "上午空出来的一小段", "tone": "百无聊赖", "impulse": "只看本机屏幕的大致状态,不复述隐私细节"}},
-    {{"window": "08:18-09:05", "reason": "morning_greeting", "action": "message", "why": "刚醒来那一下还有点迷糊,想先轻轻叫对方一声", "topic": "刚醒那会儿", "motive": "被窝里还暖着,手已经先点到你这边了", "scene": "刚醒来还蜷在被子里", "tone": "迷糊", "impulse": "想先轻轻碰你一下", "chain": [{{"kind": "name_only_opener"}}, {{"kind": "if_no_reply", "after_minutes": 85, "reason": "check_in", "topic": "早晨那句后面", "motive": "隔了挺久那边还安静着,就想再轻轻放一句", "tone": "轻一点"}}]}}
+    {{"window": "08:18-09:05", "reason": "morning_greeting", "action": "message", "why": "醒来还带着一点睡意时,迷迷糊糊先发一声早安。", "topic": "没完全醒的早安", "motive": "人还没完全清醒,但还是先想跟用户打个招呼", "scene": "人还带着睡意的时候", "tone": "迟钝", "impulse": "想和用户说声早安", "chain": [{{"kind": "name_only_opener"}}, {{"kind": "if_no_reply", "after_minutes": 90, "reason": "check_in", "topic": "早安余韵", "motive": "已经清醒过来，但刚刚和用户说的早安还没得到回应,猜测用户还在休息", "tone": "耐心等待"}}]}}
   ]
 }}
 
@@ -796,9 +824,6 @@ def build_detail_enhancement_prompt(
 
 【主动能力检索】
 {plugin._format_proactive_ability_search_hint()}
-
-【状态表现层】
-{plugin._format_presence_layer_hint()}
 
 【内容选择菜单】
 {plugin._format_content_choice_options_for_prompt()}
