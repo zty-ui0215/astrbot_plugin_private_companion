@@ -94,7 +94,6 @@ _REASON_TEXT = {
     "background_schedule": "提一句当前日程",
     "insomnia_night": "睡不着，想跟{name}说说话",
     "group_share": "跟{name}分享群里的有趣片段",
-    "bili_video_share": "跟{name}分享刚刷到的 B 站视频",
     "creative_share": "跟{name}分享刚写到的小说片段",
     "jm_cosmos_share": "提起刚翻到的漫画本子",
 }
@@ -102,7 +101,6 @@ _REASON_TEXT = {
 # 动作描述 - 生活化
 _ACTION_TEXT = {
     "message": "发了条消息给{name}",
-    "screen_peek": "看了眼本机屏幕",
     "photo_text": "拍了张照片发给{name}",
     "poke": "戳了一下",
     "voice": "发了段语音跟{name}说",
@@ -118,14 +116,6 @@ PROACTIVE_ABILITY_REGISTRY = [
         "when": "没有明确媒介契机,或只需要很轻地接一句话",
         "use_for": "早安、午间问候、轻关心、顺手分享、承接用户上一句",
         "avoid": "把生活状态写成汇报,或为了发消息硬编动作",
-    },
-    {
-        "module": "主动行为",
-        "name": "screen_peek",
-        "label": "轻窥屏",
-        "when": "仅主人/本机屏幕授权场景下,想确认主人电脑前是否还在忙",
-        "use_for": "主人 check_in、quiet_care、短空档里的本机屏幕试探",
-        "avoid": "用于朋友或非本机对象、复述屏幕内容、承认偷看、把观察写成分析报告",
     },
     {
         "module": "主动行为",
@@ -200,7 +190,6 @@ _DEFAULT_USER_TEMPLATE = {
     "proactive_idle_minutes": -1,
     "proactive_min_interval_minutes": -1,
     "photo_daily_limit": -1,
-    "screen_peek_daily_limit": -1,
     "poke_daily_limit": -1,
     "proactive_boundary_note": "",
     "nickname": "",
@@ -280,9 +269,6 @@ _DEFAULT_USER_TEMPLATE = {
     "group_share_context": {},
     "last_group_share_key": "",
     "last_group_share_at": 0,
-    "bilibili_video_context": {},
-    "last_bilibili_share_key": "",
-    "last_bilibili_share_at": 0,
     "creative_share_context": {},
     "last_creative_share_key": "",
     "last_creative_share_at": 0,
@@ -297,10 +283,6 @@ _DEFAULT_USER_TEMPLATE = {
     "photo_sent_day": "",
     "photo_generated_today": 0,
     "photo_generated_day": "",
-    "screen_peek_today": 0,
-    "screen_peek_day": "",
-    "screen_peek_last_at": 0,
-    "last_unanswered_screen_peek_at": 0,
 }
 
 _DEFAULT_GROUP_TEMPLATE = {

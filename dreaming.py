@@ -602,7 +602,7 @@ async def generate_enhanced_dream_pick(plugin, weather: dict[str, Any] | None = 
         provider_id=plugin._task_provider(
             getattr(plugin, "dream_provider_id", ""),
             getattr(plugin, "diary_provider_id", ""),
-            getattr(plugin, "mai_style_provider_id", ""),
+            getattr(plugin, "llm_provider_id", ""),
         ),
     )
     payload = plugin._extract_json_payload(raw_text or "")
@@ -731,7 +731,7 @@ async def generate_daily_diary(plugin) -> dict[str, Any]:
         max_tokens=500,
         provider_id=plugin._task_provider(
             getattr(plugin, "diary_provider_id", ""),
-            getattr(plugin, "mai_style_provider_id", ""),
+            getattr(plugin, "llm_provider_id", ""),
         ),
     )
     payload = plugin._extract_json_payload(raw_text or "")

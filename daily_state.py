@@ -908,8 +908,6 @@ class DailyStateMixin:
             or any(token in text for token in self._visual_share_tokens())
         ):
             return "photo_text"
-        if self._screen_glance_available() and reason in {"check_in", "quiet_care", "background_schedule"}:
-            return "screen_peek"
         if self._voice_available() and reason in {"quiet_care", "diary_share", "insomnia_night", "evening_greeting"}:
             return "voice"
         if self._poke_available() and reason in {"check_in", "quiet_care", "morning_greeting", "evening_greeting"}:
@@ -1153,9 +1151,7 @@ class DailyStateMixin:
             "noon_greeting": "中午松下来时想和用户说一句",
             "evening_greeting": "晚上慢下来时想先来你这边说一句",
         }.get(reason, "刚好停下来,想到可以和用户说一句")
-        if action == "screen_peek":
-            base = "刚好有点空，想确认用户是不是还在忙"
-        elif action == "photo_text":
+        if action == "photo_text":
             base = "刚刚看到的画面想发给用户看看"
         elif action == "jm_cosmos_read":
             base = "刚刚私下翻到一点漫画内容,只想含糊地提一句"
@@ -1708,7 +1704,6 @@ class DailyStateMixin:
                 return state
             return self._compose_state_from_conditions(weather)
         weather = await self._ensure_weather_context(force=force)
-        await self._ensure_yesterday_screen_diary_context(force=force)
         if not skip_conversation_summary:
             await self._ensure_yesterday_conversation_summary(force=force)
         async with self._data_lock:
@@ -2359,17 +2354,6 @@ class DailyStateMixin:
         if text:
             prompt = text
             source = str(own_result.get("source") or "private_companion")
-        else:
-            plugin = self._get_screen_companion_plugin()
-            if plugin is not None and hasattr(plugin, "_get_weather_prompt"):
-                try:
-                    result = await plugin._get_weather_prompt()
-                    text = _single_line(result, 120)
-                    if text:
-                        prompt = text
-                        source = "screen_companion"
-                except Exception as e:
-                    logger.debug(f"[PrivateCompanion] 获取天气信息失败: {e}")
         weather = {
             "date": today,
             "prompt": prompt,
@@ -2386,97 +2370,6 @@ class DailyStateMixin:
             return "暂无天气信息"
         text = _single_line(weather.get("prompt"), 120)
         return text or "暂无天气信息"
-
-    async def _ensure_yesterday_screen_diary_context(self, force: bool = False) -> dict[str, Any]:
-        today = _today_key()
-        yesterday = date.today() - timedelta(days=1)
-        source_date = _date_key(yesterday)
-        cached = self.data.get("screen_diary_context", {})
-        if (
-            isinstance(cached, dict)
-            and cached.get("date") == today
-            and cached.get("source_date") == source_date
-            and not force
-        ):
-            return cached
-        screen_companion_available = False
-        try:
-            screen_companion_available = self._get_screen_companion_plugin() is not None
-        except Exception:
-            screen_companion_available = False
-        if not getattr(self, "enable_yesterday_screen_diary_context", True) or not screen_companion_available:
-            payload = {
-                "date": today,
-                "source_date": source_date,
-                "source": "disabled" if not getattr(self, "enable_yesterday_screen_diary_context", True) else "screen_companion_unavailable",
-                "summary": "",
-                "items": [],
-                "available": False,
-            }
-        else:
-            payload = self._load_yesterday_screen_diary_context(yesterday)
-        async with self._data_lock:
-            self.data["screen_diary_context"] = payload
-            self._save_data_sync()
-        return payload
-
-    def _load_yesterday_screen_diary_context(self, target_date: date) -> dict[str, Any]:
-        today = _today_key()
-        source_date = _date_key(target_date)
-        summary: dict[str, Any] = {}
-        diary_text = ""
-        source = "none"
-        plugin = None
-        try:
-            plugin = self._get_screen_companion_plugin()
-        except Exception:
-            plugin = None
-        if plugin is not None:
-            loader = getattr(plugin, "_load_diary_structured_summary", None)
-            if callable(loader):
-                try:
-                    raw_summary = loader(target_date)
-                    if isinstance(raw_summary, dict):
-                        summary = raw_summary
-                        source = "screen_companion_api"
-                except Exception as exc:
-                    logger.debug("[PrivateCompanion] 读取屏幕昨日结构化日记失败: %s", exc)
-            if not summary:
-                diary_storage = str(getattr(plugin, "diary_storage", "") or "").strip()
-                summary = self._load_screen_diary_summary_file(target_date, diary_storage)
-                if summary:
-                    source = "screen_companion_file"
-            diary_storage = str(getattr(plugin, "diary_storage", "") or "").strip()
-            diary_text = self._load_screen_diary_markdown_file(target_date, diary_storage)
-        if not summary:
-            fallback_dirs = [
-                str(Path(get_astrbot_data_path()) / "plugin_data" / "astrbot_plugin_screen_companion" / "diary"),
-                str(Path(__file__).resolve().parents[2] / "plugin_data" / "astrbot_plugin_screen_companion" / "diary"),
-            ]
-            for fallback_dir in fallback_dirs:
-                summary = self._load_screen_diary_summary_file(target_date, fallback_dir)
-                if summary:
-                    source = "screen_companion_file"
-                    if not diary_text:
-                        diary_text = self._load_screen_diary_markdown_file(target_date, fallback_dir)
-                    break
-                if not diary_text:
-                    diary_text = self._load_screen_diary_markdown_file(target_date, fallback_dir)
-        items = self._screen_diary_items_from_summary(summary)
-        if not items and diary_text:
-            items = self._screen_diary_items_from_markdown(diary_text)
-            if items and source == "none":
-                source = "screen_companion_markdown"
-        max_chars = max(200, _safe_int(getattr(self, "screen_diary_context_max_chars", 700), 700, 200, 1600))
-        summary_text = self._format_screen_diary_context_items(source_date, items, max_chars=max_chars)
-        return {
-            "date": today,
-            "source_date": source_date,
-            "source": source,
-            "summary": summary_text,
-            "items": items[:8],
-            "available": bool(summary_text),
-        }
 
     def _load_screen_diary_summary_file(self, target_date: date, diary_dir: str = "") -> dict[str, Any]:
         if not diary_dir:
@@ -2608,36 +2501,6 @@ class DailyStateMixin:
         text = str(payload.get("summary") or "")
         if not text:
             return None
-        if any(token in text for token in ("编程", "调试", "查资料")):
-            return (
-                "user_yesterday_screen_diary",
-                "昨日节奏残留",
-                "昨天用户在电脑前专注处理代码或资料,今天对方可能还带着一点用脑后的疲惫",
-                "留意,克制",
-                -3,
-                10,
-                "来自昨日屏幕观察日记的脱敏节奏摘要",
-            )
-        if any(token in text for token in ("视频", "直播", "游戏")):
-            return (
-                "user_yesterday_screen_diary",
-                "昨日节奏残留",
-                "昨天用户有一段偏放松的电脑时间,今天可以把话题放得轻一点",
-                "松弛",
-                1,
-                8,
-                "来自昨日屏幕观察日记的脱敏节奏摘要",
-            )
-        if any(token in text for token in ("社交消息", "聊天")):
-            return (
-                "user_yesterday_screen_diary",
-                "昨日节奏残留",
-                "昨天用户处理过不少社交消息,今天靠近时更适合少一点压迫感",
-                "轻一点",
-                -1,
-                8,
-                "来自昨日屏幕观察日记的脱敏节奏摘要",
-            )
         return None
 
     def _format_screen_diary_context_items(self, source_date: str, items: list[str], *, max_chars: int) -> str:
@@ -2656,18 +2519,6 @@ class DailyStateMixin:
         lines.append("使用边界：只把它当作昨日生活节奏背景，影响今天的体力、作息和话题倾向；不要直接说“我昨天看到你”，不要复述窗口名、账号、聊天内容或具体隐私。")
         text = "\n".join(lines)
         return text[:max_chars]
-
-    def _format_yesterday_screen_diary_context_for_prompt(self) -> str:
-        if not getattr(self, "enable_yesterday_screen_diary_context", True):
-            return "未启用。"
-        payload = self.data.get("screen_diary_context", {})
-        if not isinstance(payload, dict) or payload.get("date") != _today_key():
-            return "暂无可用的昨日屏幕观察日记。"
-        max_chars = max(200, _safe_int(getattr(self, "screen_diary_context_max_chars", 700), 700, 200, 1600))
-        text = str(payload.get("summary") or "").strip()
-        if len(text) > max_chars:
-            text = text[:max_chars]
-        return text or "暂无可用的昨日屏幕观察日记。"
 
     async def _fetch_own_weather_prompt(self) -> dict[str, str]:
         if not self.weather_api_key:
@@ -4247,7 +4098,6 @@ class DailyStateMixin:
 
     async def _generate_daily_plan(self) -> dict[str, Any]:
         await self._ensure_yesterday_conversation_summary()
-        await self._ensure_yesterday_screen_diary_context()
         await self._maybe_settle_skill_growth(force=True)
         return await generate_daily_plan(self)
 
@@ -4436,7 +4286,7 @@ class DailyStateMixin:
         raw = await self._llm_call(
             prompt,
             max_tokens=650,
-            provider_id=self._task_provider(self.history_summary_provider_id, self.daily_plan_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="yesterday_summary",
         )
         payload = self._extract_json_payload(raw or "")
@@ -5936,10 +5786,6 @@ class DailyStateMixin:
             if not any(item["name"] == name for item in catalog):
                 catalog.append({"name": name, "category": category, "keywords": keywords})
 
-        for raw in re.split(r"[,，、\n]+", str(self.skill_growth_custom_skills or "")):
-            name = _single_line(raw, 24)
-            if name:
-                add(name, "自定义", [name])
         if any(token in text for token in ("学生", "上课", "学校", "高中", "初中", "大学", "作业", "考试")):
             subject_keywords = {
                 "语文": ["语文", "作文", "阅读理解", "文言文", "课文"],
@@ -6942,7 +6788,7 @@ class DailyStateMixin:
                 source_text,
             )
             action = _single_line(payload.get("action"), 24) or "message"
-            if action not in {"message", "screen_peek", "photo_text", "voice", "jm_cosmos_read"}:
+            if action not in {"message", "photo_text", "voice", "jm_cosmos_read"}:
                 action = "message"
             if not self._friend_can_receive_proactive_reason(user, reason, action):
                 reason = "check_in"
@@ -8539,7 +8385,6 @@ class DailyStateMixin:
     async def _run_proactive_maintenance_tasks(self) -> None:
         for label, task_factory in (
             ("技能成长结算", self._maybe_settle_skill_growth),
-            ("B站无聊观看", self._maybe_trigger_bilibili_boredom_watch),
             ("网页探索", self._maybe_trigger_web_exploration),
             ("AI日报追踪", self._maybe_track_ai_daily),
             ("新闻无聊阅读", self._maybe_trigger_news_boredom_read),
@@ -8559,8 +8404,6 @@ class DailyStateMixin:
             if isinstance(runtime, dict):
                 runtime["last_tick_started_at"] = _now_ts()
                 runtime["last_tick_error"] = ""
-            if self._maybe_schedule_bilibili_video_share():
-                self._save_data_sync()
             users = list(self.data.get("users", {}).items())
 
         for user_id, user in users:
@@ -9692,8 +9535,6 @@ class DailyStateMixin:
                         current["pending_followup_event"] = next_chain_followup
                 if reason == "group_share":
                     current["group_share_context"] = {}
-                if reason == "bili_video_share":
-                    current["bilibili_video_context"] = {}
                 if reason == "news_share":
                     current["news_context"] = {}
                 if reason == "web_exploration_share":
@@ -9725,11 +9566,7 @@ class DailyStateMixin:
                     elif followup_kind in {"suspended_opener", "chain_followup"} or opener_mode == "name_only":
                         current["pending_followup_event"] = {}
                     else:
-                        current["pending_followup_event"] = self._maybe_make_unanswered_screen_peek_event(
-                            current,
-                            reason,
-                            current["last_proactive_action"],
-                        ) or self._maybe_make_followup_event(
+                        current["pending_followup_event"] = self._maybe_make_followup_event(
                             current,
                             reason,
                             current["last_proactive_action"],

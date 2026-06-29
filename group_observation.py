@@ -2375,7 +2375,7 @@ class GroupObservationMixin:
         generated = await self._llm_call(
             prompt,
             max_tokens=80,
-            provider_id=self._task_provider(self.group_interject_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="group_interject",
         )
         reply = self._clean_group_interjection_reply(generated)
@@ -2470,7 +2470,7 @@ class GroupObservationMixin:
             raw = await self._llm_call(
                 prompt,
                 max_tokens=420,
-                provider_id=self._task_provider(self.group_episode_provider_id, self.mai_style_provider_id),
+                provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                 task="group_episode",
             )
             payload = self._extract_json_payload(raw or "")
@@ -2591,7 +2591,7 @@ class GroupObservationMixin:
             raw = await self._llm_call(
                 prompt,
                 max_tokens=560,
-                provider_id=self._task_provider(self.group_slang_provider_id, self.mai_style_provider_id),
+                provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                 task="group_slang",
             )
             payload = self._extract_json_payload(raw or "")

@@ -1140,7 +1140,6 @@ class UserMemoryMixin:
             "poke": ("戳", "戳一戳"),
             "voice": ("语音", "发语音", "声音"),
             "photo_text": ("图片", "照片", "图"),
-            "screen_peek": ("看屏幕", "窥屏", "看我屏幕", "屏幕"),
         }
         negative = ("别", "不要", "不许", "讨厌", "少", "别再", "不喜欢")
         positive = ("喜欢", "可以", "多", "想要", "爱看", "爱听")
@@ -1853,7 +1852,6 @@ class UserMemoryMixin:
             "poke": "戳一戳",
             "voice": "语音",
             "photo_text": "图片",
-            "screen_peek": "看屏幕",
         }
         lines = []
         for action, item in prefs.items():
@@ -2043,10 +2041,7 @@ class UserMemoryMixin:
 
     def _emotion_judgement_provider_id(self) -> str:
         return self._task_provider(
-            getattr(self, "emotion_judgement_provider_id", ""),
-            getattr(self, "troubleshooting_provider_id", ""),
-            getattr(self, "relationship_analysis_provider_id", ""),
-            getattr(self, "mai_style_provider_id", ""),
+            getattr(self, "aux_provider_id", ""),
             getattr(self, "llm_provider_id", ""),
         )
 
@@ -2802,7 +2797,7 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
             raw = await self._llm_call(
                 prompt,
                 max_tokens=520,
-                provider_id=self._task_provider(self.dialogue_episode_provider_id, self.mai_style_provider_id),
+                provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                 task="dialogue_episode",
             )
             payload = self._extract_json_payload(raw or "")
@@ -3088,7 +3083,7 @@ open_loops 只写之后仍需要回头处理、确认、兑现的事；普通“
             raw = await self._llm_call(
                 prompt,
                 max_tokens=560,
-                provider_id=self._task_provider(self.companion_memory_provider_id, self.mai_style_provider_id),
+                provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
                 task="memory_profile",
             )
             payload = self._extract_json_payload(raw or "")
@@ -3420,7 +3415,7 @@ Bot 主动后用户回复次数：{reply_count}
         raw_text = await self._llm_call(
             prompt,
             max_tokens=220,
-            provider_id=self._task_provider(self.relationship_analysis_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="relationship",
         )
         payload = self._extract_json_payload(raw_text or "")
@@ -3494,14 +3489,13 @@ Bot 主动后用户回复次数：{reply_count}
         if not isinstance(raw, dict) or not raw:
             return "暂无样本"
         labels = {
-            "screen_peek": "窥屏",
             "photo_text": "发图",
             "poke": "戳一戳",
             "voice": "语音",
             "jm_cosmos_read": "私下阅读",
         }
         parts = []
-        for key in ("screen_peek", "photo_text", "poke", "voice", "jm_cosmos_read"):
+        for key in ("photo_text", "poke", "voice", "jm_cosmos_read"):
             stats = raw.get(key)
             if not isinstance(stats, dict):
                 continue

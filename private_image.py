@@ -840,7 +840,7 @@ class PrivateImageMixin:
         prompt = str(provider_settings.get("image_caption_prompt") or "").strip()
         if astrbot_provider_id:
             return astrbot_provider_id, "astrbot_image_caption", prompt
-        fallback_provider_id = self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id)
+        fallback_provider_id = self._task_provider(self.aux_provider_id, self.llm_provider_id)
         if fallback_provider_id:
             return fallback_provider_id, "plugin_vision", prompt
         default_provider_id = self._default_chat_provider_id(umo)
@@ -863,7 +863,7 @@ class PrivateImageMixin:
         prompt = str(provider_settings.get("image_caption_prompt") or "").strip()
         return [
             (_single_line(provider_settings.get("default_image_caption_provider_id"), 160), "astrbot_image_caption", prompt),
-            (self._task_provider(getattr(self, "plugin_vision_provider_id", ""), self.narration_provider_id), "plugin_vision", prompt),
+            (self._task_provider(self.aux_provider_id, self.llm_provider_id), "plugin_vision", prompt),
             (self._task_provider(self.llm_provider_id), "plugin_main", prompt),
             (self._default_chat_provider_id(umo), "astrbot_default", prompt),
         ]
@@ -1772,7 +1772,7 @@ class PrivateImageMixin:
         return ""
 
     def _message_debounce_seconds(self, kind: str = "text") -> float:
-        if not bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True))):
+        if not bool(getattr(self, "enable_message_debounce", True)):
             return 0.0
         text_wait = _safe_float(getattr(self, "text_message_debounce_seconds", 0.0), 0.0, 0.0)
         if kind == "image":
@@ -1792,7 +1792,7 @@ class PrivateImageMixin:
             return ""
         force_consume = False
         if private_chat:
-            if not bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True))):
+            if not bool(getattr(self, "enable_message_debounce", True)):
                 return ""
             scope = f"private:{sender_id}"
             key = self._semantic_buffer_key(scope, sender_id)

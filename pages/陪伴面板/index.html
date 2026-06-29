@@ -87,21 +87,19 @@
     </section>
 
     <section class="layout">
-      <nav class="annotations" aria-label="视图">
-        <div class="annot-axis" aria-hidden="true"></div>
-        <button class="tab is-active" data-tab="dashboard"><i>01</i><span>总览</span></button>
-        <button class="tab" data-tab="roleplay"><i>02</i><span>角色设定</span></button>
-        <button class="tab" data-tab="private"><i>03</i><span>私聊</span></button>
-        <button class="tab" data-tab="group"><i>04</i><span>群聊</span></button>
-        <button class="tab" data-tab="worldbook"><i>05</i><span>关系网</span></button>
-        <button class="tab" data-tab="memory"><i>06</i><span>观察</span></button>
-        <button class="tab" data-tab="proactive"><i>07</i><span>主动</span></button>
-        <button class="tab" data-tab="bookshelf"><i>08</i><span>书柜</span></button>
-        <button class="tab" data-tab="tokens"><i>09</i><span>Token</span></button>
-        <button class="tab" data-tab="troubleshooting"><i>10</i><span>排障</span></button>
-        <button class="tab" data-tab="modules"><i>11</i><span>模块</span></button>
-        <button class="tab" data-tab="config"><i>12</i><span>配置</span></button>
-        <button class="tab" data-tab="models"><i>13</i><span>模型</span></button>
+      <nav class="tabs" aria-label="视图">
+        <button class="tab is-active" data-tab="dashboard">总览</button>
+        <button class="tab" data-tab="roleplay">角色设定</button>
+        <button class="tab" data-tab="private">私聊</button>
+        <button class="tab" data-tab="group">群聊</button>
+        <button class="tab" data-tab="worldbook">关系网</button>
+        <button class="tab" data-tab="memory">观察</button>
+        <button class="tab" data-tab="proactive">主动</button>
+        <button class="tab" data-tab="bookshelf">书柜</button>
+        <button class="tab" data-tab="tokens">Token</button>
+        <button class="tab" data-tab="troubleshooting">排障</button>
+        <button class="tab" data-tab="modules">模块</button>
+        <button class="tab" data-tab="config">配置</button>
       </nav>
 
       <section class="panel is-active" id="panel-dashboard">
@@ -813,7 +811,7 @@ QQ空间 = 公开札记
         <section class="module-tuning-note">
           <div>
             <b>常用模块集中在这里。</b>
-            <span>日常查看、整理和快速操作都可以从这里开始；需要细调参数时再进入配置或模型页。</span>
+            <span>日常查看、整理和快速操作都可以从这里开始；需要细调参数时再进入配置页。</span>
           </div>
           <button type="button" data-jump-tab="config">打开配置页</button>
         </section>
@@ -885,7 +883,7 @@ QQ空间 = 公开札记
                 <h3>外部主动能力</h3>
                 <p>第三方插件注册的主动能力在这里管理；它们不是普通配置项，而是可加入候选池的能力卡。</p>
               </div>
-              <button type="button" data-jump-tab="models">查看相关模型</button>
+              <button type="button" data-jump-tab="config">查看相关配置</button>
             </header>
             <div id="externalAbilityList" class="external-ability-grid"></div>
           </article>
@@ -953,9 +951,6 @@ QQ空间 = 公开札记
               <label data-fixed-text-debounce-field>文本补话等待秒数 <input name="text_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
               <label>图片补话等待秒数 <input name="image_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
               <label>转发补话等待秒数 <input name="forward_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
-              <label class="toggle-row"><input name="enable_unanswered_screen_peek_followup" type="checkbox" /> <span>主动后沉默时可窥屏</span></label>
-              <label>沉默多久后窥屏 <input name="unanswered_screen_peek_after_minutes" type="number" min="10" max="240" /></label>
-              <label>沉默窥屏冷却分钟 <input name="unanswered_screen_peek_cooldown_minutes" type="number" min="30" max="1440" /></label>
               <div class="module-subgroup wide-field image-cache-entry">
                 <h3>图片/表情包缓存</h3>
                 <p class="section-desc">管理已缓存的图片视觉摘要，修正误识别表情包或删除旧缓存后可让下次重新识图。</p>
@@ -1115,14 +1110,6 @@ QQ空间 = 公开札记
             </div>
             <form id="longTermModuleForm" class="module-form">
               <div class="module-subgroup">
-                <h3>B 站 Bot 联动</h3>
-                <label class="toggle-row"><input name="enable_bilibili_integration" type="checkbox" /> <span>启用 B 站 Bot 协同</span></label>
-                <label class="toggle-row"><input name="enable_bilibili_boredom_watch" type="checkbox" /> <span>无聊时触发刷 B 站</span></label>
-                <label>B 站触发最小间隔小时 <input name="bilibili_boredom_min_interval_hours" type="number" min="2" max="72" /></label>
-                <label>视频分享概率（%） <input name="bilibili_share_probability" type="number" min="0" max="100" step="1" /></label>
-                <label>视频分享最低评分 <input name="bilibili_share_min_score" type="number" min="0" max="10" /></label>
-              </div>
-              <div class="module-subgroup">
                 <h3>QQ 空间动态</h3>
                 <label class="toggle-row"><input name="enable_qzone_integration" type="checkbox" /> <span>启用 QQ 空间动态层</span></label>
                 <label class="toggle-row"><input name="enable_qzone_life_publish" type="checkbox" /> <span>低频发布生活说说</span></label>
@@ -1225,7 +1212,6 @@ QQ空间 = 公开札记
               <label><input type="checkbox" data-export-section="basic" checked /> 基础配置</label>
               <label><input type="checkbox" data-export-section="relations" checked /> 关系/群资料</label>
               <label><input type="checkbox" data-export-section="food_skills" checked /> 候选菜单/技能</label>
-              <label><input type="checkbox" data-export-section="providers" /> 模型配置</label>
               <label><input type="checkbox" data-export-section="sensitive" /> 敏感配置</label>
             </div>
             <div class="migration-flow">
@@ -1314,30 +1300,6 @@ QQ空间 = 公开札记
         </div>
       </section>
 
-      <section class="panel" id="panel-models">
-        <div class="section-head">
-          <h2>分项能力模型</h2>
-          <span class="muted">模型分流</span>
-        </div>
-        <div id="providerSummary" class="provider-summary"></div>
-        <div id="providerFlow" class="provider-flow"></div>
-        <div class="provider-toolbar">
-          <input id="providerFilter" type="search" placeholder="筛选模型名称 / 配置键 / 用途 / 低延迟 / 效果" />
-          <div class="provider-mode-switch" aria-label="模型配置筛选">
-            <button type="button" data-provider-mode="all" class="active">全部</button>
-            <button type="button" data-provider-mode="configured">已配置</button>
-            <button type="button" data-provider-mode="inherited">自动回退</button>
-            <button type="button" data-provider-mode="speed">低延迟优先</button>
-            <button type="button" data-provider-mode="quality">效果优先</button>
-            <button type="button" data-provider-mode="vision">视觉/外部</button>
-          </div>
-          <div class="provider-toolbar-actions">
-            <button id="testAllProvidersBtn" type="button">测试全部模型</button>
-            <button id="saveProvidersBtn" type="button">保存模型配置</button>
-          </div>
-        </div>
-        <form id="providerForm" class="provider-groups"></form>
-      </section>
     </section>
   </main>
 

@@ -106,6 +106,7 @@ from .helpers import (
     _now_ts,
     _safe_float,
     _safe_int,
+    _set_into_config,
     _set_today_key_timezone,
     _set_into_config,
     _single_line,
@@ -450,7 +451,40 @@ class PrivateCompanionPlugin(
         return _flat_get(config, key, default)
 
     @staticmethod
+    def _cleanup_orphaned_top_level_config_keys(config: AstrBotConfig) -> None:
+        """移除已保存配置中不属于 schema 顶层的孤立 key。"""
+        try:
+            schema_path = Path(__file__).with_name("_conf_schema.json")
+            with open(schema_path, "r", encoding="utf-8") as f:
+                schema = json.load(f)
+            valid_top_keys = set(schema.keys())
+            if not isinstance(config, dict):
+                return
+            orphaned = [k for k in list(config.keys()) if k not in valid_top_keys]
+            for k in orphaned:
+                try:
+                    del config[k]
+                except Exception:
+                    pass
+            if orphaned:
+                logger.info(
+                    "[PrivateCompanion] 已清理 %d 个孤立顶层配置项: %s",
+                    len(orphaned),
+                    ", ".join(orphaned[:10]),
+                )
+                # 保存清理后的配置
+                save = getattr(config, "save_config", None)
+                if callable(save):
+                    try:
+                        save()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 清理孤立顶层 key 失败: %s", exc)
+
+    @staticmethod
     def _cfg_bool(config: AstrBotConfig, key: str, default: bool = True) -> bool:
+        value = _flat_get(config, key, default)
         value = _flat_get(config, key, default)
         if isinstance(value, str):
             text = value.strip().lower()
@@ -501,6 +535,8 @@ class PrivateCompanionPlugin(
             schema_path=Path(__file__).with_name("_conf_schema.json"),
             logger=logger,
         )
+        # 清理已保存配置中不属于 schema 顶层的孤立 key，避免 AstrBot 设置页显示异常
+        self._cleanup_orphaned_top_level_config_keys(c)
 
         self.enabled = self._cfg_bool(c, "enabled", True)
         self.enable_proactive_only_mode = self._cfg_bool(c, "enable_proactive_only_mode", False)
@@ -535,12 +571,7 @@ class PrivateCompanionPlugin(
             self.recall_forbidden_scope = "bot_and_group"
         self._recalled_message_ids: dict[str, dict[str, Any]] = {}
         self._recall_message_cache: dict[str, dict[str, Any]] = {}
-        self.enable_message_debounce = self._cfg_bool(
-            c,
-            "enable_message_debounce",
-            self._cfg_bool(c, "enable_semantic_message_debounce", True),
-        )
-        self.enable_semantic_message_debounce = self.enable_message_debounce
+        self.enable_message_debounce = self._cfg_bool(c, "enable_message_debounce", True)
         self.enable_smart_message_debounce = self._cfg_bool(c, "enable_smart_message_debounce", False)
         self.smart_message_debounce_provider_id = self._cfg_str(c, "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "")
         self.smart_message_debounce_wait_seconds = self._cfg_float(c, "smart_message_debounce_wait_seconds", 3.0, 0.0)
@@ -555,7 +586,6 @@ class PrivateCompanionPlugin(
         self.forward_message_debounce_seconds = self._cfg_float(c, "forward_message_debounce_seconds", 0.0, 0.0)
         self.text_message_debounce_max_wait_seconds = self._cfg_float(c, "text_message_debounce_max_wait_seconds", 12.0, 0.0)
         self.message_debounce_max_merge_messages = self._cfg_int(c, "message_debounce_max_merge_messages", 8, 0, 30)
-        self.semantic_message_debounce_seconds = self.text_message_debounce_seconds
         self.private_image_vision_wait_seconds = self._cfg_float(c, "private_image_vision_wait_seconds", 30.0, 0.0)
         self.private_image_provider_timeout_seconds = self._cfg_float(c, "private_image_provider_timeout_seconds", 12.0, 3.0)
         self.enable_private_image_self_recognition = self._cfg_bool(c, "enable_private_image_self_recognition", True)
@@ -605,7 +635,6 @@ class PrivateCompanionPlugin(
         self.daily_token_soft_limit = self._cfg_int(c, "daily_token_soft_limit", legacy_soft_limit, 0)
         self.enable_maintenance_token_saver = self.enable_daily_token_soft_limit
         self.maintenance_token_soft_limit = self.daily_token_soft_limit
-        self.daily_plan_provider_id = self._cfg_str(c, "DAILY_PLAN_PROVIDER_ID", "")
         self.enable_daily_plan = self._cfg_bool(c, "enable_daily_plan", True)
         self.daily_plan_time = self._cfg_str(c, "daily_plan_time", "07:30")
         self.bot_name = self._cfg_str(c, "bot_name", "小星", "小星")
@@ -637,15 +666,7 @@ class PrivateCompanionPlugin(
         self.rest_reply_awake_grace_minutes = self._cfg_int(c, "rest_reply_awake_grace_minutes", 30, 0, 240)
         self.enable_rest_backlog_reply = self._cfg_bool(c, "enable_rest_backlog_reply", True)
         self.rest_backlog_max_messages = self._cfg_int(c, "rest_backlog_max_messages", 4, 1, 12)
-        self.rest_wakeup_provider_id = self._cfg_str(c, "REST_WAKEUP_PROVIDER_ID", "")
         self.enable_enhanced_dreams = self._cfg_bool(c, "enable_enhanced_dreams", False)
-        self.dream_diary_provider_id = self._cfg_str(
-            c,
-            "DREAM_DIARY_PROVIDER_ID",
-            self._cfg_str(c, "DREAM_PROVIDER_ID", self._cfg_str(c, "DIARY_PROVIDER_ID", "")),
-        )
-        self.dream_provider_id = self.dream_diary_provider_id
-        self.diary_provider_id = self.dream_diary_provider_id
         self.dream_afterglow_mode = self._cfg_str(c, "dream_afterglow_mode", "auto", "auto")
         if self.dream_afterglow_mode not in {"auto", "轻", "标准", "明显"}:
             self.dream_afterglow_mode = "auto"
@@ -660,9 +681,6 @@ class PrivateCompanionPlugin(
         self.enable_passive_state_delta_injection = self._cfg_bool(c, "enable_passive_state_delta_injection", True)
         self.passive_injection_position = self._normalize_passive_injection_position(
             self._cfg_str(c, "passive_injection_position", "prompt")
-        )
-        self.framework_session_lock_mode = self._normalize_framework_session_lock_mode(
-            self._cfg_str(c, "framework_session_lock_mode", "auto", "auto")
         )
         self.proactive_share_probability = self._cfg_int(c, "proactive_share_probability", 45, 0, 100) / 100
         self.enable_daily_greetings = self._cfg_bool(c, "enable_daily_greetings", True)
@@ -682,9 +700,6 @@ class PrivateCompanionPlugin(
         self.creative_base_chars_per_hour = self.creative_chars_per_session
         self.creative_max_active_projects = self._cfg_int(c, "creative_max_active_projects", 2, 1, 5)
         self.creative_hidden_mode = self._cfg_bool(c, "creative_hidden_mode", True)
-        self.creative_provider_id = self._cfg_str(c, "CREATIVE_PROVIDER_ID", "")
-        self.voice_prompt_provider_id = self._cfg_str(c, "VOICE_PROMPT_PROVIDER_ID", "")
-        self.history_summary_provider_id = self._cfg_str(c, "HISTORY_SUMMARY_PROVIDER_ID", "")
         self.enable_llm_proactive_message = self._cfg_bool(c, "enable_llm_proactive_message", True)
         self.enable_llm_proactive_persona_judge = self._cfg_bool(c, "enable_llm_proactive_persona_judge", True)
         self.proactive_persona_judge_provider_id = self._cfg_str(c, "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "")
@@ -745,9 +760,6 @@ class PrivateCompanionPlugin(
         self._recent_inbound_message_debounce: dict[str, float] = {}
         self._semantic_message_buffers: dict[str, dict[str, Any]] = {}
         self.enable_detail_enhancement = self._cfg_bool(c, "enable_detail_enhancement", False)
-        self.detail_enhancement_provider_id = self._cfg_str(c, "DETAIL_ENHANCEMENT_PROVIDER_ID", "")
-        self.narration_provider_id = self._cfg_str(c, "NARRATION_PROVIDER_ID", "")
-        self.photo_prompt_provider_id = self._cfg_str(c, "PHOTO_PROMPT_PROVIDER_ID", "")
         self.comfyui_photo_workflow_name = self._cfg_str(c, "COMFYUI_PHOTO_WORKFLOW_NAME", "")
         self.comfyui_text2img_workflow_name = self._cfg_str(c, "COMFYUI_TEXT2IMG_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
         self.comfyui_selfie_workflow_name = self._cfg_str(c, "COMFYUI_SELFIE_WORKFLOW_NAME", self.comfyui_photo_workflow_name)
@@ -783,7 +795,6 @@ class PrivateCompanionPlugin(
         self.weather_lat = self._cfg_float(c, "weather_lat", 0.0, -90.0)
         self.weather_lon = self._cfg_float(c, "weather_lon", 0.0, -180.0)
         self.weather_refresh_minutes = self._cfg_int(c, "weather_refresh_minutes", 90, 10, 720)
-        self.enable_yesterday_screen_diary_context = self._cfg_bool(c, "enable_yesterday_screen_diary_context", True)
         self.screen_diary_context_max_chars = self._cfg_int(c, "screen_diary_context_max_chars", 700, 200, 1600)
         self.detail_enhancement_lead_minutes = self._cfg_int(c, "detail_enhancement_lead_minutes", 3, 0, 180)
         self.enable_daily_diary = self._cfg_bool(c, "enable_daily_diary", True)
@@ -792,14 +803,10 @@ class PrivateCompanionPlugin(
         self.important_date_lookahead_days = self._cfg_int(c, "important_date_lookahead_days", 7, 0, 60)
         legacy_actions = self._parse_action_list(self._cfg_raw(c, "enabled_proactive_actions", None))
         legacy_photo_enabled = "photo_text" in legacy_actions if legacy_actions else True
-        legacy_screen_enabled = "screen_peek" in legacy_actions if legacy_actions else False
         legacy_poke_enabled = "poke" in legacy_actions if legacy_actions else False
         legacy_voice_enabled = "voice" in legacy_actions if legacy_actions else False
         self.enable_photo_text_action = self._cfg_bool(
             c, "enable_photo_text_action", bool(self._cfg_raw(c, "allow_photo_text_action", legacy_photo_enabled))
-        )
-        self.enable_screen_glance_action = self._cfg_bool(
-            c, "enable_screen_glance_action", bool(self._cfg_raw(c, "allow_screen_peek_action", legacy_screen_enabled))
         )
         self.enable_poke_action = self._cfg_bool(
             c, "enable_poke_action", bool(self._cfg_raw(c, "allow_poke_action", legacy_poke_enabled))
@@ -812,11 +819,6 @@ class PrivateCompanionPlugin(
         self.voice_action_max_chars = self._cfg_int(c, "voice_action_max_chars", 30, 6, 80)
         self.photo_action_max_daily = self._cfg_int(c, "photo_action_max_daily", 1, 0, 5)
         self.proactive_photo_text_probability = self._cfg_int(c, "proactive_photo_text_probability", 18, 0, 100) / 100
-        self.screen_peek_max_daily = self._cfg_int(c, "screen_peek_max_daily", 1, 0, 5)
-        self.screen_peek_cooldown_minutes = self._cfg_int(c, "screen_peek_cooldown_minutes", 240, 0, 1440)
-        self.enable_unanswered_screen_peek_followup = self._cfg_bool(c, "enable_unanswered_screen_peek_followup", True)
-        self.unanswered_screen_peek_after_minutes = self._cfg_int(c, "unanswered_screen_peek_after_minutes", 45, 10, 240)
-        self.unanswered_screen_peek_cooldown_minutes = self._cfg_int(c, "unanswered_screen_peek_cooldown_minutes", 180, 30, 1440)
         self.enable_mai_style_integration = self._cfg_bool(c, "enable_mai_style_integration", True)
         self.enable_companion_memory = self._cfg_bool(c, "enable_companion_memory", True)
         self.enable_expression_learning = self._cfg_bool(c, "enable_expression_learning", True)
@@ -857,20 +859,13 @@ class PrivateCompanionPlugin(
         self.user_habit_max_items = self._cfg_int(c, "user_habit_max_items", 24, 8, 80)
         self.enable_skill_growth_simulation = self._cfg_bool(c, "enable_skill_growth_simulation", True)
         self.skill_growth_rate = self._cfg_float(c, "skill_growth_rate", 1.0, 0.1)
-        self.skill_growth_custom_skills = self._cfg_str(c, "skill_growth_custom_skills", "")
         self.enable_skill_growth_passive_injection = self._cfg_bool(c, "enable_skill_growth_passive_injection", False)
         self.enable_skill_growth_schedule_influence = self._cfg_bool(c, "enable_skill_growth_schedule_influence", True)
         self.skill_growth_schedule_influence_strength = self._cfg_unit_interval(c, "skill_growth_schedule_influence_strength", 0.35, 0.0)
         self.memory_refresh_interval_minutes = self._cfg_int(c, "memory_refresh_interval_minutes", 360, 30, 4320)
         self.max_companion_memory_items = self._cfg_int(c, "max_companion_memory_items", 36, 8, 120)
         self.max_learned_expression_items = self._cfg_int(c, "max_learned_expression_items", 18, 4, 60)
-        self.mai_style_provider_id = self._cfg_str(c, "MAI_STYLE_PROVIDER_ID", "")
-        self.companion_memory_provider_id = self._cfg_str(c, "COMPANION_MEMORY_PROVIDER_ID", "")
-        self.dialogue_episode_provider_id = self._cfg_str(c, "DIALOGUE_EPISODE_PROVIDER_ID", "")
-        self.relationship_analysis_provider_id = self._cfg_str(c, "RELATIONSHIP_ANALYSIS_PROVIDER_ID", "")
-        self.response_review_provider_id = self._cfg_str(c, "RESPONSE_REVIEW_PROVIDER_ID", "")
-        self.troubleshooting_provider_id = self._cfg_str(c, "TROUBLESHOOTING_PROVIDER_ID", "")
-        self.emotion_judgement_provider_id = self._cfg_str(c, "EMOTION_JUDGEMENT_PROVIDER_ID", "")
+        self.aux_provider_id = self._cfg_str(c, "AUX_PROVIDER_ID", "")
         self.response_review_max_chars = self._cfg_int(c, "response_review_max_chars", 260, 80, 900)
         self.passive_topic_memory_hours = self._cfg_int(c, "passive_topic_memory_hours", 8, 1, 72)
         self.episode_memory_refresh_messages = self._cfg_int(c, "episode_memory_refresh_messages", 8, 3, 40)
@@ -897,7 +892,6 @@ class PrivateCompanionPlugin(
             self.forward_message_mode = "transcribe"
         elif self.forward_message_mode not in {"inject", "transcribe"}:
             self.forward_message_mode = "inject"
-        self.forward_message_provider_id = self._cfg_str(c, "FORWARD_MESSAGE_PROVIDER_ID", "")
         self.forward_message_max_messages = self._cfg_int(c, "forward_message_max_messages", 80, 5, 300)
         self.forward_message_max_chars = self._cfg_int(c, "forward_message_max_chars", 5000, 800, 20000)
         self.forward_message_parse_nested = self._cfg_bool(c, "forward_message_parse_nested", True)
@@ -990,17 +984,8 @@ class PrivateCompanionPlugin(
         self.worldbook_auto_pending_observations = self._cfg_bool(c, "worldbook_auto_pending_observations", True)
         self.worldbook_member_inject_limit = self._cfg_int(c, "worldbook_member_inject_limit", 6, 1, 20)
         self.worldbook_config_paths = self._cfg_str(c, "worldbook_config_paths", "")
-        self.group_interject_provider_id = self._cfg_str(c, "GROUP_INTERJECT_PROVIDER_ID", "")
-        self.group_episode_provider_id = self._cfg_str(c, "GROUP_EPISODE_PROVIDER_ID", "")
-        self.group_slang_provider_id = self._cfg_str(c, "GROUP_SLANG_PROVIDER_ID", "")
-        self.group_followup_judge_provider_id = self._cfg_str(c, "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID", "")
         self.enable_livingmemory_integration = self._cfg_bool(c, "enable_livingmemory_integration", True)
         self.livingmemory_tool_name = self._cfg_str(c, "livingmemory_tool_name", "recall_long_term_memory", "recall_long_term_memory")
-        self.enable_bilibili_integration = self._cfg_bool(c, "enable_bilibili_integration", True)
-        self.enable_bilibili_boredom_watch = self._cfg_bool(c, "enable_bilibili_boredom_watch", True)
-        self.bilibili_boredom_min_interval_hours = self._cfg_int(c, "bilibili_boredom_min_interval_hours", 8, 2, 72)
-        self.bilibili_share_probability = self._cfg_unit_interval(c, "bilibili_share_probability", 0.35, 0.0)
-        self.bilibili_share_min_score = self._cfg_int(c, "bilibili_share_min_score", 7, 0, 10)
         self.enable_news_integration = self._cfg_bool(c, "enable_news_integration", False)
         self.enable_news_boredom_read = self._cfg_bool(c, "enable_news_boredom_read", True)
         self.enable_news_daily_hot_read = self._cfg_bool(c, "enable_news_daily_hot_read", self._cfg_bool(c, "enable_hot_trend_sources", True))
@@ -1014,9 +999,6 @@ class PrivateCompanionPlugin(
         self.news_hot_max_items = self._cfg_int(c, "news_hot_max_items", self._cfg_int(c, "hot_trend_max_items", 12, 3, 30), 3, 30)
         self.enable_ai_daily_watch = self._cfg_bool(c, "enable_ai_daily_watch", True)
         self.ai_daily_sources = self._cfg_str(c, "ai_daily_sources", DEFAULT_AI_DAILY_SOURCES)
-        self.ai_daily_source_uid = re.sub(r"\D+", "", self._cfg_str(c, "ai_daily_source_uid", "285286947")) or "285286947"
-        self.ai_daily_check_window = self._cfg_str(c, "ai_daily_check_window", "07:30-12:30")
-        self.ai_daily_check_interval_minutes = self._cfg_int(c, "ai_daily_check_interval_minutes", 40, 10, 240)
         self.ai_daily_prefer_text_version = self._cfg_bool(c, "ai_daily_prefer_text_version", True)
         self.news_sources = self._cfg_str(
             c,
@@ -1025,7 +1007,6 @@ class PrivateCompanionPlugin(
         )
         if str(self.news_sources or "").strip() in {LEGACY_DEFAULT_NEWS_SOURCES, PREVIOUS_TECH_DEFAULT_NEWS_SOURCES}:
             self.news_sources = DEFAULT_NEWS_SOURCES
-        self.news_provider_id = self._cfg_str(c, "NEWS_PROVIDER_ID", "")
         self.enable_web_exploration = self._cfg_bool(c, "enable_web_exploration", False)
         self.enable_web_exploration_boredom_search = self._cfg_bool(c, "enable_web_exploration_boredom_search", True)
         self.web_exploration_min_interval_hours = self._cfg_int(c, "web_exploration_min_interval_hours", 8, 1, 168)
@@ -1036,7 +1017,6 @@ class PrivateCompanionPlugin(
             "web_exploration_interests",
             "按 Bot 人格自行决定；可偏向最近聊天、日程、人设兴趣、作品、技术、生活小知识、流行梗、时讯、新鲜事物。",
         )
-        self.web_exploration_provider_id = self._cfg_str(c, "WEB_EXPLORATION_PROVIDER_ID", "")
         self.enable_qzone_integration = self._cfg_bool(c, "enable_qzone_integration", True)
         self.qzone_cookie = self._cfg_str(c, "QZONE_COOKIE", "")
         self.enable_qzone_life_publish = self._cfg_bool(c, "enable_qzone_life_publish", False)
@@ -1117,12 +1097,6 @@ class PrivateCompanionPlugin(
             "private_reading_blocked_tags",
             self._cfg_str(c, "jm_cosmos_blocked_tags", "連載中,長篇,青年漫"),
         )
-        self.plugin_vision_provider_id = self._cfg_str(c, "PLUGIN_VISION_PROVIDER_ID", "")
-        self.jm_cosmos_vision_provider_id = self._cfg_str(
-            c,
-            "PRIVATE_READING_VISION_PROVIDER_ID",
-            self._cfg_str(c, "JM_COSMOS_VISION_PROVIDER_ID", ""),
-        )
         if isinstance(c, dict):
             legacy_private_reading_keys = {
                 "enable_jm_cosmos_integration": "enable_private_reading_integration",
@@ -1132,7 +1106,6 @@ class PrivateCompanionPlugin(
                 "jm_cosmos_share_probability": "private_reading_share_probability",
                 "jm_cosmos_default_keywords": "private_reading_default_keywords",
                 "jm_cosmos_blocked_tags": "private_reading_blocked_tags",
-                "JM_COSMOS_VISION_PROVIDER_ID": "PRIVATE_READING_VISION_PROVIDER_ID",
             }
             for old_key, new_key in legacy_private_reading_keys.items():
                 old_value = self._cfg_raw(c, old_key, None)
@@ -1147,7 +1120,6 @@ class PrivateCompanionPlugin(
         self.max_group_relationship_edges = self._cfg_int(c, "max_group_relationship_edges", 80, 10, 300)
         # Backward-compatible aliases for stored daily plans and older code paths.
         self.allow_photo_text_action = self.enable_photo_text_action
-        self.allow_screen_peek_action = self.enable_screen_glance_action
         self.allow_poke_action = self.enable_poke_action
         self.allow_voice_action = self.enable_voice_action
 
@@ -2677,32 +2649,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return aliases.get(text, text if text in {"auto", "prompt", "system_prompt"} else "prompt")
 
     @staticmethod
-    def _normalize_framework_session_lock_mode(value: Any) -> str:
-        text = str(value or "").strip().lower()
-        aliases = {
-            "auto": "auto",
-            "自动": "auto",
-            "compat": "auto",
-            "compatibility": "auto",
-            "兼容": "auto",
-            "legacy": "auto",
-            "旧版": "auto",
-            "always": "always",
-            "on": "always",
-            "true": "always",
-            "enable": "always",
-            "enabled": "always",
-            "开启": "always",
-            "始终": "always",
-            "off": "off",
-            "false": "off",
-            "disable": "off",
-            "disabled": "off",
-            "关闭": "off",
-        }
-        return aliases.get(text, text if text in {"auto", "always", "off"} else "auto")
-
-    @staticmethod
     def _normalize_external_image_api_platform(value: Any) -> str:
         text = str(value or "").strip().lower()
         aliases = {
@@ -2767,18 +2713,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             int(match.group(2)),
             int(match.group(3) or 0),
         )
-
-    def _framework_session_lock_enabled(self) -> bool:
-        mode = self._normalize_framework_session_lock_mode(getattr(self, "framework_session_lock_mode", "auto"))
-        if mode == "always":
-            return True
-        if mode == "off":
-            return False
-        version = self._parse_version_tuple(self._detect_astrbot_version())
-        if version is None:
-            return False
-        # AstrBot 4.25.x 曾出现主链/会话库并发锁问题；新版本默认不再额外串行化。
-        return (4, 25, 0) <= version <= (4, 25, 2)
 
     def _append_turn_prompt_fragment_by_position(
         self,
@@ -4060,7 +3994,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         raw = await self._llm_call(
             prompt,
             max_tokens=180,
-            provider_id=self._task_provider(self.rest_wakeup_provider_id, self.response_review_provider_id, self.llm_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="rest_wakeup_judge",
         )
         payload = self._extract_json_payload(raw or "")
@@ -6092,7 +6026,7 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
                     now=received_ts,
                 )
             private_image_enhancement_enabled = (
-                bool(getattr(self, "enable_message_debounce", getattr(self, "enable_semantic_message_debounce", True)))
+                bool(getattr(self, "enable_message_debounce", True))
                 and self._message_debounce_seconds("image") > 0
             )
             private_image_only = (

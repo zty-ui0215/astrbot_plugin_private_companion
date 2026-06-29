@@ -244,7 +244,12 @@ _MISSING = object()
 
 
 def _flat_get(config: Any, key: str, default: Any = None) -> Any:
-    """Read both flat config keys and keys nested under schema object/items groups."""
+    """
+    兼容扁平 / 任意深度 object-items 嵌套两种 schema 结构读取。
+
+    优先直接命中顶层 key；找不到时递归搜索所有嵌套 dict，
+    返回第一个命中的叶子值。适配 AstrBot 不展平 object.items 的情况。
+    """
     if isinstance(config, dict):
         # Prefer schema-group values over top-level legacy compatibility keys.
         # AstrBot may add invisible legacy flat defaults before plugin init; if
@@ -265,66 +270,81 @@ def _flat_get(config: Any, key: str, default: Any = None) -> Any:
     getter = getattr(config, "get", None)
     if callable(getter):
         try:
-            value = getter(key, _MISSING)
+            val = getter(key, None)
+            if val is not None:
+                return val
         except Exception:
-            value = _MISSING
-        if value is not _MISSING:
-            return value
+            pass
     return default
 
 
-def _set_into_config(config: Any, key: str, value: Any, *, allow_flat_fallback: bool = True) -> bool:
-    """Write a config value back to its existing flat or nested location."""
+def _set_into_config(config: Any, key: str, value: Any, _wrapper_key: Any = None) -> None:
+    """
+    兼容扁平 / 任意深度 object-items 嵌套两种 schema 结构写入。
 
-    def convert(existing: Any, new_value: Any) -> Any:
+    优先写入 key 已存在的位置（可能在嵌套层），并根据已有值的类型
+    自动转换传入值（如 str "true"/"false" → bool），避免 AstrBot 类型校验错误。
+    找不到 key 时回退到顶层写入。
+    """
+    def _convert_value(existing: Any, new_value: Any) -> Any:
+        """根据已有值的类型转换新值"""
         if isinstance(existing, bool) and isinstance(new_value, str):
             text = new_value.strip().lower()
             if text in {"true", "1", "yes", "y", "on", "enable", "enabled", "启用", "开启", "开", "是"}:
                 return True
             if text in {"false", "0", "no", "n", "off", "disable", "disabled", "停用", "关闭", "关", "否", ""}:
                 return False
+            return bool(new_value)
         if isinstance(existing, int) and not isinstance(existing, bool) and isinstance(new_value, str):
             try:
                 return int(new_value)
-            except (TypeError, ValueError):
+            except (ValueError, TypeError):
                 return new_value
         if isinstance(existing, float) and isinstance(new_value, str):
             try:
                 return float(new_value)
-            except (TypeError, ValueError):
+            except (ValueError, TypeError):
                 return new_value
         return new_value
 
-    def find_and_set(target: dict[str, Any]) -> bool:
-        # Match _flat_get(): prefer schema-grouped values over legacy flat
-        # compatibility keys, otherwise the official config page can keep
-        # showing the old value after the extension page/command saves.
+    def _find_and_set(target: dict[str, Any]) -> bool:
+        # 先搜索嵌套子 dict（包括 schema 的 items 层），再检查当前层
         for child in target.values():
-            if isinstance(child, dict) and find_and_set(child):
+            if isinstance(child, dict) and _find_and_set(child):
                 return True
+        # 也搜索 schema object 的 items 子层
+        items = target.get("items")
+        if isinstance(items, dict) and _find_and_set(items):
+            return True
         if key in target:
-            target[key] = convert(target.get(key), value)
+            target[key] = _convert_value(target.get(key), value)
             return True
         return False
 
-    if isinstance(config, dict) and find_and_set(config):
-        return True
-    for attr in ("data", "config"):
-        target = getattr(config, attr, None)
-        if isinstance(target, dict) and find_and_set(target):
-            return True
-    if not allow_flat_fallback:
-        return False
+    if isinstance(config, dict):
+        if _find_and_set(config):
+            return
+
+    # 兜底：找不到 key 时写顶层
     try:
         config[key] = value
-        return True
+        return
     except Exception:
         pass
     setter = getattr(config, "set", None)
     if callable(setter):
         try:
             setter(key, value)
-            return True
         except Exception:
             pass
-    return False
+
+
+def _detect_wrapper_key(config: Any) -> str | None:
+    """保留向后兼容：如果顶层只有一个 dict 值，返回那个 key；否则 None。"""
+    if not isinstance(config, dict) or len(config) != 1:
+        return None
+    only_key = next(iter(config))
+    inner = config[only_key]
+    if isinstance(inner, dict):
+        return only_key
+    return None

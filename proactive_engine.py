@@ -310,7 +310,7 @@ class ProactiveEngineMixin:
     def _proactive_impulse_default_window_seconds(self, reason: str) -> tuple[float, float]:
         if reason in {"morning_greeting", "noon_greeting", "evening_greeting"}:
             return 70 * 60.0, 35 * 60.0
-        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share"}:
+        if reason in {"group_share", "news_share", "web_exploration_share"}:
             return 45 * 60.0, 60 * 60.0
         if reason in {"quiet_care", "check_in", "state_share"}:
             return 55 * 60.0, 80 * 60.0
@@ -601,7 +601,7 @@ class ProactiveEngineMixin:
             trigger_message_id=self._candidate_trigger_message_id(candidate),
             trigger_umo=_single_line(candidate.get("trigger_umo") or candidate.get("umo"), 160),
             trigger_ts=_safe_float(candidate.get("trigger_ts") or candidate.get("created_ts"), 0),
-            quota_exempt=bool(candidate.get("_free_screen_peek")),
+            quota_exempt=False,
             context_key=_single_line(candidate.get("context_key"), 60),
             context=candidate.get("context"),
             opener_mode="name_only" if candidate.get("_name_only_opener") else "",
@@ -757,13 +757,6 @@ class ProactiveEngineMixin:
                 note("动机略空,需要更具体的生活钩子")
 
         action_parts = {part.strip() for part in normalized_action.split("+") if part.strip()}
-        if "screen_peek" in action_parts:
-            if profile.get("observant"):
-                score += 0.07
-                note("观察型人格适合轻观察")
-            else:
-                score -= 0.05
-                note("观察能力和人格标记不强")
         if "photo_text" in action_parts:
             if profile.get("visual"):
                 score += 0.08
@@ -860,12 +853,10 @@ class ProactiveEngineMixin:
             kind = "self_share"
         elif normalized_reason in {"important_date_share"}:
             kind = "reminder"
-        elif normalized_reason in {"group_share", "bili_video_share", "news_share", "web_exploration_share"}:
+        elif normalized_reason in {"group_share", "news_share", "web_exploration_share"}:
             kind = "external_share"
         elif normalized_source in {"pending_followup", "followup"}:
             kind = "continuation"
-        elif action_parts & {"screen_peek"}:
-            kind = "observation"
         elif action_parts & {"poke"}:
             kind = "light_touch"
 
@@ -881,7 +872,7 @@ class ProactiveEngineMixin:
             anchor_type, anchor_score = "current_activity", 0.62
         elif normalized_reason in {"important_date_share"} or any(token in evidence_text for token in ("生日", "纪念", "日期", "考试", "提醒")):
             anchor_type, anchor_score = "important_date", 0.78
-        elif normalized_reason in {"news_share", "web_exploration_share", "bili_video_share"}:
+        elif normalized_reason in {"news_share", "web_exploration_share"}:
             anchor_type, anchor_score = "external_info", 0.66
         elif normalized_reason in {"morning_greeting", "noon_greeting", "evening_greeting", "insomnia_night"}:
             anchor_type, anchor_score = "time_ritual", 0.55
@@ -897,7 +888,7 @@ class ProactiveEngineMixin:
             pressure -= 0.04
         if kind in {"check_in", "care", "observation", "light_touch"}:
             pressure += 0.08
-        if action_parts & {"screen_peek", "poke", "voice"}:
+        if action_parts & {"poke", "voice"}:
             pressure += 0.16
         if has_context or has_trigger:
             pressure -= 0.05
@@ -2395,7 +2386,7 @@ class ProactiveEngineMixin:
         if has_trigger:
             return ""
         reason = self._normalize_legacy_proactive_text(item.get("reason") or item.get("planned_proactive_reason"), limit=40)
-        if reason in {"group_share", "news_share", "bili_video_share", "web_exploration_share"}:
+        if reason in {"group_share", "news_share", "web_exploration_share"}:
             return ""
         if normalized_source not in {"event", "random", "unknown", ""}:
             return ""
@@ -3156,7 +3147,7 @@ class ProactiveEngineMixin:
         )
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
-        user["planned_proactive_quota_exempt"] = bool(current.get("_free_screen_peek"))
+        user["planned_proactive_quota_exempt"] = False
 
     def _consume_simulation_event(self, user: dict[str, Any]) -> None:
         sim = user.get("simulation_mode")
@@ -3193,8 +3184,6 @@ class ProactiveEngineMixin:
 
     def _available_test_actions(self, user: dict[str, Any]) -> list[str]:
         actions = ["message"]
-        if self._screen_glance_available(user):
-            actions.append("screen_peek")
         if self._photo_text_available(user):
             actions.append("photo_text")
         if self._voice_available(user):
@@ -3334,8 +3323,6 @@ class ProactiveEngineMixin:
     def _available_proactive_abilities(self, user: dict[str, Any] | None = None) -> list[dict[str, str]]:
         user = user if isinstance(user, dict) else {}
         available = {"message"}
-        if self._screen_glance_available(user):
-            available.add("screen_peek")
         if self._photo_text_available(user):
             available.add("photo_text")
         if self._poke_available() and self._effective_user_poke_daily_limit(user) > 0:
@@ -3379,10 +3366,7 @@ class ProactiveEngineMixin:
             label = _single_line(item.get("label"), 16)
             when = _single_line(item.get("when"), 80)
             use_for = _single_line(item.get("use_for"), 80)
-            if name == "screen_peek":
-                label = f"观察{terms['screen']}"
-                when = when.replace("轻窥屏", f"看一眼{terms['screen']}").replace("探头一下", "轻轻确认一下")
-            elif name == "jm_cosmos_read":
+            if name == "jm_cosmos_read":
                 label = terms["private_reading"]
                 when = f"有空、无聊或夜里自己想给{terms['bookshelf']}{terms['secret_drawer']}添一点阅读内容"
                 use_for = "内部阅读、低频形成读后印象,是否提起交给人格"
@@ -3411,9 +3395,7 @@ class ProactiveEngineMixin:
             name = str(item.get("name") or "")
             label = item.get("label")
             when = item.get("when")
-            if name == "screen_peek":
-                label = f"观察{terms['screen']}"
-            elif name == "jm_cosmos_read":
+            if name == "jm_cosmos_read":
                 label = terms["private_reading"]
             lines.append(
                 f"- {item.get('module')}/{name}：{label}｜{when}"
@@ -3423,7 +3405,6 @@ class ProactiveEngineMixin:
     def _summarize_test_action_labels(self, actions: list[str]) -> str:
         labels = {
             "message": "文字",
-            "screen_peek": "窥屏",
             "photo_text": "发图",
             "poke": "戳一戳",
             "voice": "语音",
@@ -3471,7 +3452,7 @@ class ProactiveEngineMixin:
         state: dict[str, Any],
         actions: list[str],
     ) -> tuple[dict[str, Any], list[str]]:
-        required_actions = [action for action in actions if action in {"message", "screen_peek", "photo_text", "voice", "jm_cosmos_read"}]
+        required_actions = [action for action in actions if action in {"message", "photo_text", "voice", "jm_cosmos_read"}]
         last_normalized = {
             "summary": "这一段按原日程慢慢推进。",
             "today_events": [],
@@ -3491,9 +3472,8 @@ class ProactiveEngineMixin:
                 prompt,
                 max_tokens=1000,
                 provider_id=self._task_provider(
-                    self.detail_enhancement_provider_id,
-                    self.daily_plan_provider_id,
-                    self.mai_style_provider_id,
+                    self.aux_provider_id,
+                    self.llm_provider_id,
                 ),
                 task="full_test_detail",
             )
@@ -3543,7 +3523,7 @@ class ProactiveEngineMixin:
                     continue
                 scoped.append(item)
             usable = scoped
-        required_actions = [action for action in actions if action in {"message", "screen_peek", "photo_text", "voice", "jm_cosmos_read"}]
+        required_actions = [action for action in actions if action in {"message", "photo_text", "voice", "jm_cosmos_read"}]
         filtered: list[dict[str, Any]] = []
         for action in required_actions:
             matched = next((item for item in usable if str(item.get("action") or "message") == action and item not in filtered), None)
@@ -3635,8 +3615,6 @@ class ProactiveEngineMixin:
                 for key in ("topic", "why", "scene", "motive", "impulse")
             )
         combined_hint = f"{event_text} {motive}"
-        if self._screen_glance_available(user) and reason in {"check_in", "quiet_care", "background_schedule"}:
-            candidates.append(("screen_peek", 1.15))
         if (
             self._photo_text_available(user)
             and reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}
@@ -4256,39 +4234,6 @@ class ProactiveEngineMixin:
         user["last_generated_photo_path"] = _single_line(image_path, 260)
         user["last_generated_photo_at"] = _now_ts()
 
-    def _note_screen_peek_attempt(self, user_id: str, reason: str = "", *, count_daily: bool = True) -> None:
-        if not str(user_id or "").strip():
-            return
-        today = _today_key()
-        user = self._get_user(str(user_id or ""))
-        if user.get("screen_peek_day") != today:
-            user["screen_peek_day"] = today
-            user["screen_peek_today"] = 0
-        if count_daily:
-            user["screen_peek_today"] = _safe_int(user.get("screen_peek_today"), 0) + 1
-        user["screen_peek_last_at"] = _now_ts()
-        user["last_screen_peek_reason"] = _single_line(reason, 120)
-        if not count_daily:
-            user["last_unanswered_screen_peek_at"] = _now_ts()
-
-    def _screen_peek_failure_cooldown_active(self, user: dict[str, Any] | None = None, *, now: float | None = None) -> bool:
-        if not isinstance(user, dict):
-            return False
-        check_now = _now_ts() if now is None else now
-        return _safe_float(user.get("screen_peek_failure_until"), 0.0) > check_now
-
-    def _note_screen_peek_failure(self, user: dict[str, Any] | None, reason: str = "", *, cooldown_minutes: int = 60) -> None:
-        if not isinstance(user, dict):
-            return
-        now = _now_ts()
-        user["screen_peek_failure_until"] = now + max(5, _safe_int(cooldown_minutes, 60, 5)) * 60
-        user["screen_peek_failure_reason"] = _single_line(reason, 180)
-        user["screen_peek_failure_count"] = _safe_int(user.get("screen_peek_failure_count"), 0, 0) + 1
-        try:
-            self._save_data_sync()
-        except Exception:
-            pass
-
     def _note_action_reply_feedback(self, user: dict[str, Any], action: str) -> None:
         raw = user.setdefault("action_reply_affinity", {})
         if not isinstance(raw, dict):
@@ -4306,7 +4251,7 @@ class ProactiveEngineMixin:
     def _maybe_make_followup_event(self, user: dict[str, Any], reason: str, action: str) -> dict[str, Any] | None:
         if _safe_int(user.get("sent_today"), 0) >= max(0, self._effective_user_daily_limit(user) - 1):
             return None
-        if action not in {"photo_text", "poke", "voice", "screen_peek"} and "+" not in action:
+        if action not in {"photo_text", "poke", "voice"} and "+" not in action:
             return None
         chance = 0.12
         if "voice" in action:
@@ -4318,18 +4263,16 @@ class ProactiveEngineMixin:
         if random.random() > chance:
             return None
         delay_minutes = random.randint(22, 95)
-        follow_reason = "check_in" if action in {"poke", "screen_peek"} else "diary_share"
+        follow_reason = "check_in" if action in {"poke"} else "diary_share"
         topic = {
             "photo_text": "对发送的图片进行补充说明",
             "poke": "刚才戳完之后进行补充说明",
             "voice": "发完语音后的互动",
-            "screen_peek": "偷看用户屏幕后的互动",
         }.get(action.split("+")[0], "刚刚那条主动后面")
         motive = {
             "photo_text": "刚才发完图以后，想和{name}聊聊",
             "poke": "刚才戳完以后，想和{name}聊聊",
             "voice": "刚才发完语音消息以后，想和{name}聊聊",
-            "screen_peek": "刚才看过屏幕后，想问问{name}现在还忙不忙",
         }.get(action.split("+")[0], "刚才那条主动后面，还有一句话想补上")
         display_name = _single_line(user.get("nickname") or self.default_nickname, 24)
         if display_name:
@@ -4380,45 +4323,6 @@ class ProactiveEngineMixin:
             return True
         reason = self._normalize_legacy_proactive_text(user.get("last_proactive_reason") or user.get("planned_proactive_reason"), limit=40)
         return reason in {"check_in", "quiet_care", "background_schedule"} and _safe_int(user.get("ignored_streak"), 0) >= 1
-
-    def _maybe_make_unanswered_screen_peek_event(
-        self,
-        user: dict[str, Any],
-        reason: str,
-        action: str,
-    ) -> dict[str, Any] | None:
-        if not self.enable_unanswered_screen_peek_followup:
-            return None
-        if "screen_peek" in str(action or ""):
-            return None
-        if not self._screen_glance_available(user, ignore_daily_limit=True):
-            return None
-        now = _now_ts()
-        cooldown = max(30, self.unanswered_screen_peek_cooldown_minutes) * 60
-        last_at = _safe_float(user.get("last_unanswered_screen_peek_at"), 0)
-        if last_at > 0 and now - last_at < cooldown:
-            return None
-        if not self._bot_currently_bored_for_unanswered_peek(user):
-            return None
-        delay_minutes = max(10, self.unanswered_screen_peek_after_minutes)
-        return {
-            "date": _today_key(),
-            "window": self._window_from_delay_minutes(delay_minutes, width_minutes=18),
-            "reason": "check_in",
-            "action": "screen_peek",
-            "why": "用户很久没有回复消息，想确认用户是不是还在忙。",
-            "topic": "偷看用户是不是还在忙",
-            "motive": "刚才主动找用户之后那边一直安静着，想确认用户是不是还在忙",
-            "scene": "上一条主动消息之后的安静空档",
-            "tone": "好奇",
-            "impulse": "想确认用户是不是还在忙",
-            "_scheduled_ts": now + delay_minutes * 60,
-            "_cancel_on_inbound": True,
-            "_unanswered_screen_peek": True,
-            "_free_screen_peek": True,
-            "_origin_action": action,
-            "_origin_reason": reason,
-        }
 
     def _window_from_delay_minutes(self, delay_minutes: int, width_minutes: int = 24) -> str:
         start_dt = self._environment_fromtimestamp(_now_ts() + max(5, delay_minutes) * 60)
@@ -4793,8 +4697,6 @@ class ProactiveEngineMixin:
         terms = self._worldview_terms()
         if reason == "group_share":
             return f"{terms['group_chat']}里那段片段"
-        if reason == "bili_video_share":
-            return f"刚看到的{terms['video']}"
         if reason == "news_share":
             return "刚看到的一条新闻"
         if reason == "creative_share":
@@ -4886,7 +4788,6 @@ class ProactiveEngineMixin:
     def _motive_action_bias(self, motive: str) -> dict[str, float]:
         text = str(motive or "")
         return {
-            "screen_peek": 0.32 if any(token in text for token in ("还在忙", "埋进去", "看你", "确认", "忙太久", "偷看一眼")) else 0.0,
             "photo_text": 0.34 if any(token in text for token in ("顺手拍", "拍给你", "发你看", "光", "雨", "窗边", "晚霞", "小猫", "桌上", "一幕", "书页", "食堂", "饮料", "便利店", "影子", "倒影", "杯", "包装", "车窗", "门口")) else 0.0,
             "poke": 0.24 if any(token in text for token in ("戳", "碰你一下", "冒头", "轻轻叫你一下", "刷存在感")) else 0.0,
             "voice": 0.3 if any(token in text for token in ("懒得打字", "留句语音", "小声说", "睡不着", "不想敲字")) else 0.0,
@@ -4932,9 +4833,6 @@ class ProactiveEngineMixin:
         if reason == "group_share":
             share = user.get("group_share_context") if isinstance(user.get("group_share_context"), dict) else {}
             return _single_line(share.get("topic"), 48) or _single_line(share.get("text"), 48) or "群里那段片段"
-        if reason == "bili_video_share":
-            video = user.get("bilibili_video_context") if isinstance(user.get("bilibili_video_context"), dict) else {}
-            return _single_line(video.get("title"), 48) or "刚刷到的 B 站视频"
         if reason == "news_share":
             news = user.get("news_context") if isinstance(user.get("news_context"), dict) else {}
             return _single_line(news.get("topic") or news.get("headline"), 48) or "刚看到的一条新闻"
@@ -4979,7 +4877,7 @@ class ProactiveEngineMixin:
         return ""
 
     def _action_affinity_bias(self, user: dict[str, Any] | None = None) -> dict[str, float]:
-        base = {"screen_peek": 0.0, "photo_text": 0.0, "poke": 0.0, "voice": 0.0}
+        base = {"photo_text": 0.0, "poke": 0.0, "voice": 0.0}
         if not isinstance(user, dict):
             return base
         raw = user.get("action_reply_affinity")
@@ -5003,33 +4901,8 @@ class ProactiveEngineMixin:
         *,
         ignore_daily_limit: bool = False,
     ) -> bool:
-        if not self.enable_screen_glance_action:
-            return False
-        if isinstance(user, dict) and self._private_user_role(user) == "friend":
-            return False
-        daily_limit = self._effective_user_screen_peek_daily_limit(user)
-        if daily_limit <= 0 and not ignore_daily_limit:
-            return False
-        if isinstance(user, dict):
-            if self._screen_peek_failure_cooldown_active(user):
-                return False
-            today = _today_key()
-            used_today = (
-                _safe_int(user.get("screen_peek_today"), 0)
-                if str(user.get("screen_peek_day") or "") == today
-                else 0
-            )
-            if not ignore_daily_limit and used_today >= daily_limit:
-                return False
-            cooldown_seconds = max(0, self.screen_peek_cooldown_minutes) * 60
-            last_at = _safe_float(user.get("screen_peek_last_at"), 0.0)
-            if cooldown_seconds > 0 and last_at > 0 and _now_ts() - last_at < cooldown_seconds:
-                return False
-        try:
-            plugin = self._get_screen_companion_plugin()
-            return plugin is not None and callable(getattr(plugin, "_invoke_screen_skill", None))
-        except Exception:
-            return False
+        """[Dead code removed - screen glance feature disabled]"""
+        return False
 
     def _comfyui_photo_available(self) -> bool:
         if not self.enable_photo_text_action:
@@ -5285,10 +5158,7 @@ class ProactiveEngineMixin:
         parts = [part.strip() for part in normalized.split("+") if part.strip()]
         if not parts:
             return True
-        screen_quota_exempt = bool(isinstance(user, dict) and user.get("planned_proactive_quota_exempt"))
         for part in parts:
-            if part == "screen_peek" and not self._screen_glance_available(user, ignore_daily_limit=screen_quota_exempt):
-                return False
             if part == "photo_text" and not self._photo_text_available(user):
                 return False
             if part == "poke" and (not self._poke_available() or self._effective_user_poke_daily_limit(user) <= 0):
@@ -5327,11 +5197,6 @@ class ProactiveEngineMixin:
         current_item_text = self._format_plan_item_for_prompt(current_item)
 
         weighted: list[tuple[str, float]] = [("message", 0.82)]
-        if self._screen_glance_available(user) and reason in {"check_in", "quiet_care", "state_share", "background_schedule"}:
-            weight = 0.9 + (0.45 if action_profile["observant"] else 0.0) + motive_bias["screen_peek"] + affinity_bias["screen_peek"]
-            if energy < 50:
-                weight += 0.12
-            weighted.append(("screen_peek", weight))
         if (
             self._photo_text_available(user)
             and reason in {"activity_share", "diary_share", "background_schedule", "noon_greeting", "evening_greeting"}
@@ -5802,7 +5667,6 @@ class ProactiveEngineMixin:
         return {
             "insomnia_night": [(23 * 60, 24 * 60), (0, 6 * 60)],
             "group_share": [(9 * 60, 23 * 60)],
-            "bili_video_share": [(10 * 60, 23 * 60)],
             "news_share": [(8 * 60, 23 * 60)],
             "web_exploration_share": [(9 * 60, 23 * 60)],
             "jm_cosmos_recommendation_request": [(10 * 60, 23 * 60)],
@@ -5948,9 +5812,6 @@ class ProactiveEngineMixin:
         if reason == "group_share":
             share_context = self._format_group_share_action_context(user)
             raw_action_context = "\n".join(part for part in (raw_action_context, share_context) if part).strip()
-        if reason == "bili_video_share":
-            video_context = self._format_bilibili_video_action_context(user)
-            raw_action_context = "\n".join(part for part in (raw_action_context, video_context) if part).strip()
         if reason == "news_share":
             news_context = self._format_news_action_context(user)
             raw_action_context = "\n".join(part for part in (raw_action_context, news_context) if part).strip()

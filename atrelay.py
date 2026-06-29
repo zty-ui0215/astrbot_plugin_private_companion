@@ -562,7 +562,7 @@ class AtRelayMixin:
             rewritten = await self._llm_call(
                 prompt,
                 max_tokens=120,
-                provider_id=self._task_provider(getattr(self, "mai_style_provider_id", ""), getattr(self, "llm_provider_id", "")),
+                provider_id=self._task_provider(getattr(self, "aux_provider_id", ""), getattr(self, "llm_provider_id", "")),
                 task="atrelay_rewrite",
             )
         except Exception as exc:

@@ -22,8 +22,6 @@ const state = {
   selectedGroupId: "",
   featureDraft: {},
   selectedFeatureKey: "",
-  providerFilter: "",
-  providerMode: "all",
   providerDraft: {},
   proactiveCandidateFilter: "all",
   imageCacheItems: [],
@@ -116,55 +114,6 @@ const privateReadingConfigKeys = new Set([
   "PRIVATE_READING_VISION_PROVIDER_ID",
 ]);
 
-const noFallbackProviderKeys = new Set([
-  "PRIVATE_READING_VISION_PROVIDER_ID",
-]);
-
-const optionalNoFallbackProviderKeys = new Set([
-  "NARRATION_PROVIDER_ID",
-]);
-
-const providerPreferenceMeta = {
-  speed: {
-    label: "低延迟优先",
-    className: "speed",
-    text: "适合选响应快、成本低、格式稳定的小到中型模型。",
-  },
-  quality: {
-    label: "效果优先",
-    className: "quality",
-    text: "适合选推理更强、上下文理解更稳、质量更好的模型。",
-  },
-  balanced: {
-    label: "均衡即可",
-    className: "balanced",
-    text: "优先稳定和成本，不必追求最强模型。",
-  },
-};
-
-const providerPassiveImpactMeta = {
-  direct: {
-    label: "影响被动速度",
-    className: "direct",
-    text: "普通回复或图片/转发阅读前可能会等待它，想更快就选低延迟模型。",
-  },
-  conditional: {
-    label: "特定场景会等待",
-    className: "conditional",
-    text: "只在对应功能开启或命中时影响本轮回复速度。",
-  },
-  async: {
-    label: "后台异步",
-    className: "async",
-    text: "通常不阻塞本轮被动回复。",
-  },
-};
-
-function providerNeedsLowLatency(key) {
-  const guide = providerGuides[key] || {};
-  return guide.preference === "speed" || ["direct", "conditional"].includes(guide.passiveImpact || "");
-}
-
 function isPrivateReadingAvailable() {
   return Boolean(state.overview?.private_reading?.available);
 }
@@ -209,10 +158,7 @@ function featureDraftFromOverview(overview = {}) {
 }
 
 const pluginIntegrationAvailabilityRules = {
-  enable_yesterday_screen_diary_context: () => Boolean(state.overview?.screen_companion?.available),
   enable_livingmemory_integration: () => Boolean(state.overview?.livingmemory?.available),
-  enable_bilibili_integration: () => Boolean(state.overview?.bilibili?.available),
-  enable_bilibili_boredom_watch: () => Boolean(state.overview?.bilibili?.available),
   enable_qzone_integration: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_life_publish: () => Boolean(state.overview?.qzone?.available),
   enable_qzone_generated_image_publish: () => Boolean(state.overview?.qzone?.available),
@@ -238,251 +184,6 @@ function visibleConfigKey(key) {
   if (unavailablePluginIntegrationOwner(key)) return false;
   return isPrivateReadingAvailable() || !privateReadingConfigKeys.has(key);
 }
-
-const providerGuides = {
-  LLM_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "direct",
-    purpose: "插件的基础兜底文本模型，主动消息和未单独指定的内部任务都会回退到这里。",
-    fit: "适合选综合能力稳定、上下文理解好、指令遵循可靠的主聊天模型。",
-    fallback: "留空时使用 AstrBot 默认会话模型。",
-  },
-  MAI_STYLE_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "conditional",
-    purpose: "私聊互动策略通用模型，也是多数分项能力留空后的第一层兜底。",
-    fit: "适合稳定、成本可控、中文口语自然、能守住人格边界的模型。",
-    fallback: "留空时跟随主模型。",
-  },
-  DAILY_PLAN_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "async",
-    purpose: "每天生成粗日程，并在格式异常时做日程重试纠偏。",
-    fit: "适合结构化 JSON 稳定、能理解人格/世界观、长一点提示词也不容易跑偏的模型。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  DETAIL_ENHANCEMENT_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "async",
-    purpose: "把当前日程段展开成细节事件、状态变化和可能主动开口的契机。",
-    fit: "适合便宜、低延迟、JSON 输出稳定的小到中型模型。",
-    fallback: "留空时跟随主模型。",
-  },
-  DREAM_DIARY_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "async",
-    purpose: "生成每日 Bot 日记、生活碎片、梦境碎片、强化梦境和梦后余韵。",
-    fit: "适合短文本意象好、口语自然、能按要求输出 JSON 的模型。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  CREATIVE_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "async",
-    purpose: "生成私下创作项目设定，以及闲暇时的小说、诗、随笔、剧本等正文片段。",
-    fit: "适合文风稳定、有创作能力、能遵守角色身份边界的模型。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  VOICE_PROMPT_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "conditional",
-    purpose: "生成主动语音短句，并修复 TTS 标签、日语或双语格式；这是文本模型，不负责合成音频。",
-    fit: "适合短句口语感强、格式遵循稳、不会写得太长的文本模型。",
-    note: "阿里云百炼/CosyVoice 等语音合成模型需要在 AstrBot 的 TTS provider 配置里设置，本插件这里只读取当前会话 TTS provider。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  tts_conversion_provider_id: {
-    preference: "speed",
-    passiveImpact: "conditional",
-    purpose: "用于 TTS 后处理判断、翻译、语种修正和中文释义补全；这是文本模型，不负责合成音频。",
-    fit: "适合低延迟、短句翻译自然、格式遵循稳定的小到中型模型。",
-    fallback: "留空时后处理模式保持纯文本，显式语音标签仍可由插件处理。",
-  },
-  PHOTO_PROMPT_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "async",
-    purpose: "只负责生成 photo_text 的画面提示词和画面描述，不影响普通聊天或日程。",
-    fit: "适合视觉描述、审美词汇和画面构图更稳定的模型。",
-    fallback: "留空时跟随主模型。",
-  },
-  NARRATION_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "conditional",
-    purpose: "把识屏等工具结果转成可供最终主动消息使用的自然语言上下文。",
-    fit: "适合摘要稳、保留关键事实、不会添油加醋的便宜模型。",
-    fallback: "留空时不单独转述，直接使用工具摘要。",
-  },
-  HISTORY_SUMMARY_PROVIDER_ID: {
-    preference: "balanced",
-    passiveImpact: "async",
-    purpose: "把昨日或最近完整对话压成能延续到日程、梦境和主动理解里的摘要。",
-    fit: "适合长上下文整理稳定、成本较低、能保留人物和时间线的模型。",
-    fallback: "留空时跟随日程生成模型。",
-  },
-  RESPONSE_REVIEW_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "conditional",
-    purpose: "用于被动回复轻量自检，以及主动消息发送前判断是否值得现在发送、是否需要轻改写/延后/取消。",
-    fit: "适合便宜、短文本改写自然、边界判断稳的模型。",
-    fallback: "留空时回退到陪伴通用模型，再回退到主模型。",
-  },
-  PROACTIVE_PERSONA_JUDGE_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "async",
-    purpose: "主动计划到点后，先判断这个念头是否贴合当前角色、世界观、关系温度和打扰边界。",
-    fit: "适合 JSON 输出稳定、角色边界感强、短文本判断保守的小到中型模型。",
-    fallback: "留空时复用回复/主动复核模型，再回退到陪伴通用模型。",
-  },
-  TROUBLESHOOTING_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "async",
-    purpose: "扩展页排障中心的模型复核，例如技能相似项、配置异常和后续诊断类检查。",
-    fit: "适合便宜、低延迟、指令遵循稳定、分类判断保守的小模型。",
-    fallback: "留空时先跟随回复/主动复核模型，再回退到陪伴通用模型和主模型。",
-  },
-  SMART_MESSAGE_DEBOUNCE_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "direct",
-    purpose: "智能收口只在本地规则不确定时调用，用来判断用户是不是还没说完。",
-    fit: "适合低延迟、YES/NO 或短 JSON 稳定、误判少的小模型。",
-    fallback: "留空时跟随插件主模型。",
-  },
-  REST_WAKEUP_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "conditional",
-    purpose: "休息/睡眠状态下判断这轮消息是否值得醒来回复。",
-    fit: "适合低延迟、分类保守、能识别紧急/明确呼唤的小模型。",
-    fallback: "留空时优先跟随回复/主动复核模型，再回退主模型。",
-  },
-  RELATIONSHIP_ANALYSIS_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "async",
-    purpose: "分析关系阶段、亲近度、打扰边界和互动站位，影响后续语气判断。",
-    fit: "适合情绪和关系判断细腻、分类稳定、不会过度脑补的模型。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  EMOTION_JUDGEMENT_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "async",
-    purpose: "可选复核用户消息是否会触发 Bot 自身短期情绪余波，只做分类判断，不生成回复。",
-    fit: "适合便宜、低延迟、JSON 稳定、对玩笑/反讽/第三方抱怨判断保守的小模型。",
-    fallback: "留空时先跟随排障检查模型，再回退到关系站位、陪伴通用和主模型。",
-  },
-  COMPANION_MEMORY_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "async",
-    purpose: "把原始私聊记忆整理成用户画像、兴趣、边界、关系备注和说话习惯。",
-    fit: "适合结构化抽取能力好、便宜、能区分事实和推测的模型。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  DIALOGUE_EPISODE_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "async",
-    purpose: "把私聊片段整理成共同经历、情绪余味、可续话头和未完成约定。",
-    fit: "适合对话摘要稳、能保留细节和情绪温度的模型。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  GROUP_INTERJECT_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "conditional",
-    purpose: "群聊主动插话专用，用来生成很短、自然、不突兀的群聊发言。",
-    fit: "适合低延迟、短文本质量好、中文群聊语感稳的模型。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  GROUP_EPISODE_PROVIDER_ID: {
-    preference: "balanced",
-    passiveImpact: "async",
-    purpose: "整理群聊最近片段、群氛围、话题线、活跃群友和短期避免重复内容。",
-    fit: "适合群聊摘要、多人关系和话题归纳稳定的便宜模型。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  GROUP_SLANG_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "async",
-    purpose: "根据群聊样例解释群内黑话、梗、简称和成员称呼。",
-    fit: "适合小模型；重点是分类/释义稳定、别把玩笑当事实。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  GROUP_FOLLOWUP_JUDGE_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "direct",
-    purpose: "判断群里用户后续没 @ 的话是否仍在和 Bot 对话，只在规则不确定时调用。",
-    fit: "适合便宜、低延迟、YES/NO 分类准确、指令遵循稳定的小模型。",
-    fallback: "留空时只使用规则判断。",
-  },
-  FORWARD_MESSAGE_PROVIDER_ID: {
-    preference: "balanced",
-    passiveImpact: "direct",
-    purpose: "合并消息选择“转述”模式时，先把合并转发读成自然记录，再交给主模型回应。",
-    fit: "适合长上下文整理稳定、成本较低、能保留人物和时间线的模型。",
-    fallback: "留空时跟随陪伴通用模型。",
-  },
-  PLUGIN_VISION_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "direct",
-    purpose: "插件自己的通用视觉理解模型，用于私聊图片/表情包、引用图片、合并消息图片和识屏。",
-    fit: "适合确认支持图片输入、视觉描述可靠、能简短转述关键信息的多模态模型。",
-    fallback: "留空时先尝试 AstrBot 本体图片转述模型，再回退到工具结果转述或主模型。",
-  },
-  PRIVATE_READING_VISION_PROVIDER_ID: {
-    preference: "quality",
-    passiveImpact: "async",
-    purpose: "夹层阅读专用：理解封面和抽样页，生成页边批注、读后感、评分和偏好标签。",
-    fit: "必须是支持图片输入的视觉模型，最好能稳定输出 JSON，并能看懂漫画页图细节。",
-    fallback: "不回退。留空或模型不可用时，不生成私密阅读批注和读后感。",
-  },
-  NEWS_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "async",
-    purpose: "从新闻标题和摘要候选里挑选适合分享的内容，并整理成 Bot 的内部印象。",
-    fit: "适合便宜、稳定、短 JSON 输出可靠、能做轻量筛选的小模型。",
-    fallback: "留空时跟随主动转述/主模型。",
-  },
-  WEB_EXPLORATION_PROVIDER_ID: {
-    preference: "speed",
-    passiveImpact: "async",
-    purpose: "不负责联网检索，只决定 Bot 想搜索什么，并把搜索结果整理成探索笔记。",
-    fit: "适合便宜、稳定、短 JSON 输出可靠、能归纳搜索结果的模型。",
-    fallback: "留空时跟随新闻整理/主模型。",
-  },
-};
-
-const providerGroups = [
-  {
-    id: "core",
-    title: "基础与兜底",
-    desc: "主模型、陪伴通用和最终回复前后的基础能力。",
-    keys: ["LLM_PROVIDER_ID", "MAI_STYLE_PROVIDER_ID", "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID", "RESPONSE_REVIEW_PROVIDER_ID", "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID", "REST_WAKEUP_PROVIDER_ID", "TROUBLESHOOTING_PROVIDER_ID", "NARRATION_PROVIDER_ID"],
-  },
-  {
-    id: "daily",
-    title: "日程与表达",
-    desc: "决定 Bot 每天做什么、怎么把生活片段和主动表达写出来。",
-    keys: ["DAILY_PLAN_PROVIDER_ID", "DETAIL_ENHANCEMENT_PROVIDER_ID", "DREAM_DIARY_PROVIDER_ID", "CREATIVE_PROVIDER_ID", "VOICE_PROMPT_PROVIDER_ID", "tts_conversion_provider_id", "PHOTO_PROMPT_PROVIDER_ID"],
-  },
-  {
-    id: "memory",
-    title: "记忆与关系",
-    desc: "整理长期画像、对话片段和关系站位。",
-    keys: ["HISTORY_SUMMARY_PROVIDER_ID", "RELATIONSHIP_ANALYSIS_PROVIDER_ID", "EMOTION_JUDGEMENT_PROVIDER_ID", "COMPANION_MEMORY_PROVIDER_ID", "DIALOGUE_EPISODE_PROVIDER_ID"],
-  },
-  {
-    id: "group",
-    title: "群聊能力",
-    desc: "处理群聊插话、片段整理、黑话释义和续接判断。",
-    keys: ["GROUP_INTERJECT_PROVIDER_ID", "GROUP_EPISODE_PROVIDER_ID", "GROUP_SLANG_PROVIDER_ID", "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID", "FORWARD_MESSAGE_PROVIDER_ID"],
-  },
-  {
-    id: "media",
-    title: "视觉与外界信息",
-    desc: "识图、新闻和主动搜索相关模型。",
-    keys: ["PLUGIN_VISION_PROVIDER_ID", "PRIVATE_READING_VISION_PROVIDER_ID", "NEWS_PROVIDER_ID", "WEB_EXPLORATION_PROVIDER_ID"],
-  },
-];
-
-const providerGroupByKey = providerGroups.reduce((acc, group) => {
-  group.keys.forEach((key) => { acc[key] = group; });
-  return acc;
-}, {});
 
 const featureMeta = {
   enable_proactive_only_mode: ["仅保留主动能力", "只让本插件负责主动私聊调度、生成和发送；普通私聊/群聊放行给默认主链或其他插件。"],
@@ -525,7 +226,6 @@ const featureMeta = {
   enable_lunar_perception: ["农历感知", "可用时注入农历日期，辅助节日、生活氛围和日记语境。"],
   enable_solar_term_perception: ["节气感知", "注入当天或临近节气，让日程和表达更贴合时令。"],
   enable_almanac_perception: ["轻量黄历", "生成宜/忌氛围标签，默认关闭，避免玄学感太强。"],
-  enable_yesterday_screen_diary_context: ["昨日屏幕日记", "每天只读取 screen_companion 的昨日观察日记脱敏摘要，作为今日状态和日程背景，不读取实时屏幕。"],
   enable_group_companion: ["群聊总开关", "控制是否处理群聊观察、黑话和上下文注入。"],
   enable_group_slang_learning: ["群黑话学习", "记录群内常用梗、简称和特殊表达。"],
   enable_group_member_profiles: ["群内成员观察", "记录成员在当前群里的近期发言、短句和活跃痕迹。"],
@@ -551,8 +251,6 @@ const featureMeta = {
   enable_cross_user_memory_bridge: ["跨用户记忆互通", "主人可在私聊中查询 Bot 与某个用户或群聊的近期互动摘要；只读，不发送消息。"],
   enable_atrelay_tools: ["跨群转述与 @ 群友", "整合艾特群友能力，可让模型查询群成员、按关系网解析 @ 对象并发送群聊/私聊消息。"],
   enable_livingmemory_integration: ["LivingMemory 协同", "引导模型按需调用长期记忆工具，避免重复造轮子。"],
-  enable_bilibili_integration: ["B 站联动", "读取 B 站 Bot 观看日志，并在合适节点私聊分享。"],
-  enable_bilibili_boredom_watch: ["无聊刷 B 站", "空档看视频。"],
   enable_news_integration: ["新闻阅读", "低频读取 RSS/Atom 新闻源，形成近期见闻和主动分享素材。"],
   enable_news_daily_hot_read: ["每日热点", "随日程或后台检查读取热点候选，形成当天的时讯见闻。"],
   enable_news_boredom_read: ["无聊看新闻", "空档或无聊时扫几条新闻，按人格决定是否私聊提起。"],
@@ -569,7 +267,6 @@ const featureMeta = {
   enable_private_reading_boredom_read: ["私下阅读", "空档、无聊或夜里低频自己搜索并阅读，形成内部印象。"],
   enable_private_reading_ask_recommendation: ["征求推荐", "空档或无聊时，低频私聊询问用户有没有合适的私密阅读推荐。"],
   enable_private_reading_preference_influence: ["私密偏好影响", "评分样本足够后，把稳定偏好作为私聊私密互动的弱背景。"],
-  enable_unanswered_screen_peek_followup: ["沉默后窥屏", "主动消息后用户长时间没回、且 Bot 正好无聊时，可免日次数窥屏确认用户在做什么。"],
   enable_tts_enhancement: ["TTS强化", "支持中文聊天文本搭配外语语音块，统一处理生成路径、<tts> 标签规范化、语种控制、朗读文本清洗和主用户触发。"],
   enable_proactive_quote_trigger_message: ["引用触发消息", "群聊回复、群主动插话和可追溯的私聊主动消息会引用触发消息；复读跟读/打断不引用。"],
   enable_creative_writing: ["私下创作", "闲暇时可选地因生活小事、日记碎片或梦境灵感写一点文本作品。"],
@@ -656,7 +353,6 @@ const featureGroups = [
       "enable_lunar_perception",
       "enable_solar_term_perception",
       "enable_almanac_perception",
-      "enable_yesterday_screen_diary_context",
     ],
   },
   {
@@ -673,8 +369,6 @@ const featureGroups = [
     title: "长线主动",
     note: "外部动作和低频分享。",
     keys: [
-      "enable_bilibili_integration",
-      "enable_bilibili_boredom_watch",
       "enable_news_integration",
       "enable_news_daily_hot_read",
       "enable_ai_daily_watch",
@@ -690,7 +384,6 @@ const featureGroups = [
       "enable_private_reading_boredom_read",
       "enable_private_reading_ask_recommendation",
       "enable_private_reading_preference_influence",
-      "enable_unanswered_screen_peek_followup",
       "enable_creative_writing",
       "creative_hidden_mode",
     ],
@@ -728,7 +421,6 @@ const embeddedFeatureParentByKey = {
   enable_group_interjection_feedback: "enable_group_interjection",
   group_repeat_trigger_threshold: "enable_group_repeat_follow",
   group_repeat_count_distinct_users_only: "enable_group_repeat_follow",
-  enable_bilibili_boredom_watch: "enable_bilibili_integration",
   enable_news_daily_hot_read: "enable_news_integration",
   enable_ai_daily_watch: "enable_news_integration",
   enable_news_boredom_read: "enable_news_integration",
@@ -1022,8 +714,6 @@ const configLabels = {
   enable_lunar_perception: "农历",
   enable_solar_term_perception: "节气",
   enable_almanac_perception: "轻量黄历",
-  enable_yesterday_screen_diary_context: "昨日屏幕日记",
-  screen_diary_context_max_chars: "昨日屏幕日记上下文字数",
   passive_topic_memory_hours: "话题抑制记忆小时",
   idle_minutes: "空闲门槛分钟",
   min_interval_minutes: "最小主动间隔分钟",
@@ -1104,9 +794,6 @@ const configLabels = {
   enable_skill_growth_passive_injection: "被动回复技能认知",
   enable_skill_growth_schedule_influence: "能力状态影响日程",
   skill_growth_schedule_influence_strength: "日程影响强度",
-  bilibili_boredom_min_interval_hours: "B 站触发间隔",
-  bilibili_share_probability: "视频分享概率",
-  bilibili_share_min_score: "视频分享最低评分",
   news_min_interval_hours: "新闻读取间隔",
   news_share_probability: "新闻分享概率",
   enable_external_event_self_link: "外界信息自我关联",
@@ -1172,8 +859,6 @@ const configLabels = {
   enable_private_reading_preference_influence: "私密偏好影响",
   private_reading_preference_min_ratings: "偏好生效最少评分数",
   private_reading_preference_max_terms: "偏好注入最多词条",
-  unanswered_screen_peek_after_minutes: "沉默多久后窥屏",
-  unanswered_screen_peek_cooldown_minutes: "沉默窥屏冷却",
   creative_inspiration_probability: "创作灵感概率",
   creative_share_probability: "创作透露概率",
   creative_chars_per_session: "每次创作字数",
@@ -1226,8 +911,6 @@ const configDescriptions = {
   enable_lunar_perception: "开启后在依赖可用时注入农历日期。",
   enable_solar_term_perception: "开启后注入当天或近三天节气提示。",
   enable_almanac_perception: "开启后生成轻量宜忌氛围标签，只作表达参考。",
-  enable_yesterday_screen_diary_context: "读取 screen_companion 的昨日屏幕观察日记脱敏摘要，作为今日状态、日程和生活节奏背景；不会读取今天实时屏幕。",
-  screen_diary_context_max_chars: "注入给状态和日程模型的昨日屏幕观察摘要最大字符数。建议较短，只保留活动类型和节奏。",
   TROUBLESHOOTING_PROVIDER_ID: "用于排障中心的模型复核。留空时先跟随回复/主动复核模型，再回退到陪伴通用/主模型。",
   idle_minutes: "用户多久没有活跃后，才被视为适合主动触达或分享的空闲状态。",
   min_interval_minutes: "同一私聊对象两次主动消息之间的最小间隔，避免频繁打扰。",
@@ -1391,9 +1074,6 @@ const configDescriptions = {
   enable_skill_growth_passive_injection: "开启后普通聊天会注入 Bot 当前能力状态和自我认知。默认关闭；关闭时技能成长仍会结算，并可继续影响日程和能力边界。",
   enable_skill_growth_schedule_influence: "开启后能力状态会约束日程表现，例如基本熟练的物理不再被常规物理题难住。",
   skill_growth_schedule_influence_strength: "能力状态影响日程生成的强度，0 表示只记录不约束。",
-  bilibili_boredom_min_interval_hours: "Bot 无聊刷 B 站的最小间隔。",
-  bilibili_share_probability: "看完视频后主动分享给用户的概率，按百分比填写。",
-  bilibili_share_min_score: "视频评分达到多少才考虑分享。",
   enable_news_daily_hot_read: "每日随日程生成或后台检查读取一次热点，形成新闻见闻。",
   enable_news_boredom_read: "开启后 Bot 空闲或无聊时会低频读取新闻。",
   news_min_interval_hours: "无聊看新闻的最小间隔。",
@@ -1458,8 +1138,6 @@ const configDescriptions = {
   enable_private_reading_preference_influence: "开启后，夹层阅读评分样本足够时会把稳定偏好作为私聊私密互动的弱背景；关闭后评分只用于素材挑选。",
   private_reading_preference_min_ratings: "累计评分达到这个数量后，偏好画像才会影响私聊私密互动。",
   private_reading_preference_max_terms: "每次注入最多参考多少个稳定偏好词，避免上下文太长或风格偏移。",
-  unanswered_screen_peek_after_minutes: "主动消息发出后，用户沉默多久才允许尝试识屏观察。",
-  unanswered_screen_peek_cooldown_minutes: "沉默识屏触发后的冷却时间。",
   creative_inspiration_probability: "从生活小事、梦境或日记里长出创作灵感的概率，按百分比填写。",
   creative_share_probability: "创作达到节点后自然透露给用户的概率，按百分比填写。",
   creative_chars_per_session: "每次闲暇创作行为大约写多少字；实际字数会受人格和当天能量影响。",
@@ -1559,7 +1237,6 @@ const featureSettingGroups = {
   enable_lunar_perception: ["environment_perception_timezone"],
   enable_solar_term_perception: ["environment_perception_timezone"],
   enable_almanac_perception: ["environment_perception_timezone"],
-  enable_yesterday_screen_diary_context: ["screen_diary_context_max_chars"],
   enable_group_companion: [
     "max_group_recent_messages",
     "max_group_slang_terms",
@@ -1631,8 +1308,6 @@ const featureSettingGroups = {
   enable_cross_user_memory_bridge: ["cross_user_memory_owner_only"],
   enable_atrelay_tools: ["atrelay_require_worldbook_first", "atrelay_member_cache_minutes", "atrelay_sensitive_confirm", "enable_atrelay_llm_rewrite", "atrelay_default_relay_style", "atrelay_multi_target_limit"],
   enable_livingmemory_integration: [],
-  enable_bilibili_integration: ["enable_bilibili_boredom_watch", "bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
-  enable_bilibili_boredom_watch: ["bilibili_boredom_min_interval_hours", "bilibili_share_probability", "bilibili_share_min_score"],
   enable_news_integration: ["enable_news_daily_hot_read", "enable_ai_daily_watch", "enable_news_boredom_read", "enable_external_event_self_link", "news_hot_sources", "news_hot_max_items", "news_sources", "ai_daily_sources", "ai_daily_prefer_text_version", "news_min_interval_hours", "news_share_probability", "external_event_self_link_probability", "external_event_self_link_cooldown_hours", "news_max_items_per_source"],
   enable_news_daily_hot_read: ["news_hot_sources", "news_hot_max_items", "enable_ai_daily_watch", "ai_daily_sources"],
   enable_ai_daily_watch: ["ai_daily_sources", "ai_daily_prefer_text_version"],
@@ -1649,7 +1324,6 @@ const featureSettingGroups = {
   enable_private_reading_boredom_read: ["private_reading_min_interval_hours", "private_reading_max_photo_count", "private_reading_share_probability", "private_reading_default_keywords", "private_reading_blocked_tags", "enable_private_reading_preference_influence", "private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
   enable_private_reading_ask_recommendation: ["private_reading_ask_probability"],
   enable_private_reading_preference_influence: ["private_reading_preference_min_ratings", "private_reading_preference_max_terms"],
-  enable_unanswered_screen_peek_followup: ["unanswered_screen_peek_after_minutes", "unanswered_screen_peek_cooldown_minutes"],
   enable_tts_enhancement: ["tts_generation_mode", "tts_voice_language", "tts_conversion_provider_id", "tts_extra_prompt", "tts_frequency_control_mode", "tts_constraint_mode", "tts_session_min_interval_seconds", "tts_private_min_interval_seconds", "tts_group_min_interval_seconds", "tts_trigger_probability", "tts_private_trigger_probability", "tts_group_trigger_probability", "enable_tts_local_playback", "enable_tts_local_playback_live_only", "tts_local_playback_volume", "enable_tts_live_subtitle_sync", "tts_live_subtitle_url", "tts_local_playback_min_interval_seconds", "auto_voice_enabled", "auto_voice_full_conversion_enabled", "auto_voice_max_chars", "auto_voice_cooldown_seconds", "main_user_voice_probability", "main_user_mention_voice_keywords", "main_user_mention_voice_probability", "main_user_mention_voice_prompt"],
   enable_tts_local_playback: ["enable_tts_local_playback_live_only", "tts_local_playback_volume", "tts_local_playback_min_interval_seconds"],
   enable_creative_writing: ["creative_hidden_mode", "creative_inspiration_probability", "creative_share_probability", "creative_chars_per_session", "creative_max_active_projects"],
@@ -2081,7 +1755,6 @@ const featureSettingTypes = {
 
 const probabilitySettingKeys = new Set([
   "share_probability",
-  "bilibili_share_probability",
   "news_share_probability",
   "external_event_self_link_probability",
   "web_exploration_share_probability",
@@ -2787,8 +2460,6 @@ function renderActiveTab(tabName = state.activeTab || "dashboard") {
     renderRoleplayPersonaDraftPanel();
   } else if (tabName === "config") {
     renderConfig();
-  } else if (tabName === "models") {
-    renderProviders();
   }
 }
 
@@ -2821,7 +2492,6 @@ async function loadAvailableProviders(force = false) {
   const availableProviders = await fetchJson("/providers/available");
   state.availableProviders = availableProviders.items || [];
   state.lazyLoaded.providers = true;
-  if (state.activeTab === "models") renderProviders();
   if (state.activeTab === "modules" || state.activeTab === "roleplay") renderModuleSettings();
   return state.availableProviders;
 }
@@ -2990,7 +2660,6 @@ function renderDashboardPulse() {
     ],
     ["image-cache", "图片缓存", `${overview.cache?.private_image_vision?.items || 0}/${overview.cache?.private_image_vision?.max_items || "不限"} 条`],
     ["modules", "模块工作台", moduleShortcutNote(overview)],
-    ["models", "模型分流", providerShortcutNote(overview.providers || {})],
     ["config", "名单与开关", `${overview.group?.access_mode || "whitelist"} · 白 ${overview.group?.whitelist?.length || 0} / 黑 ${overview.group?.blacklist?.length || 0}`],
   ];
   $("#dashboardShortcuts").innerHTML = shortcuts.map(([tab, label, note]) => `
@@ -3153,11 +2822,6 @@ function moduleShortcutNote(overview) {
   return `${enabledItems.length}/${items.length} 个主要模块开启${preview ? ` · ${preview}` : ""}${suffix}`;
 }
 
-function providerShortcutNote(providers) {
-  const configured = Object.values(providers || {}).filter((value) => String(value || "").trim()).length;
-  return configured ? `${configured} 个 Provider 已指定` : "使用默认回退链";
-}
-
 function renderHealthPanel() {
   const overview = state.overview || {};
   const providers = overview.providers || {};
@@ -3194,13 +2858,6 @@ function renderHealthPanel() {
       level: features.enable_livingmemory_integration && overview.livingmemory?.available ? "ok" : "info",
       title: "LivingMemory 协同",
       text: livingMemoryHealthText(overview.livingmemory),
-    },
-    {
-      level: features.enable_bilibili_integration ? (bili.available ? "ok" : "info") : "info",
-      title: "B 站主动联动",
-      text: features.enable_bilibili_integration
-        ? `${bili.available ? "已检测" : "未检测"} · 最新 ${bili.latest_video?.title || "暂无"}`
-        : "联动开关未启用",
     },
     {
       level: imageCache.enabled ? (imageTotal ? "ok" : "info") : "info",
@@ -4305,7 +3962,7 @@ function renderFeatureMatrix() {
     ["陪伴", ["enable_mai_style_integration", "enable_expression_learning", "enable_response_self_review", "enable_dialogue_episode_memory"]],
     ["群聊", ["enable_group_companion", "enable_group_context_injection", "enable_group_injection_guard", "enable_group_slang_learning", "enable_group_topic_threads", "enable_group_relationship_graph"]],
     ["记忆", ["enable_companion_memory", "enable_open_loop_tracking", "enable_livingmemory_integration"]],
-    ["主动联动", ["enable_proactive_quote_trigger_message", "enable_unanswered_screen_peek_followup", "enable_bilibili_integration", "enable_bilibili_boredom_watch", "enable_news_integration", "enable_ai_daily_watch", "enable_private_reading_integration", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_creative_writing", "creative_hidden_mode"]],
+    ["主动联动", ["enable_proactive_quote_trigger_message", "enable_news_integration", "enable_ai_daily_watch", "enable_private_reading_integration", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_creative_writing", "creative_hidden_mode"]],
   ];
   $("#featureMatrix").innerHTML = groups.map(([label, keys]) => `
     <section>
@@ -8671,7 +8328,6 @@ function renderModuleWorkbench(settings) {
       body: `${settings.max_daily_messages ?? 0} 条/天，空闲 ${settings.idle_minutes ?? 0} 分钟后进入候选。`,
       meta: [
         `最小间隔 ${settings.min_interval_minutes ?? 0} 分钟`,
-        toBool(settings.enable_unanswered_screen_peek_followup) ? "未回应后可轻窥屏" : "未回应不窥屏",
       ],
       actions: [
         ["proactive", "看主动候选"],
@@ -8736,14 +8392,13 @@ function renderModuleWorkbench(settings) {
       ],
       actions: [
         ["image-cache", "管理图片缓存"],
-        ["models", "看视觉模型"],
       ],
     },
     {
       title: "长线主动",
       kicker: "外部生活线",
-      status: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch || settings.enable_qzone_life_publish ? "有长线" : "未展开",
-      tone: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch || settings.enable_qzone_life_publish ? "ok" : "off",
+      status: settings.enable_creative_writing || settings.enable_qzone_life_publish ? "有长线" : "未展开",
+      tone: settings.enable_creative_writing || settings.enable_qzone_life_publish ? "ok" : "off",
       body: [
         creative.latest_title ? `最近创作：${creative.latest_title}` : "",
         qzone.last_text ? `最近说说：${qzone.last_text}` : "",
@@ -8768,7 +8423,6 @@ function renderModuleWorkbench(settings) {
       </div>
       <div class="module-workbench-actions">
         <button type="button" data-jump-tab="config">配置页</button>
-        <button type="button" data-jump-tab="models">模型页</button>
       </div>
     </section>
     <div class="module-workbench-grid">
@@ -8859,12 +8513,11 @@ function renderModuleSummary(settings) {
       label: "长线行为",
       value: settings.enable_creative_writing ? "创作开启" : "创作关闭",
       note: [
-        settings.enable_bilibili_boredom_watch ? "B 站" : "",
         settings.enable_qzone_life_publish ? "空间说说" : "",
         isPrivateReadingAvailable() && settings.enable_private_reading_boredom_read ? "夹层阅读" : "",
         isPrivateReadingAvailable() && settings.enable_private_reading_ask_recommendation ? "征求推荐" : "",
       ].filter(Boolean).join(" / ") || "联动关闭",
-      tone: settings.enable_creative_writing || settings.enable_bilibili_boredom_watch || settings.enable_qzone_life_publish || (isPrivateReadingAvailable() && (settings.enable_private_reading_boredom_read || settings.enable_private_reading_ask_recommendation)) ? "ok" : "off",
+      tone: settings.enable_creative_writing || settings.enable_qzone_life_publish || (isPrivateReadingAvailable() && (settings.enable_private_reading_boredom_read || settings.enable_private_reading_ask_recommendation)) ? "ok" : "off",
     },
     {
       label: "外部能力",
@@ -10348,7 +10001,7 @@ function renderFeatureSwitches() {
   const total = visibleDraftKeys.length;
   const enabled = visibleDraftKeys.filter((key) => toBool(state.featureDraft[key])).length;
   const proactiveLocked = visibleDraftKeys.filter((key) => featureLockedByProactiveOnlyMode(key)).length;
-  const riskyEnabled = ["enable_group_interjection", "enable_bilibili_boredom_watch", isPrivateReadingAvailable() ? "enable_private_reading_boredom_read" : "", isPrivateReadingAvailable() ? "enable_private_reading_ask_recommendation" : "", "enable_unanswered_screen_peek_followup"]
+  const riskyEnabled = ["enable_group_interjection", isPrivateReadingAvailable() ? "enable_private_reading_boredom_read" : "", isPrivateReadingAvailable() ? "enable_private_reading_ask_recommendation" : ""]
     .filter((key) => toBool(state.featureDraft[key])).length;
   const activeSafeFeatureKeys = safeFeatureKeys.filter((key) => !featureLockedByProactiveOnlyMode(key));
   $("#featureSwitchSummary").innerHTML = `
@@ -10924,17 +10577,15 @@ function featureDependencyLines(key) {
   if (["enable_companion_memory", "enable_expression_learning", "enable_intent_emotion_analysis", "enable_response_self_review", "enable_passive_topic_suppression", "enable_relationship_state_machine", "enable_emotion_simulation", "enable_dialogue_episode_memory", "enable_open_loop_tracking", "enable_food_menu_recommendation"].includes(key)) {
     dependencies.push(["依赖", "私聊互动策略"]);
   }
-  if (["enable_bilibili_boredom_watch"].includes(key)) dependencies.push(["依赖", "B 站能力可用"]);
   if (["enable_web_exploration", "enable_web_exploration_boredom_search"].includes(key)) dependencies.push(["依赖", "AstrBot 网页搜索"]);
   if (["enable_qzone_life_publish", "enable_qzone_comment_inbox"].includes(key)) dependencies.push(["依赖", "QQ 空间动态层"]);
   if (key === "enable_qzone_generated_image_publish") dependencies.push(["依赖", "QQ 空间动态层 + 主动拍照/生图"]);
   if (key === "enable_qzone_emotional_vent_publish") dependencies.push(["依赖", "情绪模拟 + QQ 空间动态层"]);
   if (key === "enable_photo_text_action") dependencies.push(["依赖", "ComfyUI、SDGen 或在线图片 API"]);
   if (key === "enable_tts_enhancement") dependencies.push(["依赖", "当前会话 TTS provider"]);
-  if (key === "enable_yesterday_screen_diary_context") dependencies.push(["依赖", "screen_companion 昨日观察日记"]);
   if (key.startsWith("enable_private_reading_")) dependencies.push(["依赖", "素材能力可用"]);
   if (key === "enable_private_image_self_recognition") dependencies.push(["依赖", "AstrBot 默认图片转述模型 / 插件识图模型"]);
-  if (["enable_group_interjection", "enable_bilibili_boredom_watch", "enable_news_boredom_read", "enable_web_exploration_boredom_search", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation", "enable_unanswered_screen_peek_followup"].includes(key)) {
+  if (["enable_group_interjection", "enable_news_boredom_read", "enable_web_exploration_boredom_search", "enable_private_reading_boredom_read", "enable_private_reading_ask_recommendation"].includes(key)) {
     dependencies.push(["注意", "高主动项"]);
   }
   return dependencies;
@@ -11166,14 +10817,8 @@ const featureDetailGuides = {
   enable_almanac_perception: {
     summary: "生成轻量宜忌氛围标签，只用于表达参考，不作为硬规则。",
     trigger: "环境感知刷新时。",
-    enabled: "日程和表达可能带一点当天氛围。",
-    disabled: "关闭这部分玄学感，默认更现实。",
-  },
-  enable_yesterday_screen_diary_context: {
-    summary: "读取 screen_companion 的昨日屏幕观察日记脱敏摘要，用来推断今天的状态、作息惯性和日程背景。",
-    trigger: "每日生成日程、刷新状态或需要昨日屏幕背景时。",
-    enabled: "Bot 会参考昨天的活动类型和节奏，但不会读取今天实时屏幕，也不应直说“我昨天看到你”。",
-    disabled: "不再把昨日屏幕观察摘要注入状态和日程。已有 screen_companion 数据不会被删除。",
+    enabled: “日程和表达可能带一点当天氛围。”,
+    disabled: “关闭这部分玄学感，默认更现实。”,
   },
   enable_group_companion: {
     summary: "群聊能力总入口，控制群观察、上下文、话题线、关系网和群主动行为是否运行。",
@@ -11325,18 +10970,6 @@ const featureDetailGuides = {
     enabled: "可减少重复存储，并让长期记忆链路更完整。",
     disabled: "插件只使用自身记忆结构，不调用 LivingMemory。",
   },
-  enable_bilibili_integration: {
-    summary: "接入 B 站相关能力，读取观看记录或视频信息作为 Bot 的生活见闻来源。",
-    trigger: "后台长线行为或用户询问最近看了什么时。",
-    enabled: "B 站子能力才可运行。",
-    disabled: "不会读取或使用 B 站内容。",
-  },
-  enable_bilibili_boredom_watch: {
-    summary: "Bot 无聊或空档时低频刷视频，并可能形成观看印象。",
-    trigger: "日程空档、无聊状态或长线主动检查时。",
-    enabled: "Bot 可以自己看视频，按人格决定是否分享。",
-    disabled: "不会主动刷视频。",
-  },
   enable_news_integration: {
     summary: "接入新闻源和热点源，让 Bot 获得近期时讯见闻。",
     trigger: "日程生成、每日热点读取或无聊看新闻时。",
@@ -11427,12 +11060,6 @@ const featureDetailGuides = {
     enabled: "Bot 会更自然地参考用户稳定高分倾向，但不会说出评分来源或覆盖人格。",
     disabled: "评分仍用于后续素材挑选，但不注入私聊回复。",
   },
-  enable_unanswered_screen_peek_followup: {
-    summary: "Bot 主动发消息后用户长时间没回时，可窥屏看看用户是不是在忙。",
-    trigger: "主动消息发出后超过配置分钟数且冷却通过。",
-    enabled: "这类识屏不受普通日次数限制，但仍受冷却控制。",
-    disabled: "用户不回时不会因此额外识屏。",
-  },
   enable_proactive_quote_trigger_message: {
     summary: "回复或主动消息能追溯到触发消息时，自动带引用；可按场景拆分，并可跳过过短回复。",
     trigger: "群聊被 @、引用、唤醒、连续对话保持、群主动插话，或模型预约的私聊主动能追溯触发消息时。",
@@ -11458,7 +11085,6 @@ function featureDetailExplanation(key) {
   if (guide?.summary) return guide.summary;
   if (key.startsWith("enable_group_")) return "群聊子能力。";
   if (key.startsWith("enable_private_reading_")) return "夹层阅读子能力。";
-  if (key.startsWith("enable_bilibili_")) return "B 站子能力。";
   if (key.startsWith("enable_qzone_")) return "QQ 空间子能力。";
   return featureDescription(key);
 }
@@ -11498,10 +11124,10 @@ function featureImpactLines(key) {
     lines.push(["场景", "私聊图片 / 引用图片 / 合并图片 / GIF"]);
   } else if (key === "enable_food_menu_recommendation") {
     lines.push(["场景", "私聊 / 吃饭选择"]);
-  } else if (key.startsWith("enable_bilibili_") || key.startsWith("enable_news_") || key === "enable_external_event_self_link" || key.startsWith("enable_web_exploration") || key.startsWith("enable_qzone_") || key === "enable_photo_text_action" || key.startsWith("enable_private_reading_") || key === "enable_creative_writing" || key === "creative_hidden_mode") {
+  } else if (key.startsWith("enable_news_") || key === "enable_external_event_self_link" || key.startsWith("enable_web_exploration") || key.startsWith("enable_qzone_") || key === "enable_photo_text_action" || key.startsWith("enable_private_reading_") || key === "enable_creative_writing" || key === "creative_hidden_mode") {
     lines.push(["场景", "长线主动"]);
-  } else if (key.startsWith("enable_environment_") || key.includes("perception") || key === "enable_yesterday_screen_diary_context") {
-    lines.push(["场景", key === "enable_yesterday_screen_diary_context" ? "日程 / 状态 / 屏幕日记" : "日程 / 状态 / 回复"]);
+  } else if (key.startsWith("enable_environment_") || key.includes("perception")) {
+    lines.push(["场景", "日程 / 状态 / 回复"]);
   } else {
     lines.push(["场景", "私聊陪伴"]);
   }
@@ -11807,368 +11433,8 @@ function bindProactiveOnlyTempUnlockActions(root = document) {
 }
 
 function renderProviders() {
-  const providers = providerValuesForRender();
-  renderProviderSummary(providers);
-  renderProviderFlow(providers);
-  const entries = Object.entries(providerLabels)
-    .filter(([key]) => visibleConfigKey(key))
-    .filter(([key, label]) => providerMatchesFilter(key, label, providers));
-  const groups = providerGroups
-    .map((group) => {
-      const groupEntries = entries.filter(([key]) => providerGroupByKey[key]?.id === group.id);
-      if (!groupEntries.length) return "";
-      return `
-        <section class="provider-group" data-provider-group="${escapeHtml(group.id)}">
-          <div class="provider-group-head">
-            <div>
-              <h3>${escapeHtml(group.title)}</h3>
-              <p>${escapeHtml(group.desc)}</p>
-            </div>
-            <span>${groupEntries.length} 项</span>
-          </div>
-          <div class="provider-grid">
-            ${groupEntries.map(([key, label]) => providerCardMarkup(key, label, providers)).join("")}
-          </div>
-        </section>
-      `;
-    })
-    .join("");
-  $("#providerForm").innerHTML = groups || `
-    <div class="empty provider-empty">
-      <b>没有匹配的模型配置</b>
-      <span>换个关键词，或切回“全部”查看完整模型分工。</span>
-    </div>
-  `;
-  bindProviderTests();
-}
-
-function providerValuesForRender() {
-  return {
-    ...(state.overview?.providers || {}),
-    ...(state.providerDraft || {}),
-  };
-}
-
-function providerCardMarkup(key, label, providers) {
-  const selected = providers[key] || "";
-  const resolved = resolveProviderId(key, providers);
-  const configured = Boolean(selected);
-  const noFallback = noFallbackProviderKeys.has(key);
-  const optionalNoFallback = optionalNoFallbackProviderKeys.has(key);
-  const group = providerGroupByKey[key];
-  const statusLabel = configured ? "已单独配置" : (noFallback ? "未配置" : (optionalNoFallback ? "可选未启用" : "自动回退"));
-  const guide = providerGuides[key] || {};
-  const preference = providerPreferenceMeta[guide.preference || "balanced"];
-  const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
-  return `
-    <article class="provider-card ${configured ? "configured" : "inherited"}">
-      <div class="provider-card-head">
-        <div>
-          <span class="provider-card-kicker">${escapeHtml(group?.title || "模型配置")}</span>
-          <h3>${escapeHtml(label)}</h3>
-        </div>
-        <span class="provider-badge ${configured ? "configured" : "inherited"}">${escapeHtml(statusLabel)}</span>
-      </div>
-      <div class="provider-tags">
-        ${preference ? `<span class="provider-tag ${escapeHtml(preference.className)}" title="${escapeHtml(preference.text)}">${escapeHtml(preference.label)}</span>` : ""}
-        ${impact ? `<span class="provider-tag impact-${escapeHtml(impact.className)}" title="${escapeHtml(impact.text)}">${escapeHtml(impact.label)}</span>` : ""}
-      </div>
-      <label class="provider-field">
-        <span>Provider</span>
-        ${providerSelect(key, selected)}
-      </label>
-      <div class="provider-current">
-        <span>当前使用</span>
-        <b>${escapeHtml(resolved || (noFallback ? "未配置" : "AstrBot 默认模型"))}</b>
-      </div>
-      ${providerGuideMarkup(key)}
-      <div class="provider-row">
-        <span class="hint">${escapeHtml(key)}</span>
-        <button type="button" data-provider-test="${escapeHtml(key)}">测试</button>
-      </div>
-      <span class="provider-status" data-provider-status="${escapeHtml(key)}"></span>
-    </article>
-  `;
-}
-
-function providerGuideMarkup(key) {
-  const guide = providerGuides[key];
-  if (!guide) return "";
-  const preference = providerPreferenceMeta[guide.preference || ""];
-  const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
-  return `
-    <span class="provider-guide">
-      <span><b>用途</b>${escapeHtml(guide.purpose)}</span>
-      <span><b>适合</b>${escapeHtml(guide.fit)}</span>
-      ${preference ? `<span><b>取向</b>${escapeHtml(preference.text)}</span>` : ""}
-      ${impact ? `<span><b>速度</b>${escapeHtml(impact.text)}</span>` : ""}
-      ${guide.note ? `<span><b>注意</b>${escapeHtml(guide.note)}</span>` : ""}
-      <span><b>回退</b>${escapeHtml(guide.fallback)}</span>
-    </span>
-  `;
-}
-
-function providerMatchesFilter(key, label, providers) {
-  const mode = state.providerMode || "all";
-  const configured = Boolean(providers[key]);
-  const group = providerGroupByKey[key];
-  if (mode === "configured" && !configured) return false;
-  if (mode === "inherited" && configured) return false;
-  if (mode === "vision" && group?.id !== "media") return false;
-  const guide = providerGuides[key] || {};
-  if (mode === "speed" && !providerNeedsLowLatency(key)) return false;
-  if (mode === "quality" && guide.preference !== "quality") return false;
-  const query = (state.providerFilter || "").trim().toLowerCase();
-  if (!query) return true;
-  const preference = providerPreferenceMeta[guide.preference || ""];
-  const impact = providerPassiveImpactMeta[guide.passiveImpact || ""];
-  const haystack = [
-    key,
-    label,
-    group?.title || "",
-    guide.purpose || "",
-    guide.fit || "",
-    guide.note || "",
-    guide.fallback || "",
-    preference?.label || "",
-    preference?.text || "",
-    impact?.label || "",
-    impact?.text || "",
-    providers[key] || "",
-  ].join(" ").toLowerCase();
-  return haystack.includes(query);
-}
-
-function renderProviderSummary(providers) {
-  const keys = Object.keys(providerLabels).filter((key) => visibleConfigKey(key));
-  const configured = keys.filter((key) => Boolean(providers[key])).length;
-  const inherited = keys.filter((key) => !providers[key] && !noFallbackProviderKeys.has(key) && !optionalNoFallbackProviderKeys.has(key)).length;
-  const requiredMissing = keys.filter((key) => !providers[key] && noFallbackProviderKeys.has(key)).length;
-  const available = state.availableProviders.length;
-  const passiveSensitive = keys.filter((key) => providerGuides[key]?.passiveImpact === "direct").length;
-  const speedRecommended = keys.filter((key) => providerNeedsLowLatency(key)).length;
-  const qualityRecommended = keys.filter((key) => providerGuides[key]?.preference === "quality").length;
-  const vision = providers.PLUGIN_VISION_PROVIDER_ID || "跟随 AstrBot 本体/工具转述";
-  $("#providerSummary").innerHTML = `
-    <div class="provider-cost-notice">
-      <b>成本提醒</b>
-      <span>火山方舟协作计划免费额度将在 2026-06-30 结束。使用火山方舟 Provider 时，请检查每日 Token 限额和后台任务开关，注意成本控制。</span>
-    </div>
-    <div class="provider-summary-card strong">
-      <span>单独配置</span>
-      <b>${configured}/${keys.length}</b>
-      <small>已指定专用 Provider</small>
-    </div>
-    <div class="provider-summary-card">
-      <span>自动回退</span>
-      <b>${inherited}</b>
-      <small>留空项会按兜底链路执行</small>
-    </div>
-    <div class="provider-summary-card speed">
-      <span>被动速度相关</span>
-      <b>${passiveSensitive}</b>
-      <small>这些项建议优先关注延迟</small>
-    </div>
-    <div class="provider-summary-card quality">
-      <span>效果优先项</span>
-      <b>${qualityRecommended}</b>
-      <small>适合更强推理或多模态模型</small>
-    </div>
-    <div class="provider-summary-card">
-      <span>低延迟优先项</span>
-      <b>${speedRecommended}</b>
-      <small>卡顿时优先检查这些项</small>
-    </div>
-    ${requiredMissing ? `
-    <div class="provider-summary-card warn">
-      <span>未配置专用项</span>
-      <b>${requiredMissing}</b>
-      <small>这些任务留空时不会回退</small>
-    </div>
-    ` : ""}
-    <div class="provider-summary-card">
-      <span>可选 Provider</span>
-      <b>${available}</b>
-      <small>${escapeHtml(available ? "来自 AstrBot 当前配置" : "暂无可选项，可手动输入 ID")}</small>
-    </div>
-    <div class="provider-summary-card">
-      <span>视觉通道</span>
-      <b>${escapeHtml(vision)}</b>
-      <small>图片、识屏与素材理解</small>
-    </div>
-  `;
-}
-
-function providerSelect(key, value) {
-  const known = state.availableProviders.some((item) => item.id === value);
-  const customValue = value && !known ? value : "";
-  const options = [
-    `<option value="">${noFallbackProviderKeys.has(key) ? "留空不启用" : "留空自动回退"}</option>`,
-    ...state.availableProviders.map((item) => {
-      const label = `${item.name || item.id}${item.model ? ` · ${item.model}` : ""}${item.is_default ? " · 默认" : ""}`;
-      return `<option value="${escapeHtml(item.id)}" ${item.id === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
-    }),
-    `<option value="__custom__" ${customValue ? "selected" : ""}>手动输入 Provider ID</option>`,
-  ].join("");
-  return `
-    <select data-provider-select="${escapeHtml(key)}">${options}</select>
-    <input data-provider-key="${escapeHtml(key)}" value="${escapeHtml(value || "")}" placeholder="自定义 Provider ID" ${customValue ? "" : "hidden"} />
-  `;
-}
-
-function currentProviderValues() {
-  const values = {
-    ...(state.overview?.providers || {}),
-    ...(state.providerDraft || {}),
-  };
-  document.querySelectorAll("[data-provider-key]").forEach((input) => {
-    values[input.dataset.providerKey] = input.value.trim();
-  });
-  return values;
-}
-
-function resolveProviderId(key, values = currentProviderValues()) {
-  if (values[key]) return values[key];
-  if (noFallbackProviderKeys.has(key)) return "";
-  if (optionalNoFallbackProviderKeys.has(key)) return "";
-  if (key === "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID") {
-    return values.LLM_PROVIDER_ID || "";
-  }
-  if (key === "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID") {
-    return values.RESPONSE_REVIEW_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
-  }
-  if (key === "REST_WAKEUP_PROVIDER_ID") {
-    return values.RESPONSE_REVIEW_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
-  }
-  if (key === "TROUBLESHOOTING_PROVIDER_ID") {
-    return values.RESPONSE_REVIEW_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
-  }
-  if (key === "EMOTION_JUDGEMENT_PROVIDER_ID") {
-    return values.TROUBLESHOOTING_PROVIDER_ID || values.RELATIONSHIP_ANALYSIS_PROVIDER_ID || values.MAI_STYLE_PROVIDER_ID || values.LLM_PROVIDER_ID || "";
-  }
-  if (key !== "LLM_PROVIDER_ID" && values.MAI_STYLE_PROVIDER_ID) return values.MAI_STYLE_PROVIDER_ID;
-  return values.LLM_PROVIDER_ID || "";
-}
-
-function setProviderStatus(key, message, level = "info") {
-  const status = document.querySelector(`[data-provider-status="${key}"]`);
-  if (!status) return;
-  status.className = `provider-status ${level}`;
-  status.textContent = message;
-}
-
-function bindProviderTests() {
-  document.querySelectorAll("[data-provider-select]").forEach((select) => {
-    syncProviderInput(select);
-    select.addEventListener("change", () => {
-      syncProviderInput(select);
-      rememberProviderDraft(select.dataset.providerSelect);
-    });
-  });
-  document.querySelectorAll("[data-provider-key]").forEach((input) => {
-    input.addEventListener("input", () => rememberProviderDraft(input.dataset.providerKey));
-  });
-  document.querySelectorAll("[data-provider-test]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      await testProvider(button.dataset.providerTest);
-    });
-  });
-}
-
-function bindProviderToolbar() {
-  const filter = $("#providerFilter");
-  if (filter) {
-    filter.addEventListener("input", () => {
-      state.providerFilter = filter.value;
-      renderProviders();
-    });
-  }
-  document.querySelectorAll("[data-provider-mode]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.providerMode = button.dataset.providerMode || "all";
-      document.querySelectorAll("[data-provider-mode]").forEach((item) => {
-        item.classList.toggle("active", item === button);
-      });
-      renderProviders();
-    });
-  });
-}
-
-function syncProviderInput(select) {
-  const key = select.dataset.providerSelect;
-  const input = document.querySelector(`[data-provider-key="${key}"]`);
-  if (!input) return;
-  if (select.value === "__custom__") {
-    input.hidden = false;
-    input.focus();
-  } else {
-    input.hidden = true;
-    input.value = select.value;
-  }
-}
-
-function rememberProviderDraft(key) {
-  const input = document.querySelector(`[data-provider-key="${key}"]`);
-  if (!input) return;
-  state.providerDraft[key] = input.value.trim();
-}
-
-async function testProvider(key) {
-  const providerId = resolveProviderId(key);
-  setProviderStatus(key, "测试中...", "info");
-  if (!providerId && (noFallbackProviderKeys.has(key) || optionalNoFallbackProviderKeys.has(key))) {
-    setProviderStatus(key, optionalNoFallbackProviderKeys.has(key) ? "未单独配置：当前不会调用该模型" : "未配置，无法测试", "warn");
-    return;
-  }
-  try {
-    const result = await postJson("/provider/test", { key, provider_id: providerId });
-    if (result.ok) {
-      const suffix = result.sample ? ` · ${result.sample}` : "";
-      setProviderStatus(key, `正常 ${result.elapsed_ms}ms${suffix}`, "ok");
-    } else {
-      setProviderStatus(key, result.error || "未返回内容", "warn");
-    }
-  } catch (error) {
-    setProviderStatus(key, error.message, "warn");
-  }
-}
-
-function renderProviderFlow(providers) {
-  const main = providers.LLM_PROVIDER_ID || "AstrBot 默认模型";
-  const mai = providers.MAI_STYLE_PROVIDER_ID || main;
-  const pluginVision = providers.PLUGIN_VISION_PROVIDER_ID
-    || providers.NARRATION_PROVIDER_ID
-    || "跟随工具结果转述 / 主模型";
-  const tasks = Object.entries(providerLabels).filter(([key]) => (
-    key !== "LLM_PROVIDER_ID"
-    && key !== "MAI_STYLE_PROVIDER_ID"
-    && key !== "PLUGIN_VISION_PROVIDER_ID"
-    && visibleConfigKey(key)
-  ));
-  $("#providerFlow").innerHTML = `
-    <div class="flow-lane">
-      <span class="flow-node primary">主模型<br><b>${escapeHtml(main)}</b></span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node">陪伴通用<br><b>${escapeHtml(mai)}</b></span>
-    </div>
-    <div class="flow-lane">
-      <span class="flow-node primary">默认图片转述<br><b>AstrBot 本体配置</b></span>
-      <span class="flow-arrow">→</span>
-      <span class="flow-node ${providers.PLUGIN_VISION_PROVIDER_ID ? "primary" : "inherited"}">插件识图模型<br><b>${escapeHtml(pluginVision)}</b></span>
-    </div>
-    <div class="flow-tasks">
-      ${tasks.map(([key, label]) => {
-        const resolved = resolveProviderId(key, providers);
-        const value = providers[key] || (
-          noFallbackProviderKeys.has(key)
-            ? "未配置"
-            : (optionalNoFallbackProviderKeys.has(key) ? "未启用" : (resolved || "AstrBot 默认模型"))
-        );
-        const inherited = !providers[key];
-        return `<span class="flow-node ${inherited ? "inherited" : "primary"}">${escapeHtml(label)}<br><b>${escapeHtml(value)}</b></span>`;
-      }).join("")}
-    </div>
-  `;
+  // The models/provider panel has been removed from the HTML.
+  return;
 }
 
 function miniStat(label, value) {
@@ -13246,7 +12512,6 @@ document.addEventListener("change", (event) => {
 });
 
 bindRoleplayModeSwitch();
-bindProviderToolbar();
 
 ["roleplayProfileForm", "privateAliasForm", "quickModuleForm", "environmentModuleForm", "privateModuleForm", "groupModuleForm", "worldbookModuleForm", "memoryModuleForm", "longTermModuleForm"].forEach((formId) => {
   const form = document.getElementById(formId);
@@ -13427,23 +12692,6 @@ $("#enableSafeFeaturesBtn").addEventListener("click", () => {
     }
   });
   renderFeatureSwitches();
-});
-
-$("#saveProvidersBtn").addEventListener("click", async () => {
-  const values = currentProviderValues();
-  const providers = {};
-  Object.keys(providerLabels).forEach((key) => {
-    if (visibleConfigKey(key)) providers[key] = values[key] || "";
-  });
-  await runAction(() => postJson("/settings/update", { providers }), "已保存模型配置", $("#saveProvidersBtn"));
-  state.providerDraft = { ...state.providerDraft, ...providers };
-  renderProviders();
-});
-
-$("#testAllProvidersBtn").addEventListener("click", async () => {
-  for (const key of Object.keys(providerLabels).filter(visibleConfigKey)) {
-    await testProvider(key);
-  }
 });
 
 loadAll();

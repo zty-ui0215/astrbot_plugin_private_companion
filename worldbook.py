@@ -1031,7 +1031,7 @@ class WorldbookMixin:
         impression = await self._llm_call(
             prompt,
             max_tokens=180,
-            provider_id=self._task_provider(self.relationship_analysis_provider_id, self.mai_style_provider_id),
+            provider_id=self._task_provider(self.aux_provider_id, self.llm_provider_id),
             task="worldbook_registration",
         )
         cleaned = _single_line(impression, 220)

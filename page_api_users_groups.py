@@ -93,7 +93,6 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     "proactive_idle_minutes",
                     "proactive_min_interval_minutes",
                     "photo_daily_limit",
-                    "screen_peek_daily_limit",
                     "poke_daily_limit",
                 ):
                     if key in payload:
@@ -106,10 +105,6 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     user["photo_generated_day"] = ""
                     user["last_generated_photo_path"] = ""
                     user["last_generated_photo_at"] = 0
-                    user["screen_peek_daily_limit"] = -1
-                    user["screen_peek_today"] = 0
-                    user["screen_peek_day"] = ""
-                    user["screen_peek_last_at"] = 0
                 if "proactive_boundary_note" in payload:
                     user["proactive_boundary_note"] = self._single_line(payload.get("proactive_boundary_note"), 180)
                 if payload.get("reset_daily"):
@@ -120,7 +115,6 @@ class PrivateCompanionPageApiUsersGroupsMixin:
                     user["photo_sent_day"] = ""
                     user["photo_generated_today"] = 0
                     user["photo_generated_day"] = ""
-                    user["screen_peek_today"] = 0
                 if payload.get("clear_schedule"):
                     self.plugin._clear_pending_proactive_plan(user)
                 if payload.get("clear_emotion_state"):
