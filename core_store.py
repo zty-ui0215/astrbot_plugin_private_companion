@@ -304,7 +304,6 @@ class CoreStoreMixin:
             "important_dates": [],
             "qq_presence_state": {},
             "token_usage": {},
-            "bilibili_integration": {},
             "news_integration": {},
             "web_exploration": {},
             "qzone_integration": {},
@@ -354,7 +353,6 @@ class CoreStoreMixin:
         data.setdefault("important_dates", [])
         data.setdefault("qq_presence_state", {})
         data.setdefault("token_usage", {})
-        data.setdefault("bilibili_integration", {})
         data.setdefault("news_integration", {})
         data.setdefault("web_exploration", {})
         data.setdefault("qzone_integration", {})

@@ -1140,7 +1140,6 @@ class UserMemoryMixin:
             "poke": ("戳", "戳一戳"),
             "voice": ("语音", "发语音", "声音"),
             "photo_text": ("图片", "照片", "图"),
-            "screen_peek": ("看屏幕", "窥屏", "看我屏幕", "屏幕"),
         }
         negative = ("别", "不要", "不许", "讨厌", "少", "别再", "不喜欢")
         positive = ("喜欢", "可以", "多", "想要", "爱看", "爱听")
@@ -1853,7 +1852,6 @@ class UserMemoryMixin:
             "poke": "戳一戳",
             "voice": "语音",
             "photo_text": "图片",
-            "screen_peek": "看屏幕",
         }
         lines = []
         for action, item in prefs.items():
@@ -3491,14 +3489,13 @@ Bot 主动后用户回复次数：{reply_count}
         if not isinstance(raw, dict) or not raw:
             return "暂无样本"
         labels = {
-            "screen_peek": "窥屏",
             "photo_text": "发图",
             "poke": "戳一戳",
             "voice": "语音",
             "jm_cosmos_read": "私下阅读",
         }
         parts = []
-        for key in ("screen_peek", "photo_text", "poke", "voice", "jm_cosmos_read"):
+        for key in ("photo_text", "poke", "voice", "jm_cosmos_read"):
             stats = raw.get(key)
             if not isinstance(stats, dict):
                 continue

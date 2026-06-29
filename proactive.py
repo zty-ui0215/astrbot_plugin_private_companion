@@ -411,15 +411,6 @@ class ProactiveMixin:
                 return override
         return max(0, self.photo_action_max_daily)
 
-    def _effective_user_screen_peek_daily_limit(self, user: dict[str, Any] | None = None) -> int:
-        if isinstance(user, dict):
-            if self._private_user_role(user) == "friend":
-                return 0
-            override = self._user_profile_override_int(user, "screen_peek_daily_limit")
-            if override is not None:
-                return override
-        return max(0, self.screen_peek_max_daily)
-
     def _effective_user_poke_daily_limit(self, user: dict[str, Any] | None = None) -> int:
         if isinstance(user, dict):
             override = self._user_profile_override_int(user, "poke_daily_limit")
@@ -464,7 +455,7 @@ class ProactiveMixin:
 
     def _friend_sensitive_proactive_action(self, action: Any) -> bool:
         parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
-        return bool(parts & {"screen_peek", "photo_text", "jm_cosmos_read"})
+        return bool(parts & {"photo_text", "jm_cosmos_read"})
 
     def _friend_can_receive_proactive_reason(self, user: dict[str, Any] | None, reason: Any, action: Any = "") -> bool:
         if not isinstance(user, dict) or self._private_user_role(user) != "friend":
@@ -493,7 +484,7 @@ class ProactiveMixin:
         if self._friend_sensitive_proactive_action(normalized_action):
             normalized_action = "message"
         sensitive_markers = (
-            "screen_peek", "窥屏", "屏幕", "识屏", "偷看", "偷偷看", "瞄一眼", "看一眼",
+            "窥屏", "屏幕", "识屏", "偷看", "偷偷看", "瞄一眼", "看一眼",
             "观察你", "看你在忙", "看看你在干嘛", "看你在干嘛",
         )
         combined = f"{normalized_topic} {normalized_motive}"
@@ -619,10 +610,6 @@ class ProactiveMixin:
         if user.get("photo_generated_day") != today:
             user["photo_generated_day"] = today
             user["photo_generated_today"] = 0
-        if user.get("screen_peek_day") != today:
-            user["screen_peek_day"] = today
-            user["screen_peek_today"] = 0
-            user["screen_peek_last_at"] = 0
         if user.get("greeting_sent_day") != today:
             user["greeting_sent_day"] = today
             user["greetings_sent"] = []
@@ -943,7 +930,7 @@ class ProactiveMixin:
     @staticmethod
     def _proactive_action_is_intimate(action: str) -> bool:
         parts = {part.strip() for part in str(action or "").split("+") if part.strip()}
-        return bool(parts & {"poke", "voice", "photo_text", "screen_peek", "jm_cosmos_read"})
+        return bool(parts & {"poke", "voice", "photo_text", "jm_cosmos_read"})
 
     @staticmethod
     def _proactive_text_is_intimate(*parts: Any) -> bool:
@@ -1644,7 +1631,7 @@ class ProactiveMixin:
         )
         user["planned_opener_mode"] = ""
         user["planned_followup_kind"] = ""
-        user["planned_proactive_quota_exempt"] = bool(event.get("_free_screen_peek"))
+        user["planned_proactive_quota_exempt"] = False
         return True
 
     def _is_proactive_plan_stale(self, user: dict[str, Any], *, now: float | None = None) -> bool:

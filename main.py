@@ -761,7 +761,6 @@ class PrivateCompanionPlugin(
         self.weather_lat = self._cfg_float(c, "weather_lat", 0.0, -90.0)
         self.weather_lon = self._cfg_float(c, "weather_lon", 0.0, -180.0)
         self.weather_refresh_minutes = self._cfg_int(c, "weather_refresh_minutes", 90, 10, 720)
-        self.enable_yesterday_screen_diary_context = self._cfg_bool(c, "enable_yesterday_screen_diary_context", True)
         self.screen_diary_context_max_chars = self._cfg_int(c, "screen_diary_context_max_chars", 700, 200, 1600)
         self.detail_enhancement_lead_minutes = self._cfg_int(c, "detail_enhancement_lead_minutes", 3, 0, 180)
         self.enable_daily_diary = self._cfg_bool(c, "enable_daily_diary", True)
@@ -770,14 +769,10 @@ class PrivateCompanionPlugin(
         self.important_date_lookahead_days = self._cfg_int(c, "important_date_lookahead_days", 7, 0, 60)
         legacy_actions = self._parse_action_list(self._cfg_raw(c, "enabled_proactive_actions", None))
         legacy_photo_enabled = "photo_text" in legacy_actions if legacy_actions else True
-        legacy_screen_enabled = "screen_peek" in legacy_actions if legacy_actions else False
         legacy_poke_enabled = "poke" in legacy_actions if legacy_actions else False
         legacy_voice_enabled = "voice" in legacy_actions if legacy_actions else False
         self.enable_photo_text_action = self._cfg_bool(
             c, "enable_photo_text_action", bool(self._cfg_raw(c, "allow_photo_text_action", legacy_photo_enabled))
-        )
-        self.enable_screen_glance_action = self._cfg_bool(
-            c, "enable_screen_glance_action", bool(self._cfg_raw(c, "allow_screen_peek_action", legacy_screen_enabled))
         )
         self.enable_poke_action = self._cfg_bool(
             c, "enable_poke_action", bool(self._cfg_raw(c, "allow_poke_action", legacy_poke_enabled))
@@ -790,11 +785,6 @@ class PrivateCompanionPlugin(
         self.voice_action_max_chars = self._cfg_int(c, "voice_action_max_chars", 30, 6, 80)
         self.photo_action_max_daily = self._cfg_int(c, "photo_action_max_daily", 1, 0, 5)
         self.proactive_photo_text_probability = self._cfg_int(c, "proactive_photo_text_probability", 18, 0, 100) / 100
-        self.screen_peek_max_daily = self._cfg_int(c, "screen_peek_max_daily", 1, 0, 5)
-        self.screen_peek_cooldown_minutes = self._cfg_int(c, "screen_peek_cooldown_minutes", 240, 0, 1440)
-        self.enable_unanswered_screen_peek_followup = self._cfg_bool(c, "enable_unanswered_screen_peek_followup", True)
-        self.unanswered_screen_peek_after_minutes = self._cfg_int(c, "unanswered_screen_peek_after_minutes", 45, 10, 240)
-        self.unanswered_screen_peek_cooldown_minutes = self._cfg_int(c, "unanswered_screen_peek_cooldown_minutes", 180, 30, 1440)
         self.enable_mai_style_integration = self._cfg_bool(c, "enable_mai_style_integration", True)
         self.enable_companion_memory = self._cfg_bool(c, "enable_companion_memory", True)
         self.enable_expression_learning = self._cfg_bool(c, "enable_expression_learning", True)
@@ -962,11 +952,6 @@ class PrivateCompanionPlugin(
         self.worldbook_config_paths = self._cfg_str(c, "worldbook_config_paths", "")
         self.enable_livingmemory_integration = self._cfg_bool(c, "enable_livingmemory_integration", True)
         self.livingmemory_tool_name = self._cfg_str(c, "livingmemory_tool_name", "recall_long_term_memory", "recall_long_term_memory")
-        self.enable_bilibili_integration = self._cfg_bool(c, "enable_bilibili_integration", True)
-        self.enable_bilibili_boredom_watch = self._cfg_bool(c, "enable_bilibili_boredom_watch", True)
-        self.bilibili_boredom_min_interval_hours = self._cfg_int(c, "bilibili_boredom_min_interval_hours", 8, 2, 72)
-        self.bilibili_share_probability = self._cfg_unit_interval(c, "bilibili_share_probability", 0.35, 0.0)
-        self.bilibili_share_min_score = self._cfg_int(c, "bilibili_share_min_score", 7, 0, 10)
         self.enable_news_integration = self._cfg_bool(c, "enable_news_integration", False)
         self.enable_news_boredom_read = self._cfg_bool(c, "enable_news_boredom_read", True)
         self.enable_news_daily_hot_read = self._cfg_bool(c, "enable_news_daily_hot_read", self._cfg_bool(c, "enable_hot_trend_sources", True))
@@ -1101,7 +1086,6 @@ class PrivateCompanionPlugin(
         self.max_group_relationship_edges = self._cfg_int(c, "max_group_relationship_edges", 80, 10, 300)
         # Backward-compatible aliases for stored daily plans and older code paths.
         self.allow_photo_text_action = self.enable_photo_text_action
-        self.allow_screen_peek_action = self.enable_screen_glance_action
         self.allow_poke_action = self.enable_poke_action
         self.allow_voice_action = self.enable_voice_action
 
@@ -2631,32 +2615,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
         return aliases.get(text, text if text in {"auto", "prompt", "system_prompt"} else "prompt")
 
     @staticmethod
-    def _normalize_framework_session_lock_mode(value: Any) -> str:
-        text = str(value or "").strip().lower()
-        aliases = {
-            "auto": "auto",
-            "自动": "auto",
-            "compat": "auto",
-            "compatibility": "auto",
-            "兼容": "auto",
-            "legacy": "auto",
-            "旧版": "auto",
-            "always": "always",
-            "on": "always",
-            "true": "always",
-            "enable": "always",
-            "enabled": "always",
-            "开启": "always",
-            "始终": "always",
-            "off": "off",
-            "false": "off",
-            "disable": "off",
-            "disabled": "off",
-            "关闭": "off",
-        }
-        return aliases.get(text, text if text in {"auto", "always", "off"} else "auto")
-
-    @staticmethod
     def _normalize_external_image_api_platform(value: Any) -> str:
         text = str(value or "").strip().lower()
         aliases = {
@@ -2721,18 +2679,6 @@ wakeup_type={_single_line(wakeup.get('type'), 40)} score={_single_line(wakeup.ge
             int(match.group(2)),
             int(match.group(3) or 0),
         )
-
-    def _framework_session_lock_enabled(self) -> bool:
-        mode = self._normalize_framework_session_lock_mode(getattr(self, "framework_session_lock_mode", "auto"))
-        if mode == "always":
-            return True
-        if mode == "off":
-            return False
-        version = self._parse_version_tuple(self._detect_astrbot_version())
-        if version is None:
-            return False
-        # AstrBot 4.25.x 曾出现主链/会话库并发锁问题；新版本默认不再额外串行化。
-        return (4, 25, 0) <= version <= (4, 25, 2)
 
     def _append_turn_prompt_fragment_by_position(
         self,

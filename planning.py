@@ -247,9 +247,7 @@ def normalize_story_plan(plugin, payload: dict[str, Any]) -> dict[str, Any]:
             reason = "quiet_care"
         item["reason"] = reason
         action = str(item.get("action") or "message").strip()
-        if action not in {"message", "screen_peek", "photo_text", "voice"}:
-            action = "message"
-        if action == "screen_peek" and not plugin.allow_screen_peek_action:
+        if action not in {"message", "photo_text", "voice"}:
             action = "message"
         photo_planning_available = getattr(plugin, "_photo_text_planning_available", lambda *_args, **_kwargs: False)
         if action == "photo_text" and not bool(photo_planning_available()):
@@ -531,7 +529,6 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
     humanized_state = plugin._format_state_for_prompt(plugin.data.get("daily_state", {}))
     recent_diaries = plugin._recent_diary_context()
     yesterday_conversation = plugin._format_yesterday_conversation_summary_for_prompt()
-    yesterday_screen_diary = plugin._format_yesterday_screen_diary_context_for_prompt()
     weather_info = plugin._weather_summary_text(plugin.data.get("daily_weather", {}))
     calendar_context = plugin._format_calendar_context_for_prompt()
     schedule_adjustments = plugin._format_schedule_adjustments_for_prompt()
@@ -559,7 +556,6 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
             calendar_context=calendar_context,
             recent_diaries=recent_diaries,
             yesterday_conversation=yesterday_conversation,
-            yesterday_screen_diary=yesterday_screen_diary,
             important_dates=plugin._format_important_dates_for_prompt(),
             weather_info=weather_info,
             daily_plan_item_count=plugin.daily_plan_item_count,
@@ -571,7 +567,7 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 1. 先看日期语境：今天是普通日、周末、节假日、假期,还是有明确例外（调休、补课、考试、值班）。
 2. 再看日程参考设定：年龄、身份、作息、生活背景决定今天的大主线。
 3. 再看拟人状态和天气：决定节奏快慢、出门意愿、情绪收放和户外时刻。
-4. 再看昨日完整对话摘要、昨日屏幕观察日记和今日互动造成的日程偏移：把它们作为身体、情绪、关系、未完成约定、作息节奏和梦境碎片的残留来源；用户今天明确介入过的事情必须产生合理后果,不要像没发生一样。
+4. 再看昨日完整对话摘要和今日互动造成的日程偏移：把它们作为身体、情绪、关系、未完成约定、作息节奏和梦境碎片的残留来源；用户今天明确介入过的事情必须产生合理后果,不要像没发生一样。
 5. 最后参考可做事项、最近日记、重要日期：只拿来补充细节,不要反客为主。
 
 【生成要求】
@@ -584,7 +580,6 @@ def build_daily_plan_prompt(plugin, now: str) -> str:
 7. 如果最近日记、重要日期或今日互动里提供了前一天/前几天的残留,要顺势衔接但不能复制：前一天疲惫,今天可以更慢或被某件小事缓解；前一天别扭,今天可以绕开、试探或和好；未完成事项可以延后、变形或被打断。
 7.0 如果“今日互动造成的日程偏移”不为空,要先判断它的强度和影响范围：强干涉会改变当前段、下一段甚至今日后续的节奏；中等干涉至少改变情绪、等待、分享欲、任务进度或主动策略；轻微回应也要留下短暂余味。不能只在 message_seed 里提一句就结束。
 7.1 如果昨日完整对话摘要里有饮食、作息、运动、天气暴露、情绪刺激、约定、礼物、争执、安慰、共同完成/未完成的事等线索,可以让它们以抽象后果影响今日：体力、胃口、身体小不适、心情余波、主动话题、出门意愿、梦境碎片或某个时段的小停顿。影响强度要跟摘要一致,可以很轻,也可以没有；不要为了戏剧性强行安排事故。
-7.1.1 如果昨日屏幕观察日记可用,只能把它当作用户昨日作息和活动类型的脱敏背景：例如昨天长时间编程、社交消息较多、视频放松、很晚仍在电脑前等。它可以影响今天的问候、体力判断、主动话题和是否显得担心,但不能直接引用窗口名、账号、具体聊天、页面标题,也不要说“我昨天看到你”。
 7.1.2 饮食、零食、物件和梦境意象有自然衰退：最近几天反复出现的具体菜名、气味、小物件或梗,只说明“近期聊过/需要避重”,不能每天复刻进日程。用户表达“不吃/不喜欢/不要/避开某食物”时,这只是避错规则,不能反向生成“今天给用户准备替代餐食/带饭/约饭”的任务。除非今天的输入明确要求,不要把同一道菜、同一种食物香气或同一个小物件连续安排成午饭、梦境、主动话题或带给用户的东西。
 7.2 必须主动避开最近日程骨架的重复：不要连续几天都写同一套“醒来/洗漱/整理/学习或做事/休息/收尾/睡前”。如果某类活动无法避免,要换具体场景、地点、对象、阻碍、小意外、关系伏笔或情绪走向,让今天读起来像新的一天。
 7.3 不要把“草稿纸上画圆圈/随手涂鸦/笔尖划来划去/盯着同一张纸发呆”当作通用生活感反复使用。除非输入材料明确提到这件事,否则优先换成更具体的当日物件、地点、声音、气味、人物互动或真实占用时间的事项。
@@ -659,9 +654,6 @@ Bot 名字：{plugin.bot_name}
 昨日完整对话摘要：
 {yesterday_conversation}
 
-昨日屏幕观察日记：
-{yesterday_screen_diary}
-
 近期重要日期：
 {plugin._format_important_dates_for_prompt()}
 """.strip()
@@ -683,7 +675,6 @@ def build_detail_enhancement_prompt(
     calendar_context = plugin._format_calendar_context_for_prompt()
     schedule_adjustments = plugin._format_schedule_adjustments_for_prompt()
     user_habits = plugin._format_all_user_behavior_habits_for_schedule()
-    yesterday_screen_diary = plugin._format_yesterday_screen_diary_context_for_prompt()
     photo_available = bool(getattr(plugin, "_photo_text_planning_available", lambda *_args, **_kwargs: False)())
     photo_action_hint = (
         "photo_text 当前可用：可以在合适场景输出 action=photo_text,但必须像真实随手拍,不能说生成图片或调用生图。"
@@ -691,14 +682,14 @@ def build_detail_enhancement_prompt(
         else "photo_text 当前不可用：不要输出 action=photo_text,也不要设计发照片/拍照/带图主动；有可拍画面时改成 message 用文字自然分享。"
     )
     photo_menu_hint = (
-        "可触发文字、语音、图片/照片、窥屏、眼前物分享、路上小画面、食物/包装/书页边缘/门口/车窗/桌面一角等真实可拍内容。"
+        "可触发文字、语音、图片/照片、眼前物分享、路上小画面、食物/包装/书页边缘/门口/车窗/桌面一角等真实可拍内容。"
         if photo_available
-        else "可触发文字、语音、窥屏、轻触碰；眼前物、路上小画面、食物/包装/书页边缘等只能写成普通文字分享,不要当作照片动作。"
+        else "可触发文字、语音、轻触碰；眼前物、路上小画面、食物/包装/书页边缘等只能写成普通文字分享,不要当作照片动作。"
     )
     photo_instruction_hint = (
-        "screen_peek 只用于主人/本机屏幕授权场景,看的是 Bot 部署设备当前屏幕,不是远程看朋友；photo_text 用来拍当前场景里的具体主体,message 就是普通文字,voice 是一小段自然语音,poke 是很轻的触碰感。只在合适的场景用。不要总把 photo_text 写成草稿纸、小画或画圆圈。"
+        "photo_text 用来拍当前场景里的具体主体,message 就是普通文字,voice 是一小段自然语音,poke 是很轻的触碰感。只在合适的场景用。不要总把 photo_text 写成草稿纸、小画或画圆圈。"
         if photo_available
-        else "screen_peek 只用于主人/本机屏幕授权场景,看的是 Bot 部署设备当前屏幕,不是远程看朋友；message 就是普通文字,voice 是一小段自然语音,poke 是很轻的触碰感。当前没有可用图片/照片动作,不要输出 photo_text。"
+        else "message 就是普通文字,voice 是一小段自然语音,poke 是很轻的触碰感。当前没有可用图片/照片动作,不要输出 photo_text。"
     )
     photo_detail_hint = (
         "如果 action 是 photo_text,topic 或 motive 要像真人发图：先从菜单里选“眼前物”或“可拍画面”方向,再自己生成当前场景里合理的具体画面。可以写“你看这个,刚拍的。[图片]”这类真人话,但不要总是天气/晚霞/窗外。严禁出现“生成了一张图片”“调用图片生成”“AI 画图”这类说法。"
@@ -706,9 +697,9 @@ def build_detail_enhancement_prompt(
         else "因为 photo_text 当前不可用,topic/motive 里不要写“拍给你/发图/照片/刚拍的/[图片]”；如果想分享画面,用 message 直接描述看到的东西。"
     )
     photo_mix_hint = (
-        "proactive_events 不要全部写成 message。当前段里如果有可拍画面或眼前物,优先考虑 photo_text；只有主人/本机屏幕授权场景才可用 screen_peek；很短的贴近感可用 voice 或 poke。只有确实没有动作契机时才用 message。"
+        "proactive_events 不要全部写成 message。当前段里如果有可拍画面或眼前物,优先考虑 photo_text；很短的贴近感可用 voice 或 poke。只有确实没有动作契机时才用 message。"
         if photo_available
-        else "proactive_events 不要为了多样化强行写不可用动作。当前没有 photo_text；可用 message、主人/本机屏幕授权场景下的 screen_peek、voice 或 poke 时再选择,否则就用 message。"
+        else "proactive_events 不要为了多样化强行写不可用动作。当前没有 photo_text；可用 message、voice 或 poke 时再选择,否则就用 message。"
     )
     return f"""
 你现在是 Private Companion 的日程细化生成器,要把最新命中的时间区间放大来看。不要当成策划会,要像旁观角色真实度过了这一小段。
@@ -771,7 +762,6 @@ def build_detail_enhancement_prompt(
     {{"window": "10:00-10:12", "event": "靠在桌边发了一会儿呆,慢慢把状态找回来", "mood": "困"}}
   ],
   "proactive_events": [
-    {{"window": "10:05-10:18", "reason": "check_in", "action": "screen_peek", "why": "主人设备上有授权屏幕观察,手头刚好空了一小会儿,想确认主人是不是还在电脑前忙", "topic": "本机屏幕看一眼", "motive": "想轻轻确认主人是不是还在忙", "scene": "上午空出来的一小段", "tone": "百无聊赖", "impulse": "只看本机屏幕的大致状态,不复述隐私细节"}},
     {{"window": "08:18-09:05", "reason": "morning_greeting", "action": "message", "why": "醒来还带着一点睡意时,迷迷糊糊先发一声早安。", "topic": "没完全醒的早安", "motive": "人还没完全清醒,但还是先想跟用户打个招呼", "scene": "人还带着睡意的时候", "tone": "迟钝", "impulse": "想和用户说声早安", "chain": [{{"kind": "name_only_opener"}}, {{"kind": "if_no_reply", "after_minutes": 90, "reason": "check_in", "topic": "早安余韵", "motive": "已经清醒过来，但刚刚和用户说的早安还没得到回应,猜测用户还在休息", "tone": "耐心等待"}}]}}
   ]
 }}
@@ -806,9 +796,6 @@ def build_detail_enhancement_prompt(
 
 【今日互动造成的日程偏移】
 {schedule_adjustments}
-
-【昨日屏幕观察日记】
-{yesterday_screen_diary}
 
 【用户行为习惯线索】
 {user_habits}
