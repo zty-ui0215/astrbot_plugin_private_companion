@@ -451,6 +451,38 @@ class PrivateCompanionPlugin(
         return _flat_get(config, key, default)
 
     @staticmethod
+    def _cleanup_orphaned_top_level_config_keys(config: AstrBotConfig) -> None:
+        """移除已保存配置中不属于 schema 顶层的孤立 key。"""
+        try:
+            schema_path = Path(__file__).with_name("_conf_schema.json")
+            with open(schema_path, "r", encoding="utf-8") as f:
+                schema = json.load(f)
+            valid_top_keys = set(schema.keys())
+            if not isinstance(config, dict):
+                return
+            orphaned = [k for k in list(config.keys()) if k not in valid_top_keys]
+            for k in orphaned:
+                try:
+                    del config[k]
+                except Exception:
+                    pass
+            if orphaned:
+                logger.info(
+                    "[PrivateCompanion] 已清理 %d 个孤立顶层配置项: %s",
+                    len(orphaned),
+                    ", ".join(orphaned[:10]),
+                )
+                # 保存清理后的配置
+                save = getattr(config, "save_config", None)
+                if callable(save):
+                    try:
+                        save()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.debug("[PrivateCompanion] 清理孤立顶层 key 失败: %s", exc)
+
+    @staticmethod
     def _cfg_bool(config: AstrBotConfig, key: str, default: bool = True) -> bool:
         value = _flat_get(config, key, default)
         value = _flat_get(config, key, default)
@@ -503,6 +535,8 @@ class PrivateCompanionPlugin(
             schema_path=Path(__file__).with_name("_conf_schema.json"),
             logger=logger,
         )
+        # 清理已保存配置中不属于 schema 顶层的孤立 key，避免 AstrBot 设置页显示异常
+        self._cleanup_orphaned_top_level_config_keys(c)
 
         self.enabled = self._cfg_bool(c, "enabled", True)
         self.enable_proactive_only_mode = self._cfg_bool(c, "enable_proactive_only_mode", False)

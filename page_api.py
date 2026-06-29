@@ -6891,6 +6891,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         self._set_config_value(key, value)
         attr_map = {
             "LLM_PROVIDER_ID": "llm_provider_id",
+            "AUX_PROVIDER_ID": "aux_provider_id",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": "smart_message_debounce_provider_id",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME": "comfyui_text2img_workflow_name",
             "COMFYUI_SELFIE_WORKFLOW_NAME": "comfyui_selfie_workflow_name",
@@ -7064,12 +7065,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         config = getattr(self.plugin, "config", None)
         if config is None:
             return
-        if _set_into_config(config, key, value, allow_flat_fallback=False):
-            return
-        if self._set_schema_group_config_value(config, key, value):
-            return
         _set_into_config(config, key, value)
-        return
 
     def _set_schema_group_config_value(self, config: Any, key: str, value: Any) -> bool:
         group_key = self._schema_group_for_key(key)

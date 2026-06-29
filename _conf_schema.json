@@ -3014,6 +3014,15 @@
       "enabled": true
     }
   },
+  "enable_humanized_states": {
+    "description": "启用拟人化身体/梦境状态",
+    "type": "bool",
+    "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
   "humanized_state_config": {
     "description": "拟人化状态",
     "type": "object",
@@ -3110,6 +3119,32 @@
         "default": 65,
         "condition": {
           "enable_rest_reply_simulation": true
+        }
+      },
+      "enable_rest_backlog_reply": {
+        "description": "启用休息积压回复",
+        "type": "bool",
+        "hint": "开启后，休息期间积压的消息会在醒来后优先处理。",
+        "default": true,
+        "condition": {
+          "enable_rest_reply_simulation": true,
+          "enable_humanized_states": true
+        }
+      },
+      "rest_backlog_max_messages": {
+        "description": "休息积压消息上限",
+        "type": "int",
+        "hint": "休息期间最多积压多少条消息用于醒来后处理。",
+        "default": 10,
+        "slider": {
+          "min": 1,
+          "max": 50,
+          "step": 1
+        },
+        "condition": {
+          "enable_rest_backlog_reply": true,
+          "enable_rest_reply_simulation": true,
+          "enable_humanized_states": true
         }
       }
     },
@@ -4211,24 +4246,6 @@
         "default": 1.8
       }
     },
-    "condition": {
-      "enabled": true
-    }
-  },
-  "enable_group_companion": {
-    "description": "启用群聊陪伴观察",
-    "type": "bool",
-    "hint": "群聊观察的总开关。开启后，插件会在目标群里静默观察群聊气氛、群友发言和常见梗；默认不主动插话，只在 AstrBot 本身触发群聊回复时注入上下文。",
-    "default": true,
-    "condition": {
-      "enabled": true
-    }
-  },
-  "enable_humanized_states": {
-    "description": "启用拟人化身体/梦境状态",
-    "type": "bool",
-    "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
-    "default": true,
     "condition": {
       "enabled": true
     }

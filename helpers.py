@@ -307,20 +307,22 @@ def _set_into_config(config: Any, key: str, value: Any, _wrapper_key: Any = None
                 return new_value
         return new_value
 
-    def find_and_set(target: dict[str, Any]) -> bool:
-        # Match _flat_get(): prefer schema-grouped values over legacy flat
-        # compatibility keys, otherwise the official config page can keep
-        # showing the old value after the extension page/command saves.
+    def _find_and_set(target: dict[str, Any]) -> bool:
+        # 先搜索嵌套子 dict（包括 schema 的 items 层），再检查当前层
         for child in target.values():
-            if isinstance(child, dict) and find_and_set(child):
+            if isinstance(child, dict) and _find_and_set(child):
                 return True
+        # 也搜索 schema object 的 items 子层
+        items = target.get("items")
+        if isinstance(items, dict) and _find_and_set(items):
+            return True
         if key in target:
-            target[key] = convert(target.get(key), value)
+            target[key] = _convert_value(target.get(key), value)
             return True
         return False
 
     if isinstance(config, dict):
-        if _find_and_set(config, key, value):
+        if _find_and_set(config):
             return
 
     # 兜底：找不到 key 时写顶层
