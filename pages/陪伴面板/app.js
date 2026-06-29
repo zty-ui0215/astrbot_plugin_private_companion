@@ -2446,6 +2446,18 @@ function downloadJson(filename, data) {
   URL.revokeObjectURL(url);
 }
 
+function unwrapConfigPackagePayload(value) {
+  let current = value;
+  for (let index = 0; index < 8; index += 1) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return current;
+    if (current.kind === "private_companion_config_backup" || (current.overview && (current.users || current.groups))) return current;
+    const next = current.package || current.data || current.payload || current.result;
+    if (!next || typeof next !== "object" || Array.isArray(next) || next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
 function formatBackupTime(value) {
   const timestamp = Number(value || 0);
   if (!timestamp) return "未知时间";
@@ -2620,7 +2632,7 @@ async function readConfigImportFile(file) {
   } catch (error) {
     throw new Error("备份文件不是有效 JSON");
   }
-  state.configImportPackage = data;
+  state.configImportPackage = unwrapConfigPackagePayload(data);
   state.configImportPreview = null;
   renderConfigMigrationPreview();
   showToast("备份/快照文件已读取，请先预览");
@@ -3341,6 +3353,7 @@ function renderTroubleshooting() {
   const chainEl = $("#troubleshootingChainTests");
   const injectionsEl = $("#troubleshootingPromptInjections");
   const debounceEl = $("#troubleshootingDebounceTrace");
+  const faqEl = $("#troubleshootingFaq");
   if (!summaryEl || !checksEl || !eventsEl || !sqliteEl || !chainEl || !injectionsEl) return;
   const data = state.troubleshooting || {};
   const summary = data.summary || {};
@@ -3402,6 +3415,7 @@ function renderTroubleshooting() {
     : `<div class="empty small">没有检测到候选 SQLite 数据库文件</div>`;
   chainEl.innerHTML = troubleshootingChainTestMarkup(data.chain_tests || {}, data.recent_photo_generations || []);
   injectionsEl.innerHTML = troubleshootingPromptInjectionMarkup(data.prompt_injections || {});
+  if (faqEl) faqEl.innerHTML = troubleshootingFaqMarkup(data);
   if (debounceEl) {
     debounceEl.innerHTML = troubleshootingDebounceTraceMarkup(state.overview?.message_debounce || {});
   }
@@ -3489,6 +3503,104 @@ function troubleshootingEventMarkup(item) {
       </footer>
     </section>
   `;
+}
+
+function troubleshootingFaqMarkup(data = {}) {
+  const chainTests = data.chain_tests || {};
+  const proactiveTest = chainTests.proactive_message || {};
+  const imageTest = chainTests.image_generation_text2img || chainTests.image_generation || {};
+  const promptMessages = Array.isArray(data.prompt_injections?.messages) ? data.prompt_injections.messages : [];
+  const proactiveMeta = proactiveTest.pending
+    ? "最近主动测试：已预约，稍后刷新看结果"
+    : proactiveTest.ran_at_text
+      ? `最近主动测试：${proactiveTest.ok ? "通过" : "失败"} · ${proactiveTest.ran_at_text}`
+      : "尚未运行主动链路测试";
+  const imageMeta = imageTest.ran_at_text
+    ? `最近文生图测试：${imageTest.ok ? "通过" : "失败"} · ${imageTest.ran_at_text}`
+    : "尚未运行文生图链路测试";
+  const injectionMeta = promptMessages.length
+    ? `当前保留最近 ${Math.min(promptMessages.length, 10)} 次回复的注入链路`
+    : "当前没有可展示的注入链路记录";
+  const items = [
+    {
+      title: "为什么没有主动消息？",
+      meta: proactiveMeta,
+      body: [
+        "先确认私聊对象已启用，并且没有处在静默、休息、冷却、每日上限、未回复降频或主动人格判定拦截中。",
+        "再看上方“最近问题”和主动审计记录：如果显示 dropped/deferred，通常是时间窗、关系压力、内容重复或链路依赖不可用。",
+        "最直接的验证方式是点“测试主动消息”，它会预约一次临时主动，检查生成、复核、发送和归档是否完整。",
+      ],
+      actions: [
+        { label: "看主动页", tab: "proactive" },
+        { label: "看私聊对象", tab: "private" },
+        { label: "测试主动消息", test: "proactive_message" },
+      ],
+    },
+    {
+      title: "为什么生图失败？",
+      meta: imageMeta,
+      body: [
+        "先看在线/本地后端是否选对：在线后端要检查平台、Base URL、Key、模型名、尺寸和超时；本地 ComfyUI 要检查工作流名称和服务是否可连。",
+        "如果是自拍或参考图链路，再检查参考图路径/URL 是否可读，以及本地负载保护有没有因为 CPU、内存或队列压力而延后。",
+        "排障里的“测试文生图/测试自拍”会实际生成文件，比只看配置更可靠。",
+      ],
+      actions: [
+        { label: "测试文生图", test: "image_generation_text2img", workflowKind: "text2img" },
+        { label: "测试自拍", test: "image_generation_selfie", workflowKind: "selfie" },
+        { label: "看模型页", tab: "models" },
+      ],
+    },
+    {
+      title: "为什么回复像被注入或带偏？",
+      meta: "优先看“最近注入内容”和群聊防注入记录",
+      body: [
+        "先点开最近回复对应的注入链路，区分真实用户消息、插件动态注入、TTS 规则和模型生成内容。",
+        "群聊里如果有人要求改称呼、改设定、改格式或要求忽略人格，确认“群聊防注入”和“群聊人格降噪”开启。",
+        "如果污染来自关系网自登记、黑话或成员画像，去关系网/群聊页检查对应条目。",
+      ],
+      actions: [
+        { label: "看群聊页", tab: "group" },
+        { label: "看关系网", tab: "worldbook" },
+      ],
+    },
+    {
+      title: "为什么排障页没有注入记录？",
+      meta: injectionMeta,
+      body: [
+        "注入记录按最近回复聚合，只保留最近 10 次；需要实际发生一次主链请求或请求级提示词注入后才会出现。",
+        "非陪伴私聊现在会放行默认主链，这类消息不会强行生成陪伴注入记录，这是正常现象。",
+        "如果刚刚才触发回复，先点“重新检查”；如果仍没有，说明该轮可能没有进入插件被动增强链路，或被主动-only/休息/目标用户判断提前放行。",
+      ],
+      actions: [
+        { label: "重新检查", refresh: true },
+        { label: "看最近注入", anchor: "troubleshootingPromptInjections" },
+      ],
+    },
+  ];
+  return items.map((item, index) => `
+    <details class="troubleshooting-faq-item" ${index < 2 ? "open" : ""}>
+      <summary>
+        <span>
+          <b>${escapeHtml(item.title)}</b>
+          <small>${escapeHtml(item.meta)}</small>
+        </span>
+      </summary>
+      <div class="troubleshooting-faq-body">
+        ${item.body.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
+        <footer>
+          ${item.actions.map((action) => {
+            if (action.tab) return `<button type="button" data-jump-tab="${escapeHtml(action.tab)}">${escapeHtml(action.label)}</button>`;
+            if (action.test) {
+              return `<button type="button" data-troubleshooting-test="${escapeHtml(action.test)}"${action.workflowKind ? ` data-troubleshooting-workflow-kind="${escapeHtml(action.workflowKind)}"` : ""}>${escapeHtml(action.label)}</button>`;
+            }
+            if (action.refresh) return `<button type="button" data-troubleshooting-refresh>${escapeHtml(action.label)}</button>`;
+            if (action.anchor) return `<button type="button" data-scroll-target="${escapeHtml(action.anchor)}">${escapeHtml(action.label)}</button>`;
+            return "";
+          }).join("")}
+        </footer>
+      </div>
+    </details>
+  `).join("");
 }
 
 function troubleshootingChainTestMarkup(results, recentPhotoGenerations = []) {
@@ -3750,6 +3862,14 @@ function promptInjectionKindLabel(kind) {
   }[kind] || kind || "注入记录";
 }
 
+function promptInjectionMessagePreview(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "未记录触发消息";
+  const internalMarkers = ["【语音消息规则】", "<pc_tts>", "</pc_tts>", "语音消息规则", "提示词片段", "当前语音正文目标语种"];
+  if (internalMarkers.some((marker) => text.includes(marker))) return "未记录触发消息";
+  return text.length > 72 ? `${text.slice(0, 72)}…` : text;
+}
+
 function troubleshootingPromptInjectionMarkup(data) {
   const messages = Array.isArray(data?.messages) ? data.messages.slice(0, 10) : [];
   const total = Number(data?.message_total || messages.length || 0);
@@ -3776,7 +3896,7 @@ function troubleshootingPromptInjectionMessageMarkup(message) {
     Number(message?.module_count || 0) ? `${Number(message.module_count)} 个模块` : "",
     kinds.length ? kinds.join(" / ") : "",
   ].filter(Boolean).join(" · ");
-  const messagePreview = message?.message_preview || (items[0]?.metadata?.["触发消息"]) || items[0]?.preview || "未记录触发消息";
+  const messagePreview = promptInjectionMessagePreview(message?.message_preview || (items[0]?.metadata?.["触发消息"]) || "");
   const metaRows = [
     ["发送者", message?.sender_label || ""],
     ["会话", message?.session || ""],
@@ -12579,6 +12699,15 @@ document.addEventListener("click", async (event) => {
       showToast(`刷新失败：${error.message}`, "error");
     } finally {
       setActionBusy(troubleshootingRefresh, false);
+    }
+    return;
+  }
+  const scrollTarget = element?.closest("[data-scroll-target]");
+  if (scrollTarget) {
+    const targetId = scrollTarget.dataset.scrollTarget || "";
+    const targetEl = targetId ? document.getElementById(targetId) : null;
+    if (targetEl) {
+      targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
     }
     return;
   }

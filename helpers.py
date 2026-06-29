@@ -296,12 +296,15 @@ def _set_into_config(config: Any, key: str, value: Any, *, allow_flat_fallback: 
         return new_value
 
     def find_and_set(target: dict[str, Any]) -> bool:
-        if key in target:
-            target[key] = convert(target.get(key), value)
-            return True
+        # Match _flat_get(): prefer schema-grouped values over legacy flat
+        # compatibility keys, otherwise the official config page can keep
+        # showing the old value after the extension page/command saves.
         for child in target.values():
             if isinstance(child, dict) and find_and_set(child):
                 return True
+        if key in target:
+            target[key] = convert(target.get(key), value)
+            return True
         return False
 
     if isinstance(config, dict) and find_and_set(config):

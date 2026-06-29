@@ -3027,7 +3027,7 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return "中午了诶。你吃东西没有,别又随便糊弄过去。"
         if reason in {"activity_share", "diary_share", "background_schedule"}:
             return "我刚刚想到一件小事,就想跟你说一下。"
-        return "我刚好空下来一点,就想问你一句。"
+        return "刚好到能休息一小会儿的时候,想问你一句。"
 
     async def _execute_proactive_action(
         self,

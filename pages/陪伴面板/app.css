@@ -5365,6 +5365,79 @@ input[type="search"] {
   box-shadow: var(--shadow-ring);
 }
 
+.troubleshooting-faq-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(185, 200, 226, 0.72);
+  border-radius: var(--radius);
+  padding: 14px;
+  background:
+    linear-gradient(135deg, rgba(245, 249, 255, 0.96), rgba(255, 255, 255, 0.78)),
+    var(--surface);
+  box-shadow: var(--shadow-ring);
+}
+
+.troubleshooting-faq {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.troubleshooting-faq-item {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.82);
+  overflow: hidden;
+}
+
+.troubleshooting-faq-item summary {
+  cursor: pointer;
+  padding: 12px;
+  list-style: none;
+}
+
+.troubleshooting-faq-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.troubleshooting-faq-item summary b,
+.troubleshooting-faq-item summary small {
+  display: block;
+}
+
+.troubleshooting-faq-item summary small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.troubleshooting-faq-body {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.troubleshooting-faq-body p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.troubleshooting-faq-body footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.troubleshooting-faq-body button {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
 .troubleshooting-injection-panel {
   display: grid;
   gap: 12px;
@@ -12597,6 +12670,7 @@ pre {
   .troubleshooting-grid,
   .troubleshooting-reasons,
   .troubleshooting-chain-tests,
+  .troubleshooting-faq,
   .troubleshooting-prompt-injections,
   .troubleshooting-injection-item dl,
   .debounce-log-list {

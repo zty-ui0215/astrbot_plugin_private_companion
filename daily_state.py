@@ -1069,10 +1069,10 @@ class DailyStateMixin:
                     "window": "15:20-17:10",
                     "reason": "check_in",
                     "action": "message",
-                    "why": "下午有一小段空闲，想问问用户那边怎么样。",
-                    "topic": "下午空闲时",
-                    "motive": "下午闲下来了，想看看用户是不是也能休息一下",
-                    "scene": "下午暂时空下来的时候",
+                    "why": "下午短暂休息时，想轻轻问一句用户那边怎么样。",
+                    "topic": "下午短暂休息",
+                    "motive": "下午节奏缓下来一点，想看看用户是不是也能休息一下",
+                    "scene": "下午短暂休息的时候",
                     "tone": "平静",
                     "impulse": "好奇用户在做什么",
                     "mood": "微松",
@@ -7403,12 +7403,18 @@ class DailyStateMixin:
             "不打扰你",
             "这段先安静一下",
             "先安静一下",
+            "下午空一下",
+            "下午空一会",
+            "下午空一会儿",
+            "下午空了下",
         )
         if normalized in empty_markers:
             return ""
         if any(token in normalized for token in ("没什么想说", "没有什么想说", "没什么可说", "没有什么可说")):
             return ""
         if any(token in normalized for token in ("先不吵", "不打扰", "先留白")):
+            return ""
+        if re.fullmatch(r"(?:上午|中午|下午|晚上|午后|傍晚)?(?:先)?空(?:一下|一会儿?|了下)", normalized):
             return ""
         return cleaned
 

@@ -357,6 +357,32 @@ class EventDispatchMixin:
             unique.append(message_id)
         return unique
 
+    def _event_is_platform_message_event(self, event: AstrMessageEvent) -> bool:
+        """Return True only for events whose current id can be queried by get_msg."""
+        raw = self._event_raw_payload(event)
+        post_type = str(raw.get("post_type") or "").strip().lower()
+        if post_type:
+            return post_type in {"message", "message_sent"}
+        if raw:
+            message_type = str(raw.get("message_type") or "").strip().lower()
+            if message_type in {"private", "group"}:
+                return True
+            if any(key in raw for key in ("raw_message", "message", "message_id", "msg_id")):
+                return True
+            return False
+        components = self._event_components(event)
+        if components:
+            labels: list[str] = []
+            for item in components:
+                label = item.__class__.__name__.lower()
+                if isinstance(item, dict):
+                    label = str(item.get("type") or item.get("post_type") or "").strip().lower()
+                labels.append(label)
+            if labels and all(("poke" in label or "notice" in label) for label in labels):
+                return False
+            return True
+        return bool(str(getattr(event, "message_str", "") or "").strip())
+
     def _event_scope_key(self, event: AstrMessageEvent) -> str:
         raw = self._event_raw_payload(event)
         group_id = _single_line(raw.get("group_id"), 80)
@@ -690,6 +716,35 @@ class EventDispatchMixin:
             return f"{display_name}/{sender_id}"
         return display_name or sender_id
 
+    @staticmethod
+    def _prompt_injection_preview_is_internal_prompt(text: str) -> bool:
+        cleaned = _single_line(text, 260)
+        if not cleaned:
+            return False
+        internal_markers = (
+            "【语音消息规则】",
+            "<pc_tts>",
+            "</pc_tts>",
+            "语音消息规则",
+            "提示词片段",
+            "请求级环境感知注入",
+            "被动回复注入",
+            "当前语音正文目标语种",
+            "自然聊天时用中文文字推进对话",
+            "不要写“中文含义”",
+        )
+        if any(marker in cleaned for marker in internal_markers):
+            return True
+        if cleaned.startswith("【") and "规则" in cleaned[:40]:
+            return True
+        return False
+
+    def _safe_prompt_injection_message_preview(self, value: Any, *, limit: int = 220) -> str:
+        preview = _single_line(value, limit)
+        if self._prompt_injection_preview_is_internal_prompt(preview):
+            return ""
+        return preview
+
     def _upsert_recent_prompt_injection_event(
         self,
         *,
@@ -699,7 +754,11 @@ class EventDispatchMixin:
         sender_label: str = "",
     ) -> None:
         trace = _single_line(trace_id, 80) or f"trace-{uuid.uuid4().hex[:16]}"
-        preview = _single_line(message_preview, 220) or _single_line(item.get("preview"), 220) or _single_line(item.get("title"), 80)
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        preview = (
+            self._safe_prompt_injection_message_preview(message_preview)
+            or self._safe_prompt_injection_message_preview(metadata.get("触发消息"))
+        )
         sender = _single_line(sender_label, 80)
         events = self.data.setdefault("recent_prompt_injection_events", [])
         if not isinstance(events, list):
@@ -1076,9 +1135,9 @@ class EventDispatchMixin:
             return
         if not getattr(self, "enable_recall_message_cache", True):
             return
-        raw = self._event_raw_payload(event)
-        if raw.get("post_type") == "notice":
+        if not self._event_is_platform_message_event(event):
             return
+        raw = self._event_raw_payload(event)
         message_ids = self._event_message_id_candidates(event)
         if not message_ids:
             return
@@ -1195,15 +1254,16 @@ class EventDispatchMixin:
 
     def _reply_cancel_trigger_message_ids(self, event: AstrMessageEvent, *extra_message_ids: str) -> list[str]:
         ids: list[str] = []
-        current_id = self._event_message_id(event)
-        if current_id:
-            ids.append(current_id)
-        quote_id = self._group_current_reply_quote_message_id(event)
-        if quote_id:
-            ids.append(quote_id)
-        for message_id in self._event_reply_message_ids(event):
-            if message_id:
-                ids.append(message_id)
+        if self._event_is_platform_message_event(event):
+            current_id = self._event_message_id(event)
+            if current_id:
+                ids.append(current_id)
+            quote_id = self._group_current_reply_quote_message_id(event)
+            if quote_id:
+                ids.append(quote_id)
+            for message_id in self._event_reply_message_ids(event):
+                if message_id:
+                    ids.append(message_id)
         for message_id in extra_message_ids:
             message_id = _single_line(message_id, 120)
             if message_id:

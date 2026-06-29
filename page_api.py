@@ -2136,6 +2136,32 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         if not isinstance(raw_events, list):
             raw_events = []
 
+        def preview_is_internal_prompt(value: Any) -> bool:
+            cleaned = self._single_line(value, 260)
+            if not cleaned:
+                return False
+            internal_markers = (
+                "【语音消息规则】",
+                "<pc_tts>",
+                "</pc_tts>",
+                "语音消息规则",
+                "提示词片段",
+                "请求级环境感知注入",
+                "被动回复注入",
+                "当前语音正文目标语种",
+                "自然聊天时用中文文字推进对话",
+                "不要写“中文含义”",
+            )
+            if any(marker in cleaned for marker in internal_markers):
+                return True
+            return cleaned.startswith("【") and "规则" in cleaned[:40]
+
+        def safe_message_preview(value: Any, limit: int = 120) -> str:
+            preview = self._single_line(value, limit)
+            if preview_is_internal_prompt(preview):
+                return ""
+            return preview
+
         def normalize_item(item: Any) -> dict[str, Any] | None:
             if not isinstance(item, dict):
                 return None
@@ -2209,18 +2235,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 kind = self._single_line(entry.get("kind"), 20)
                 if kind and kind not in kinds:
                     kinds.append(kind)
-            message_preview = self._single_line(item.get("message_preview"), 260)
+            message_preview = safe_message_preview(item.get("message_preview"), 120)
             if not message_preview:
                 message_preview = next(
                     (
-                        self._single_line(
-                            entry.get("metadata", {}).get("触发消息")
-                            or entry.get("preview")
-                            or entry.get("title"),
-                            260,
-                        )
+                        safe_message_preview(entry.get("metadata", {}).get("触发消息"), 120)
                         for entry in normalized_items
                         if isinstance(entry, dict)
+                        and safe_message_preview(entry.get("metadata", {}).get("触发消息"), 120)
                     ),
                     "",
                 )
@@ -2258,12 +2280,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                             "trace_id": self._single_line(item.get("trace_id"), 80) or f"legacy-{kind}-{index}",
                             "session": self._single_line(item.get("session"), 160),
                             "sender_label": self._single_line(item.get("metadata", {}).get("发送者"), 80),
-                            "message_preview": self._single_line(
-                                item.get("metadata", {}).get("触发消息")
-                                or item.get("preview")
-                                or item.get("title"),
-                                260,
-                            ),
+                            "message_preview": safe_message_preview(item.get("metadata", {}).get("触发消息"), 120),
                             "first_ts": ts,
                             "first_time": self.plugin._format_timestamp_elapsed(ts),
                             "last_ts": ts,
@@ -5843,16 +5860,38 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _migration_checksum_digest(payload: dict[str, Any], *, sort_keys: bool, compact: bool) -> str:
+        separators = (",", ":") if compact else None
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=sort_keys, separators=separators)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _migration_checksum_candidates(self, package: dict[str, Any]) -> set[str]:
+        candidates: set[str] = set()
+        for remove_algorithm in (True, False):
+            payload = deepcopy(package)
+            payload.pop("checksum", None)
+            if remove_algorithm:
+                payload.pop("checksum_algorithm", None)
+            for sort_keys in (True, False):
+                for compact in (True, False):
+                    try:
+                        candidates.add(
+                            self._migration_checksum_digest(
+                                payload,
+                                sort_keys=sort_keys,
+                                compact=compact,
+                            )
+                        )
+                    except Exception:
+                        continue
+        return candidates
+
     def _migration_checksum_matches(self, package: dict[str, Any], expected: str) -> bool:
         checksum = str(expected or "").strip().lower()
         if not checksum:
             return False
-        if checksum == self._migration_checksum(package):
-            return True
-        payload = deepcopy(package)
-        payload.pop("checksum", None)
-        text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return checksum == hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return checksum in self._migration_checksum_candidates(package)
 
     def _plugin_version(self) -> str:
         for source in (self.plugin, getattr(self.plugin, "metadata", None)):
@@ -7136,6 +7175,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         }
         for key, attr in mapping.items():
             value = self._config_get(key)
+            if key == "photo_persona_reference_image_path":
+                setattr(self.plugin, attr, str(value or "").strip())
+                continue
             if value not in ("", None):
                 text = str(value).strip()
                 if key == "photo_generation_backend":
