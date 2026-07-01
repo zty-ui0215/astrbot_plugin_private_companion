@@ -1844,6 +1844,60 @@
           "enable_qzone_generated_image_publish": true,
           "enable_qzone_integration": true
         }
+      },
+      "enable_qzone_comment_inbox": {
+        "description": "空间评论收件箱",
+        "type": "bool",
+        "hint": "开启后，插件会低频拉取自己最近说说详情，首次记录已见评论，后续新评论由模型判断是否需要公开追加回复。默认关闭，避免未经确认自动公开互动。",
+        "default": false,
+        "condition": {
+          "enable_qzone_integration": true
+        }
+      },
+      "qzone_comment_inbox_interval_minutes": {
+        "description": "评论检查间隔（分钟）",
+        "type": "int",
+        "hint": "两次 QQ 空间评论收件箱自动检查之间的最小间隔。",
+        "slider": {
+          "min": 5,
+          "max": 1440,
+          "step": 5
+        },
+        "default": 60,
+        "condition": {
+          "enable_qzone_comment_inbox": true,
+          "enable_qzone_integration": true
+        }
+      },
+      "qzone_comment_inbox_recent_posts": {
+        "description": "扫描最近说说数",
+        "type": "int",
+        "hint": "每次自动检查时向前扫描多少条自己的最近说说详情。",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        },
+        "default": 5,
+        "condition": {
+          "enable_qzone_comment_inbox": true,
+          "enable_qzone_integration": true
+        }
+      },
+      "qzone_comment_inbox_max_replies_per_tick": {
+        "description": "每轮最多回复评论数",
+        "type": "int",
+        "hint": "每次后台检查最多公开回复多少条新评论。建议保持较低，避免刷屏或过度互动。",
+        "slider": {
+          "min": 1,
+          "max": 5,
+          "step": 1
+        },
+        "default": 1,
+        "condition": {
+          "enable_qzone_comment_inbox": true,
+          "enable_qzone_integration": true
+        }
       }
     },
     "condition": {

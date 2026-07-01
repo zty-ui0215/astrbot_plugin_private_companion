@@ -10817,8 +10817,8 @@ const featureDetailGuides = {
   enable_almanac_perception: {
     summary: "生成轻量宜忌氛围标签，只用于表达参考，不作为硬规则。",
     trigger: "环境感知刷新时。",
-    enabled: “日程和表达可能带一点当天氛围。”,
-    disabled: “关闭这部分玄学感，默认更现实。”,
+    enabled: "日程和表达可能带一点当天氛围。",
+    disabled: "关闭这部分玄学感，默认更现实。",
   },
   enable_group_companion: {
     summary: "群聊能力总入口，控制群观察、上下文、话题线、关系网和群主动行为是否运行。",

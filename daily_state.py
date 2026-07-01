@@ -9281,8 +9281,9 @@ class DailyStateMixin:
                 self._debug_tick_skip(user_id, "主动行为失败或不适合发送", prefix="放弃")
                 continue
             try:
+                display_name = _single_line(user.get("nickname") or getattr(self, "default_nickname", "") or user_id, 40)
                 reason_label = _REASON_TEXT.get(reason, reason or "check_in")
-                reason_label = reason_label.replace("{name}", name)
+                reason_label = reason_label.replace("{name}", display_name)
                 reason_detail = "；".join(
                     item
                     for item in (
