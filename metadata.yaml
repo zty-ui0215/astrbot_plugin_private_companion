@@ -1,6 +1,7 @@
 name: astrbot_plugin_private_companion
 display_name: 我会永远陪着你
 author: menglimi
+author: menglimi
 description: astrbot_plugin_private_companion 是面向 AstrBot 的持续陪伴编排插件。它把人格连续性、生活状态、日程细化、私聊关系、群聊观察、QQ 关系网、主动消息、图片/语音/转发理解、长期创作、模型 Provider 和扩展页排障组织到同一套体验里，让 Bot 不只是临时回复，而是有状态、有记忆、有边界地生活和互动。
 desc: 为 AstrBot 提供持续陪伴、私聊/群聊理解、关系识别、主动行为、长期创作、模型排障和可视化管理。
 repo: https://github.com/zty-ui0215/astrbot_plugin_private_companion/tree/main

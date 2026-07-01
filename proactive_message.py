@@ -295,34 +295,7 @@ class ProactiveMessageMixin:
     """主动消息生成、动作执行和发送链路"""
 
     def _format_bilibili_video_action_context(self, user: dict[str, Any]) -> str:
-        video = user.get("bilibili_video_context")
-        if not isinstance(video, dict):
-            return ""
-        if _now_ts() - _safe_float(video.get("created_ts"), 0) > 6 * 3600:
-            return ""
-        title = _single_line(video.get("title"), 80)
-        bvid = _single_line(video.get("bvid"), 32)
-        up_name = _single_line(video.get("up_name"), 40)
-        score = _safe_int(video.get("score"), 0, 0, 10)
-        mood = _single_line(video.get("mood"), 24)
-        comment = _single_line(video.get("comment"), 120)
-        review = _single_line(video.get("review"), 180)
-        source = _single_line(video.get("source"), 40)
-        memory_context = video.get("memory_context") if isinstance(video.get("memory_context"), list) else []
-        memory_lines = [_single_line(item, 160) for item in memory_context if _single_line(item, 160)][:3]
-        parts = [
-            "B站视频分享线索：刚刷到一个视频",
-            f"标题：{title}" if title else "",
-            f"链接：https://www.bilibili.com/video/{bvid}" if bvid else "",
-            f"UP：{up_name}" if up_name else "",
-            f"评分：{score}/10" if score else "",
-            f"心情：{mood}" if mood else "",
-            f"短评：{comment}" if comment else "",
-            f"回味：{review}" if review else "",
-            f"来源：{source}" if source else "",
-            "BiliBot记忆：" + " / ".join(memory_lines) if memory_lines else "",
-        ]
-        return "\n".join(part for part in parts if part)
+        return ""
 
     def _format_news_action_context(self, user: dict[str, Any]) -> str:
         news = user.get("news_context")
@@ -901,23 +874,10 @@ class ProactiveMessageMixin:
         return _single_line(text, 120) if text else cleaned_context
 
     def _sanitize_action_context_text(self, action: str, action_context: str) -> str:
-        text = str(action_context or "").strip()
-        if "screen_peek" not in action:
-            return text
-        text = re.sub(r"^screen_peek[:：]\s*", "", text).strip()
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if not lines:
-            return ""
-        cleaned_lines = []
-        for line in lines:
-            if re.search(r"(我会一直在这里陪着你|要注意休息|记得休息|辛苦|别太累|我会陪着你)", line):
-                continue
-            line = re.sub(r"^(?:还在|你还在|感觉|看起来)", "", line).strip(",。！？ ")
-            cleaned_lines.append(line)
-        collapsed = ",".join(line for line in cleaned_lines if line)
-        collapsed = collapsed.replace("用户", "")
+        lines = [line.strip() for line in str(action_context or "").splitlines() if line.strip()]
+        collapsed = " ".join(lines) if lines else str(action_context or "").strip()
         collapsed = re.sub(r"\s+", " ", collapsed).strip(",。！？ ")
-        if not collapsed:
+        if not collapsed and lines:
             collapsed = lines[0]
         return _single_line(collapsed, 140)
 
@@ -1166,7 +1126,6 @@ class ProactiveMessageMixin:
         current_item = self._get_current_plan_item(self.data.get("daily_plan", {}))
         current_schedule = self._format_schedule_context_for_prompt() or self._format_plan_item_for_prompt(current_item)
         source_focused_reasons = {
-            "bili_video_share",
             "news_share",
             "web_exploration_share",
             "creative_share",
@@ -1572,13 +1531,6 @@ class ProactiveMessageMixin:
         return lock
 
     def _framework_session_lock_required(self) -> bool:
-        checker = getattr(self, "_framework_session_lock_enabled", None)
-        if callable(checker):
-            try:
-                return bool(checker())
-            except Exception as exc:
-                logger.debug("[PrivateCompanion] 主链会话锁模式判断失败,默认不启用: %s", _single_line(exc, 120))
-                return False
         return False
 
     def _framework_session_key_from_event(self, event: AstrMessageEvent) -> str:
@@ -2872,21 +2824,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             return ""
         if not has_real_image and "photo_text" not in action:
             cleaned = self._remove_unbacked_media_claims(cleaned)
-        if "screen_peek" in action:
-            photo_patterns = (
-                "拍了张照片",
-                "拍了照片",
-                "拍了自拍",
-                "自拍",
-                "风景照",
-                "窗外阳光",
-                "要看看吗",
-                "给你看照片",
-                "发你照片",
-                "看图",
-            )
-            if any(pattern in cleaned for pattern in photo_patterns):
-                return ""
         if "poke" in action and "photo_text" not in action and "voice" not in action:
             cleaned = cleaned.replace("戳一戳", "戳你一下")
             cleaned = cleaned.replace("我刚刚戳了你", "我刚戳你了")
@@ -2994,8 +2931,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         )
         if any(token in cleaned for token in weak_patterns):
             return True
-        if "screen_peek" in action and any(token in cleaned for token in ("还在忙啊", "看你在忙", "你好像在忙")):
-            return True
         return False
 
     def _ground_proactive_text(
@@ -3007,12 +2942,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         action_context: str,
     ) -> str:
         context = str(action_context or "")
-        if "screen_peek" in action:
-            if "逻辑分支" in context:
-                return "你还在跟那个逻辑分支较劲啊。先别急,慢慢捋嘛。"
-            if any(token in context for token in ("测试", "进度", "插件")):
-                return "你还在盯那个进度啊。眼睛先歇一下啦。"
-            return "你半天都没抬头了诶。先缓一口气。"
         if "poke" in action:
             return "我刚戳你了。怎么又不出声啦。"
         if "photo_text" in action:
@@ -3094,20 +3023,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
                     "effective_action": "message",
                 }
             return await self._execute_single_action(fallback_action, user, name, reason)
-        if action == "screen_peek":
-            context = await self._run_screen_peek_action(
-                user,
-                name,
-                reason,
-                quota_exempt=bool(user.get("planned_proactive_quota_exempt")),
-            )
-            return {
-                "success": not self._is_unusable_screen_peek_context(context),
-                "context": context,
-                "extra_components": [],
-                "summary": "窥屏",
-                "effective_action": "screen_peek",
-            }
         if action == "photo_text":
             context = await self._run_photo_text_action(user, name, reason)
             return {
@@ -3224,38 +3139,12 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
             pass
 
     def _is_unusable_screen_peek_context(self, context: str) -> bool:
-        text = str(context or "").strip()
-        if not text:
-            return True
-        fail_tokens = (
-            "screen_peek：失败",
-            "屏幕插件不可用",
-            "未授权",
-            "不可用",
-            "Invalid base64 image_url",
-            "图片预处理结果为空",
-            "所有视觉链路都失败",
-            "视觉 provider 调用失败",
-            "当前 provider 不支持原生视频上传",
-            "没看清",
-            "稍后再让我看看",
-            "没有得到屏幕观察结果",
-            "识屏分析失败",
-        )
-        return any(token in text for token in fail_tokens)
+        """[Dead code removed - screen glance feature disabled]"""
+        return False
 
     def _is_screen_peek_provider_failure(self, context: str) -> bool:
-        text = str(context or "")
-        fail_tokens = (
-            "Invalid base64 image_url",
-            "图片预处理结果为空",
-            "所有视觉链路都失败",
-            "视觉 provider 调用失败",
-            "Asset upload returned",
-            "BadRequest",
-            "InvalidParameter",
-        )
-        return any(token in text for token in fail_tokens)
+        """[Dead code removed - screen glance feature disabled]"""
+        return False
 
     async def _run_screen_peek_action(
         self,
@@ -3265,68 +3154,11 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         *,
         quota_exempt: bool = False,
     ) -> str:
-        if not self.enable_screen_glance_action:
-            return "screen_peek：未授权,跳过"
-        plugin = self._get_screen_companion_plugin()
-        if plugin is None:
-            return "screen_peek：屏幕插件不可用"
-        target = str(user.get("umo") or "").strip()
-        if not self._screen_glance_available(user, ignore_daily_limit=quota_exempt):
-            return "screen_peek：今日额度或冷却未满足,跳过"
-        async with self._data_lock:
-            self._note_screen_peek_attempt(
-                str(user.get("user_id") or user.get("umo") or name),
-                reason=reason,
-                count_daily=not quota_exempt,
-            )
-            self._save_data_sync()
-        event = None
-        if target and hasattr(plugin, "_create_virtual_event"):
-            try:
-                event = plugin._create_virtual_event(target)
-            except Exception as e:
-                logger.debug(f"[PrivateCompanion] 创建屏幕虚拟事件失败: {e}")
-        prompt = (
-            f"这是一次用户已授权的主动陪伴行为。请只做视觉观察,"
-            f"用很短的话描述用户电脑当前大概在看什么、做什么、是不是像在忙。"
-            f"不要直接对用户说话,不要安慰、提醒、关心、陪伴,不要输出隐私细节、账号、完整文本、聊天内容。"
-            f"只留一个内部观察印象。主动原因：{reason}"
-        )
-        try:
-            result = await plugin._invoke_screen_skill(
-                event,
-                request_prompt=prompt,
-                history_user_text=f"主动陪伴想轻轻看一眼 {name} 现在在忙什么。",
-                task_id="private_companion_screen_peek",
-            )
-            context = "screen_peek：\n" + (_single_line(result, 300) if result else "没有得到屏幕观察结果")
-            if self._is_screen_peek_provider_failure(context):
-                self._note_screen_peek_failure(user, context)
-            return context
-        except Exception as e:
-            error_text = _single_line(e, 240)
-            logger.warning(f"[PrivateCompanion] screen_peek 主动行为失败: {error_text}")
-            context = f"screen_peek：失败,{error_text}"
-            if self._is_screen_peek_provider_failure(context):
-                self._note_screen_peek_failure(user, context)
-            return context
+        """[Dead code removed - screen glance feature disabled]"""
+        return "screen_peek: feature removed"
 
     def _get_screen_companion_plugin(self) -> Any:
-        for module_name in ("astrbot_plugin_screen_companion.main", "data.plugins.astrbot_plugin_screen_companion.main"):
-            try:
-                module = importlib.import_module(module_name)
-                plugin = getattr(module, "_screen_companion_tool_plugin", None)
-                if plugin is not None and callable(getattr(plugin, "_invoke_screen_skill", None)):
-                    return plugin
-            except Exception:
-                continue
-        for module in list(sys.modules.values()):
-            try:
-                plugin = getattr(module, "_screen_companion_tool_plugin", None)
-                if plugin is not None and callable(getattr(plugin, "_invoke_screen_skill", None)):
-                    return plugin
-            except Exception:
-                continue
+        """[Dead code removed - screen glance feature disabled]"""
         return None
 
     async def _run_poke_action(
@@ -7310,14 +7142,6 @@ reason={reason or "check_in"}；action={action or "message"}；topic={_single_li
         cleaned = re.sub(r"(?:我看你|看你)又?在忙", "还在忙", cleaned)
 
         _ACTION_SPECIFIC_REPLACEMENTS = {
-            "screen_peek": [
-                ("逻辑分支的工作", "那个逻辑分支"),
-                ("工作吗？", "啊。"),
-                ("工作啊。", "啊。"),
-                ("感觉你投入的样子很专注呢。", ""),
-                ("感觉你很投入呢。", ""),
-                ("还在忙啊。", "还没从那边抬头啊。"),
-            ],
             "poke": [
                 ("我就戳一下", "就戳你一下"),
                 ("所以来戳你一下", "所以来碰你一下"),

@@ -17,11 +17,10 @@ LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "timezone": ("environment_perception_timezone",),
     "enable_maintenance_token_saver": ("enable_daily_token_soft_limit",),
     "maintenance_token_soft_limit": ("daily_token_soft_limit",),
-    "DIARY_PROVIDER_ID": ("DREAM_DIARY_PROVIDER_ID",),
-    "DREAM_PROVIDER_ID": ("DREAM_DIARY_PROVIDER_ID",),
+    "DIARY_PROVIDER_ID": ("AUX_PROVIDER_ID",),
+    "DREAM_PROVIDER_ID": ("AUX_PROVIDER_ID",),
     "COMFYUI_PHOTO_WORKFLOW_NAME": ("COMFYUI_TEXT2IMG_WORKFLOW_NAME", "COMFYUI_SELFIE_WORKFLOW_NAME"),
     "allow_photo_text_action": ("enable_photo_text_action",),
-    "allow_screen_peek_action": ("enable_screen_glance_action",),
     "allow_poke_action": ("enable_poke_action",),
     "allow_voice_action": ("enable_voice_action",),
     "creative_base_chars_per_hour": ("creative_chars_per_session",),
@@ -35,13 +34,11 @@ LEGACY_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "jm_cosmos_share_probability": ("private_reading_share_probability",),
     "jm_cosmos_default_keywords": ("private_reading_default_keywords",),
     "jm_cosmos_blocked_tags": ("private_reading_blocked_tags",),
-    "JM_COSMOS_VISION_PROVIDER_ID": ("PRIVATE_READING_VISION_PROVIDER_ID",),
+    "JM_COSMOS_VISION_PROVIDER_ID": ("AUX_PROVIDER_ID",),
 }
 
 LEGACY_PROACTIVE_ACTION_FLAG_KEYS: dict[str, str] = {
     "photo_text": "enable_photo_text_action",
-    "screen_peek": "enable_screen_glance_action",
-    "screen_glance": "enable_screen_glance_action",
     "poke": "enable_poke_action",
     "voice": "enable_voice_action",
 }

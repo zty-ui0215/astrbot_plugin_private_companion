@@ -48,10 +48,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     INHERIT_PERCENT_PROBABILITY_KEYS = {
         "tts_private_trigger_probability",
         "tts_group_trigger_probability",
-        "main_user_voice_probability",
     }
     FRACTIONAL_PERCENT_SETTING_KEYS = {
-        "bilibili_share_probability",
         "news_share_probability",
         "external_event_self_link_probability",
         "web_exploration_share_probability",
@@ -177,13 +175,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                     "settings": self._runtime_settings(),
                     "cache": self._cache_summary(data),
                     "livingmemory": self._livingmemory_summary(),
-                    "screen_companion": self._screen_companion_summary(data),
                     "knowledge": self.plugin._roleplay_knowledge_summary(),
                     "worldbook": self._worldbook_summary(data),
                     "proactive_candidates": self._proactive_candidate_summary(data),
                     "proactive_tasks": self._proactive_task_summary(data),
                     "message_debounce": self._message_debounce_summary(data),
-                    "bilibili": self._bilibili_summary(data),
                     "news": self._news_summary(data),
                     "web_exploration": self._web_exploration_summary(data),
                     "qzone": self._qzone_summary(data),
@@ -365,10 +361,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             web_state["notes"] = list_tail(web_state.get("notes"), 40)
             web_state["latest_results"] = list_tail(web_state.get("latest_results"), 8)
             data["web_exploration"] = web_state
-
-        bilibili_state = shallow_dict(raw_data.get("bilibili_integration"))
-        if bilibili_state:
-            data["bilibili_integration"] = bilibili_state
 
         return data
 
@@ -1289,7 +1281,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "suspended_proactive",
             "poke_daily_limit",
             "photo_daily_limit",
-            "screen_peek_daily_limit",
         )
 
         async with self.plugin._data_lock:
@@ -1368,7 +1359,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             current["llm_timer_event"] = {}
             current["poke_daily_limit"] = 0
             current["photo_daily_limit"] = 0
-            current["screen_peek_daily_limit"] = 0
             result = {
                 "ok": True,
                 "pending": True,
@@ -4430,11 +4420,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 if hasattr(self.plugin, "_effective_user_min_interval_minutes")
                 else getattr(self.plugin, "min_interval_minutes", 0)
             ),
-            "effective_screen_peek_daily_limit": (
-                self.plugin._effective_user_screen_peek_daily_limit(user)
-                if hasattr(self.plugin, "_effective_user_screen_peek_daily_limit")
-                else getattr(self.plugin, "screen_peek_max_daily", 0)
-            ),
             "effective_photo_daily_limit": (
                 self.plugin._effective_user_photo_daily_limit(user)
                 if hasattr(self.plugin, "_effective_user_photo_daily_limit")
@@ -4444,7 +4429,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "proactive_idle_minutes": user.get("proactive_idle_minutes", -1),
             "proactive_min_interval_minutes": user.get("proactive_min_interval_minutes", -1),
             "photo_daily_limit": user.get("photo_daily_limit", -1),
-            "screen_peek_daily_limit": user.get("screen_peek_daily_limit", -1),
             "poke_daily_limit": user.get("poke_daily_limit", -1),
             "proactive_boundary_note": user.get("proactive_boundary_note", ""),
             "inbound_count": user.get("inbound_count", 0),
@@ -5218,8 +5202,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_cross_user_memory_bridge",
             "enable_atrelay_tools",
             "enable_livingmemory_integration",
-            "enable_bilibili_integration",
-            "enable_bilibili_boredom_watch",
             "enable_news_integration",
             "enable_news_daily_hot_read",
             "enable_news_boredom_read",
@@ -5236,8 +5218,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
-            "enable_unanswered_screen_peek_followup",
-            "enable_yesterday_screen_diary_context",
             "enable_tts_enhancement",
             "enable_creative_writing",
             "creative_hidden_mode",
@@ -5248,24 +5228,14 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         except Exception:
             livingmemory_available = False
         try:
-            bilibili_available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
-        except Exception:
-            bilibili_available = False
-        try:
             qzone_available = bool(getattr(self.plugin, "_qzone_available", lambda: False)())
         except Exception:
             qzone_available = False
-        try:
-            screen_companion_available = bool(self._screen_companion_available())
-        except Exception:
-            screen_companion_available = False
         try:
             private_reading_available = bool(getattr(self.plugin, "_jm_cosmos_available", lambda: False)())
         except Exception:
             private_reading_available = False
         values["enable_livingmemory_integration"] = bool(livingmemory_available and getattr(self.plugin, "enable_livingmemory_integration", False))
-        values["enable_bilibili_integration"] = bool(bilibili_available and getattr(self.plugin, "enable_bilibili_integration", False))
-        values["enable_bilibili_boredom_watch"] = bool(bilibili_available and getattr(self.plugin, "enable_bilibili_boredom_watch", False))
         values["enable_qzone_integration"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_integration", False))
         values["enable_qzone_life_publish"] = bool(qzone_available and getattr(self.plugin, "enable_qzone_life_publish", False))
         values["enable_qzone_generated_image_publish"] = bool(
@@ -5278,7 +5248,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             and getattr(self.plugin, "enable_emotion_simulation", False)
             and getattr(self.plugin, "enable_qzone_emotional_vent_publish", False)
         )
-        values["enable_yesterday_screen_diary_context"] = bool(screen_companion_available and getattr(self.plugin, "enable_yesterday_screen_diary_context", False))
         values["enable_private_reading_integration"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_integration", False))
         values["enable_private_reading_boredom_read"] = bool(private_reading_available and getattr(self.plugin, "enable_jm_cosmos_boredom_read", False))
         values["enable_private_reading_ask_recommendation"] = bool(private_reading_available and getattr(self.plugin, "enable_private_reading_ask_recommendation", False))
@@ -5330,28 +5299,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
     def _provider_settings(self) -> dict[str, str]:
         keys = [
             "LLM_PROVIDER_ID",
+            "AUX_PROVIDER_ID",
             "tts_conversion_provider_id",
-            "PHOTO_PROMPT_PROVIDER_ID",
-            "NARRATION_PROVIDER_ID",
-            "HISTORY_SUMMARY_PROVIDER_ID",
-            "RESPONSE_REVIEW_PROVIDER_ID",
-            "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID",
-            "TROUBLESHOOTING_PROVIDER_ID",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
-            "REST_WAKEUP_PROVIDER_ID",
-            "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
-            "EMOTION_JUDGEMENT_PROVIDER_ID",
-            "COMPANION_MEMORY_PROVIDER_ID",
-            "DIALOGUE_EPISODE_PROVIDER_ID",
-            "GROUP_INTERJECT_PROVIDER_ID",
-            "GROUP_EPISODE_PROVIDER_ID",
-            "GROUP_SLANG_PROVIDER_ID",
-            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
-            "FORWARD_MESSAGE_PROVIDER_ID",
-            "PLUGIN_VISION_PROVIDER_ID",
-            "PRIVATE_READING_VISION_PROVIDER_ID",
-            "NEWS_PROVIDER_ID",
-            "WEB_EXPLORATION_PROVIDER_ID",
         ]
         for key in sorted(self._schema_provider_keys(public_only=True)):
             if key not in keys:
@@ -6239,8 +6189,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "tts_live_subtitle_url",
             "tts_local_playback_volume",
             "tts_local_playback_min_interval_seconds",
-            "auto_voice_enabled",
-            "auto_voice_full_conversion_enabled",
             "daily_token_limit",
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
@@ -6420,11 +6368,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_skill_growth_passive_injection",
             "enable_skill_growth_schedule_influence",
             "skill_growth_schedule_influence_strength",
-            "enable_bilibili_integration",
-            "enable_bilibili_boredom_watch",
-            "bilibili_boredom_min_interval_hours",
-            "bilibili_share_probability",
-            "bilibili_share_min_score",
             "enable_news_integration",
             "enable_news_boredom_read",
             "enable_news_daily_hot_read",
@@ -6465,9 +6408,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
-            "enable_unanswered_screen_peek_followup",
-            "unanswered_screen_peek_after_minutes",
-            "unanswered_screen_peek_cooldown_minutes",
             "private_reading_min_interval_hours",
             "private_reading_max_photo_count",
             "private_reading_share_probability",
@@ -6476,9 +6416,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "private_reading_preference_max_terms",
             "private_reading_default_keywords",
             "private_reading_blocked_tags",
-            "enable_unanswered_screen_peek_followup",
-            "unanswered_screen_peek_after_minutes",
-            "unanswered_screen_peek_cooldown_minutes",
             "enable_creative_writing",
             "creative_inspiration_probability",
             "creative_share_probability",
@@ -6546,9 +6483,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "tts_trigger_probability": _percent_attr("tts_trigger_probability", 0.25),
                 "tts_private_trigger_probability": _percent_attr("tts_private_trigger_probability", -0.01, inherit=True),
                 "tts_group_trigger_probability": _percent_attr("tts_group_trigger_probability", -0.01, inherit=True),
-                "auto_voice_probability": _percent_attr("auto_voice_probability", 0.25),
-                "main_user_voice_probability": _percent_attr("main_user_voice_probability", -0.01, inherit=True),
-                "main_user_mention_voice_probability": _percent_attr("main_user_mention_voice_probability", 0.0),
                 "rest_reply_probability": _percent_attr("rest_reply_probability", 0.18),
             }
         )
@@ -6643,14 +6577,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             living_level = "ok" if self.plugin._livingmemory_available() else "warn"
             living_text = "LivingMemory 插件可被调用" if living_level == "ok" else "已启用协同，但当前未检测到可用工具"
             add(living_level, "LivingMemory 协同", living_text)
-
-        if features.get("enable_bilibili_integration"):
-            bili_available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
-            add(
-                "ok" if bili_available else "info",
-                "B 站 Bot 联动",
-                "已检测到 B 站插件或观看日志" if bili_available else "联动开关已开，但暂未检测到 B 站插件实例或日志",
-            )
 
         if features.get("enable_private_reading_integration"):
             jm_available = bool(getattr(self.plugin, "_jm_cosmos_available", lambda: False)())
@@ -6965,33 +6891,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         self._set_config_value(key, value)
         attr_map = {
             "LLM_PROVIDER_ID": "llm_provider_id",
-            "MAI_STYLE_PROVIDER_ID": "mai_style_provider_id",
-            "DAILY_PLAN_PROVIDER_ID": "daily_plan_provider_id",
-            "DETAIL_ENHANCEMENT_PROVIDER_ID": "detail_enhancement_provider_id",
-            "DREAM_DIARY_PROVIDER_ID": "dream_diary_provider_id",
-            "CREATIVE_PROVIDER_ID": "creative_provider_id",
-            "VOICE_PROMPT_PROVIDER_ID": "voice_prompt_provider_id",
-            "PHOTO_PROMPT_PROVIDER_ID": "photo_prompt_provider_id",
-            "NARRATION_PROVIDER_ID": "narration_provider_id",
-            "HISTORY_SUMMARY_PROVIDER_ID": "history_summary_provider_id",
-            "RESPONSE_REVIEW_PROVIDER_ID": "response_review_provider_id",
-            "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": "proactive_persona_judge_provider_id",
-            "TROUBLESHOOTING_PROVIDER_ID": "troubleshooting_provider_id",
-            "RELATIONSHIP_ANALYSIS_PROVIDER_ID": "relationship_analysis_provider_id",
-            "EMOTION_JUDGEMENT_PROVIDER_ID": "emotion_judgement_provider_id",
-            "COMPANION_MEMORY_PROVIDER_ID": "companion_memory_provider_id",
-            "DIALOGUE_EPISODE_PROVIDER_ID": "dialogue_episode_provider_id",
-            "GROUP_INTERJECT_PROVIDER_ID": "group_interject_provider_id",
-            "GROUP_EPISODE_PROVIDER_ID": "group_episode_provider_id",
-            "GROUP_SLANG_PROVIDER_ID": "group_slang_provider_id",
-            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID": "group_followup_judge_provider_id",
-            "FORWARD_MESSAGE_PROVIDER_ID": "forward_message_provider_id",
-            "PLUGIN_VISION_PROVIDER_ID": "plugin_vision_provider_id",
-            "PRIVATE_READING_VISION_PROVIDER_ID": "jm_cosmos_vision_provider_id",
-            "NEWS_PROVIDER_ID": "news_provider_id",
-            "WEB_EXPLORATION_PROVIDER_ID": "web_exploration_provider_id",
+            "AUX_PROVIDER_ID": "aux_provider_id",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID": "smart_message_debounce_provider_id",
-            "REST_WAKEUP_PROVIDER_ID": "rest_wakeup_provider_id",
             "COMFYUI_TEXT2IMG_WORKFLOW_NAME": "comfyui_text2img_workflow_name",
             "COMFYUI_SELFIE_WORKFLOW_NAME": "comfyui_selfie_workflow_name",
             "EXTERNAL_IMAGE_API_BASE_URL": "external_image_api_base_url",
@@ -7095,8 +6996,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "tts_live_subtitle_url",
             "tts_local_playback_volume",
             "tts_local_playback_min_interval_seconds",
-            "auto_voice_enabled",
-            "auto_voice_full_conversion_enabled",
         }
         if key == "enable_tts_enhancement" or key in tts_runtime_keys:
             loader = getattr(self.plugin, "_load_tts_enhancement_config", None)
@@ -7166,12 +7065,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         config = getattr(self.plugin, "config", None)
         if config is None:
             return
-        if _set_into_config(config, key, value, allow_flat_fallback=False):
-            return
-        if self._set_schema_group_config_value(config, key, value):
-            return
         _set_into_config(config, key, value)
-        return
 
     def _set_schema_group_config_value(self, config: Any, key: str, value: Any) -> bool:
         group_key = self._schema_group_for_key(key)
@@ -7326,8 +7220,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_group_reality_promise_guard",
             "enable_atrelay_tools",
             "enable_livingmemory_integration",
-            "enable_bilibili_integration",
-            "enable_bilibili_boredom_watch",
             "enable_news_integration",
             "enable_news_boredom_read",
             "enable_news_daily_hot_read",
@@ -7344,8 +7236,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
-            "enable_unanswered_screen_peek_followup",
-            "enable_yesterday_screen_diary_context",
             "enable_tts_enhancement",
             "enable_creative_writing",
             "creative_hidden_mode",
@@ -7356,34 +7246,13 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "LLM_PROVIDER_ID",
             "AUX_PROVIDER_ID",
             "tts_conversion_provider_id",
-            "PHOTO_PROMPT_PROVIDER_ID",
-            "NARRATION_PROVIDER_ID",
-            "HISTORY_SUMMARY_PROVIDER_ID",
-            "RESPONSE_REVIEW_PROVIDER_ID",
-            "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID",
-            "TROUBLESHOOTING_PROVIDER_ID",
             "SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
-            "REST_WAKEUP_PROVIDER_ID",
-            "RELATIONSHIP_ANALYSIS_PROVIDER_ID",
-            "COMPANION_MEMORY_PROVIDER_ID",
-            "DIALOGUE_EPISODE_PROVIDER_ID",
-            "GROUP_INTERJECT_PROVIDER_ID",
-            "GROUP_EPISODE_PROVIDER_ID",
-            "GROUP_SLANG_PROVIDER_ID",
-            "GROUP_FOLLOWUP_JUDGE_PROVIDER_ID",
-            "FORWARD_MESSAGE_PROVIDER_ID",
-            "PLUGIN_VISION_PROVIDER_ID",
-            "PRIVATE_READING_VISION_PROVIDER_ID",
-            "NEWS_PROVIDER_ID",
-            "WEB_EXPLORATION_PROVIDER_ID",
-            "EMOTION_JUDGEMENT_PROVIDER_ID",
         }
         keys.update(self._schema_provider_keys(public_only=True))
         return keys
 
-    @staticmethod
-    def _allowed_setting_keys() -> set[str]:
-        return {
+    def _allowed_setting_keys(self) -> set[str]:
+        keys = {
             "bot_name",
             "enable_proactive_only_mode",
             "plugin_specific_persona_id",
@@ -7418,7 +7287,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "worldview_adaptation_mode",
             "worldview_adaptation_prompt",
             "quiet_hours",
-            "framework_session_lock_mode",
             "proactive_prompt_template",
             "proactive_persona_judge_send_threshold",
             "proactive_persona_judge_cache_minutes",
@@ -7442,8 +7310,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "tts_live_subtitle_url",
             "tts_local_playback_volume",
             "tts_local_playback_min_interval_seconds",
-            "auto_voice_enabled",
-            "auto_voice_full_conversion_enabled",
             "daily_token_limit",
             "enable_daily_token_soft_limit",
             "daily_token_soft_limit",
@@ -7605,18 +7471,11 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "emotional_gate_refuse_threshold",
             "emotional_gate_recovery_per_hour",
             "emotional_gate_max_hurt_minutes",
-            "enable_llm_emotion_judgement",
-            "emotion_judgement_mode",
             "enable_skill_growth_simulation",
             "skill_growth_rate",
             "enable_skill_growth_passive_injection",
             "enable_skill_growth_schedule_influence",
             "skill_growth_schedule_influence_strength",
-            "enable_bilibili_integration",
-            "enable_bilibili_boredom_watch",
-            "bilibili_boredom_min_interval_hours",
-            "bilibili_share_probability",
-            "bilibili_share_min_score",
             "enable_news_integration",
             "enable_news_boredom_read",
             "enable_news_daily_hot_read",
@@ -7636,8 +7495,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_web_exploration_boredom_search",
             "web_exploration_min_interval_hours",
             "web_exploration_share_probability",
-            "external_event_self_link_probability",
-            "external_event_self_link_cooldown_hours",
             "web_exploration_max_results",
             "web_exploration_interests",
             "enable_qzone_integration",
@@ -7666,9 +7523,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "private_reading_preference_max_terms",
             "private_reading_default_keywords",
             "private_reading_blocked_tags",
-            "enable_unanswered_screen_peek_followup",
-            "unanswered_screen_peek_after_minutes",
-            "unanswered_screen_peek_cooldown_minutes",
             "enable_creative_writing",
             "creative_inspiration_probability",
             "creative_share_probability",
@@ -7709,12 +7563,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return normalizer(value)
             text = str(value or "prompt").strip().lower()
             return text if text in {"auto", "prompt", "system_prompt"} else "prompt"
-        if key == "framework_session_lock_mode":
-            normalizer = getattr(self.plugin, "_normalize_framework_session_lock_mode", None)
-            if callable(normalizer):
-                return normalizer(value)
-            text = str(value or "auto").strip().lower()
-            return text if text in {"auto", "always", "off"} else "auto"
         if key == "rest_reply_active_windows":
             return re.sub(r"\s+", "", str(value or ""))[:160]
         if key == "quote_target_strategy":
@@ -7815,12 +7663,9 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 "全局": "global",
                 "全局频控": "global",
                 "新版": "global",
-                "旧版": "legacy",
-                "旧版行为": "legacy",
-                "legacy_mode": "legacy",
             }
             mode = aliases.get(mode, mode)
-            return mode if mode in {"global", "legacy"} else "global"
+            return mode if mode in {"global"} else "global"
         if key == "tts_constraint_mode":
             mode = str(value or "weak").strip().lower()
             aliases = {
@@ -8089,8 +7934,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "emotional_gate_refuse_threshold",
             "emotional_gate_recovery_per_hour",
             "emotional_gate_max_hurt_minutes",
-            "bilibili_boredom_min_interval_hours",
-            "bilibili_share_min_score",
             "news_min_interval_hours",
             "news_max_items_per_source",
             "news_hot_max_items",
@@ -8104,8 +7947,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "private_reading_max_photo_count",
             "private_reading_preference_min_ratings",
             "private_reading_preference_max_terms",
-            "unanswered_screen_peek_after_minutes",
-            "unanswered_screen_peek_cooldown_minutes",
             "creative_chars_per_session",
             "creative_max_active_projects",
             "worldbook_member_inject_limit",
@@ -8212,8 +8053,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
                 return 1.8 if key == "segmented_proactive_log_base" else 1.5
         if key in {
             "enable_daily_token_soft_limit",
-            "enable_bilibili_integration",
-            "enable_bilibili_boredom_watch",
             "enable_news_integration",
             "enable_news_boredom_read",
             "enable_news_daily_hot_read",
@@ -8231,7 +8070,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_private_reading_boredom_read",
             "enable_private_reading_ask_recommendation",
             "enable_private_reading_preference_influence",
-            "enable_unanswered_screen_peek_followup",
             "enable_creative_writing",
             "creative_hidden_mode",
             "enable_environment_perception",
@@ -8242,8 +8080,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_lunar_perception",
             "enable_solar_term_perception",
             "enable_almanac_perception",
-            "auto_voice_enabled",
-            "auto_voice_full_conversion_enabled",
             "enable_humanized_states",
             "inject_passive_states",
             "enable_health_state",
@@ -8792,48 +8628,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             except Exception:
                 return False
         return False
-
-    def _screen_companion_summary(self, data: dict[str, Any]) -> dict[str, Any]:
-        available = self._screen_companion_available()
-        context = data.get("screen_diary_context") if isinstance(data.get("screen_diary_context"), dict) else {}
-        return {
-            "enabled": bool(available and getattr(self.plugin, "enable_yesterday_screen_diary_context", False)),
-            "available": available,
-            "source": context.get("source", ""),
-            "source_date": context.get("source_date", ""),
-            "context_available": bool(context.get("available")),
-            "summary_chars": len(str(context.get("summary") or "")),
-        }
-
-    def _bilibili_summary(self, data: dict[str, Any]) -> dict[str, Any]:
-        state = data.get("bilibili_integration") if isinstance(data.get("bilibili_integration"), dict) else {}
-        try:
-            available = bool(getattr(self.plugin, "_bilibili_available", lambda: False)())
-        except Exception:
-            available = False
-        latest = None
-        try:
-            latest = self.plugin._latest_bilibili_video_candidate()
-        except Exception:
-            latest = None
-        try:
-            watch_log = str(getattr(self.plugin, "_bilibili_watch_log_file", lambda: "")())
-        except Exception:
-            watch_log = ""
-        try:
-            memory_api_available = bool(getattr(self.plugin, "_bilibili_memory_api_available", lambda: False)())
-        except Exception:
-            memory_api_available = False
-        return {
-            "enabled": bool(available and getattr(self.plugin, "enable_bilibili_integration", False)),
-            "boredom_watch_enabled": bool(available and getattr(self.plugin, "enable_bilibili_boredom_watch", False)),
-            "available": available,
-            "memory_api_available": memory_api_available,
-            "watch_log": watch_log,
-            "last_boredom_watch_at": self.plugin._format_timestamp_elapsed(state.get("last_boredom_watch_at", 0)),
-            "last_status": state.get("last_boredom_watch_status", ""),
-            "latest_video": latest if isinstance(latest, dict) else {},
-        }
 
     def _news_summary(self, data: dict[str, Any]) -> dict[str, Any]:
         state = data.get("news_integration") if isinstance(data.get("news_integration"), dict) else {}
@@ -9633,7 +9427,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "event": {"label": "生活事件", "note": ""},
             "story": {"label": "日常剧情", "note": ""},
             "habit": {"label": "习惯关心", "note": ""},
-            "bilibili": {"label": "B站分享", "note": ""},
             "bookshelf_reading": {"label": "私密阅读", "note": ""},
             "creative_writing": {"label": "创作灵感", "note": ""},
             "group_share": {"label": "群聊见闻", "note": ""},

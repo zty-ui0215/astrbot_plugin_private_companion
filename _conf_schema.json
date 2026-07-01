@@ -1762,75 +1762,6 @@
       "enabled": true
     }
   },
-  "bilibili_config": {
-    "description": "B站协同",
-    "type": "object",
-    "default": true,
-    "hint": "让你的智能体也能刷B站，不过需要配合 astrbot_plugin_bilibili_bot 插件使用",
-    "items": {
-      "enable_bilibili_integration": {
-        "description": "启用 B 站 Bot 协同",
-        "type": "bool",
-        "hint": "检测到 astrbot_plugin_bilibili_bot 时，可读取其观看日志和 memory_api 视频记忆，并把适合的视频作为主动私聊分享素材。",
-        "default": true
-      },
-      "enable_bilibili_boredom_watch": {
-        "description": "无聊时触发刷 B 站",
-        "type": "bool",
-        "hint": "当日程/状态显示 Bot 比较空、无聊或在休息时，低频触发 B 站 Bot 看 1 个视频。触发后是否评论、点赞等由 B 站 Bot 自己的配置决定。",
-        "default": true,
-        "condition": {
-          "enable_bilibili_integration": true
-        }
-      },
-      "bilibili_boredom_min_interval_hours": {
-        "description": "刷 B 站最小间隔（小时）",
-        "type": "int",
-        "hint": "陪伴插件主动触发 B 站 Bot 刷视频的最小间隔，避免过于频繁。",
-        "slider": {
-          "min": 2,
-          "max": 72,
-          "step": 1
-        },
-        "default": 8,
-        "condition": {
-          "enable_bilibili_boredom_watch": true,
-          "enable_bilibili_integration": true
-        }
-      },
-      "bilibili_share_probability": {
-        "description": "视频私聊分享概率",
-        "type": "float",
-        "hint": "读取到 B 站 Bot 最新观看记录后，安排私聊分享的基础概率。高评分视频会略微提高概率。",
-        "slider": {
-          "min": 0,
-          "max": 1,
-          "step": 0.05
-        },
-        "default": 0.35,
-        "condition": {
-          "enable_bilibili_integration": true
-        }
-      },
-      "bilibili_share_min_score": {
-        "description": "视频分享最低评分",
-        "type": "int",
-        "hint": "B 站 Bot 观看日志中的评分达到该值时，更容易被拿来私聊分享。",
-        "slider": {
-          "min": 0,
-          "max": 10,
-          "step": 1
-        },
-        "default": 7,
-        "condition": {
-          "enable_bilibili_integration": true
-        }
-      }
-    },
-    "condition": {
-      "enabled": true
-    }
-  },
   "qzone_config": {
     "description": "QQ空间能力",
     "type": "object",
@@ -1911,6 +1842,60 @@
         "default": 0.25,
         "condition": {
           "enable_qzone_generated_image_publish": true,
+          "enable_qzone_integration": true
+        }
+      },
+      "enable_qzone_comment_inbox": {
+        "description": "空间评论收件箱",
+        "type": "bool",
+        "hint": "开启后，插件会低频拉取自己最近说说详情，首次记录已见评论，后续新评论由模型判断是否需要公开追加回复。默认关闭，避免未经确认自动公开互动。",
+        "default": false,
+        "condition": {
+          "enable_qzone_integration": true
+        }
+      },
+      "qzone_comment_inbox_interval_minutes": {
+        "description": "评论检查间隔（分钟）",
+        "type": "int",
+        "hint": "两次 QQ 空间评论收件箱自动检查之间的最小间隔。",
+        "slider": {
+          "min": 5,
+          "max": 1440,
+          "step": 5
+        },
+        "default": 60,
+        "condition": {
+          "enable_qzone_comment_inbox": true,
+          "enable_qzone_integration": true
+        }
+      },
+      "qzone_comment_inbox_recent_posts": {
+        "description": "扫描最近说说数",
+        "type": "int",
+        "hint": "每次自动检查时向前扫描多少条自己的最近说说详情。",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        },
+        "default": 5,
+        "condition": {
+          "enable_qzone_comment_inbox": true,
+          "enable_qzone_integration": true
+        }
+      },
+      "qzone_comment_inbox_max_replies_per_tick": {
+        "description": "每轮最多回复评论数",
+        "type": "int",
+        "hint": "每次后台检查最多公开回复多少条新评论。建议保持较低，避免刷屏或过度互动。",
+        "slider": {
+          "min": 1,
+          "max": 5,
+          "step": 1
+        },
+        "default": 1,
+        "condition": {
+          "enable_qzone_comment_inbox": true,
           "enable_qzone_integration": true
         }
       }
@@ -3083,6 +3068,15 @@
       "enabled": true
     }
   },
+  "enable_humanized_states": {
+    "description": "启用拟人化身体/梦境状态",
+    "type": "bool",
+    "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
   "humanized_state_config": {
     "description": "拟人化状态",
     "type": "object",
@@ -3179,6 +3173,32 @@
         "default": 65,
         "condition": {
           "enable_rest_reply_simulation": true
+        }
+      },
+      "enable_rest_backlog_reply": {
+        "description": "启用休息积压回复",
+        "type": "bool",
+        "hint": "开启后，休息期间积压的消息会在醒来后优先处理。",
+        "default": true,
+        "condition": {
+          "enable_rest_reply_simulation": true,
+          "enable_humanized_states": true
+        }
+      },
+      "rest_backlog_max_messages": {
+        "description": "休息积压消息上限",
+        "type": "int",
+        "hint": "休息期间最多积压多少条消息用于醒来后处理。",
+        "default": 10,
+        "slider": {
+          "min": 1,
+          "max": 50,
+          "step": 1
+        },
+        "condition": {
+          "enable_rest_backlog_reply": true,
+          "enable_rest_reply_simulation": true,
+          "enable_humanized_states": true
         }
       }
     },
@@ -3722,98 +3742,6 @@
       "enabled": true
     }
   },
-  "screen_action_config": {
-    "description": "识屏操作",
-    "type": "object",
-    "hint": "“我会一直视奸你~”",
-    "items": {
-      "enable_screen_glance_action": {
-        "description": "允许主动看一眼屏幕",
-        "type": "bool",
-        "hint": "默认关闭。开启后，Bot 才可能在关心、好奇、确认状态等合适动机下调用屏幕陪伴插件观察当前屏幕；结果只作为 LLM 上下文，并会要求避免暴露隐私细节。识屏开始即计入额度，避免发送失败或重启后反复识屏。",
-        "default": false
-      },
-      "screen_peek_max_daily": {
-        "description": "每日主动识屏最多次数",
-        "type": "int",
-        "hint": "按用户计数。开始调用屏幕插件就会消耗额度，即使后续消息发送失败也不会立刻继续识屏。设为 0 表示禁止主动识屏。",
-        "slider": {
-          "min": 0,
-          "max": 5,
-          "step": 1
-        },
-        "default": 1,
-        "condition": {
-          "enable_screen_glance_action": true
-        }
-      },
-      "screen_peek_cooldown_minutes": {
-        "description": "主动识屏冷却分钟数",
-        "type": "int",
-        "hint": "按用户计时。用于防止多个主动候选在短时间内连续调用识屏。设为 0 表示不启用冷却，不建议。",
-        "slider": {
-          "min": 0,
-          "max": 1440,
-          "step": 10
-        },
-        "default": 240,
-        "condition": {
-          "enable_screen_glance_action": true
-        }
-      },
-      "enable_unanswered_screen_peek_followup": {
-        "description": "主动后沉默可额外窥屏",
-        "type": "bool",
-        "hint": "开启后，如果 Bot 因无聊或空档主动找用户，过一段时间用户仍未回复，Bot 可以额外窥屏确认用户在做什么。这类窥屏不消耗每日主动识屏次数，但仍受识屏插件可用性和冷却约束。",
-        "default": true,
-        "condition": {
-          "enable_screen_glance_action": true
-        }
-      },
-      "unanswered_screen_peek_after_minutes": {
-        "description": "主动后沉默窥屏等待分钟数",
-        "type": "int",
-        "hint": "主动消息发出后，用户持续没有回复多久才考虑触发这次额外窥屏。用户期间有新消息会自动取消。",
-        "slider": {
-          "min": 10,
-          "max": 240,
-          "step": 5
-        },
-        "default": 45,
-        "condition": {
-          "enable_unanswered_screen_peek_followup": true,
-          "enable_screen_glance_action": true
-        }
-      },
-      "unanswered_screen_peek_cooldown_minutes": {
-        "description": "沉默窥屏冷却分钟数",
-        "type": "int",
-        "hint": "只限制主动后沉默触发的额外窥屏，避免连续多轮主动后反复看屏。它不等同于每日次数上限。",
-        "slider": {
-          "min": 30,
-          "max": 1440,
-          "step": 10
-        },
-        "default": 180,
-        "condition": {
-          "enable_unanswered_screen_peek_followup": true,
-          "enable_screen_glance_action": true
-        }
-      },
-      "enable_yesterday_screen_diary_context": {
-        "description": "读取昨日屏幕观察日记",
-        "type": "bool",
-        "hint": "开启后，private_companion 每天只读取 screen_companion 的昨日观察日记脱敏摘要，作为今日状态和日程背景。不会读取今天实时屏幕，也会要求 Bot 不直接说“我昨天看到你”。",
-        "default": true,
-        "condition": {
-          "enable_screen_glance_action": true
-        }
-      }
-    },
-    "condition": {
-      "enabled": true
-    }
-  },
   "voice_tts_config": {
     "description": "TTS设置",
     "type": "object",
@@ -3905,12 +3833,10 @@
         "type": "string",
         "default": "global",
         "options": [
-          "global",
-          "legacy"
+          "global"
         ],
         "labels": [
-          "全局频控：间隔+概率控制双路径",
-          "旧版行为：按各路径原逻辑触发"
+          "全局频控：间隔+概率控制双路径"
         ],
         "hint": "选择频率规则。全局频控用概率影响快速标签模式下 LLM 是否倾向输出 TTS，并控制后处理模式是否进入判断+翻译；弱约束下显式 <pc_tts>/<tts> 不再被概率剥离，只受 provider 和会话间隔保护；强约束下按约束强度硬拦。旧版行为保留旧自动语音细项。",
         "condition": {
@@ -4064,27 +3990,6 @@
         "condition": {
           "enable_tts_local_playback": true,
           "enable_tts_enhancement": true
-        }
-      },
-      "auto_voice_enabled": {
-        "description": "自动语音转换",
-        "type": "bool",
-        "default": false,
-        "hint": "仅快速标签模式生效。开启后，当模型没有写 <pc_tts>/<tts> 时，普通纯文本回复可以进入自动语音转换；后处理模式不依赖这个开关。",
-        "condition": {
-          "enable_tts_enhancement": true,
-          "tts_generation_mode": "fast_tag"
-        }
-      },
-      "auto_voice_full_conversion_enabled": {
-        "description": "自动语音完整转换",
-        "type": "bool",
-        "default": false,
-        "hint": "仅快速标签模式的自动语音生效。开启后，自动语音尽量把整条回复完整转换为一段语音；关闭时更偏向混合文本+语音。",
-        "condition": {
-          "enable_tts_enhancement": true,
-          "auto_voice_enabled": true,
-          "tts_generation_mode": "fast_tag"
         }
       }
     },
@@ -4395,24 +4300,6 @@
         "default": 1.8
       }
     },
-    "condition": {
-      "enabled": true
-    }
-  },
-  "enable_group_companion": {
-    "description": "启用群聊陪伴观察",
-    "type": "bool",
-    "hint": "群聊观察的总开关。开启后，插件会在目标群里静默观察群聊气氛、群友发言和常见梗；默认不主动插话，只在 AstrBot 本身触发群聊回复时注入上下文。",
-    "default": true,
-    "condition": {
-      "enabled": true
-    }
-  },
-  "enable_humanized_states": {
-    "description": "启用拟人化身体/梦境状态",
-    "type": "bool",
-    "hint": "生成精力、睡眠、梦境、健康、饥饿、周期等当前扮演状态，并影响日程、主动消息和被动回复的语气节奏。",
-    "default": true,
     "condition": {
       "enabled": true
     }
