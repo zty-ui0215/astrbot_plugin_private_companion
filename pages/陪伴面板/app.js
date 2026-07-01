@@ -50,6 +50,8 @@ const state = {
   },
 };
 
+let bridgeReadyPromise = null;
+
 const hiddenCompatibilityConfigKeys = new Set([
   "enable_semantic_message_debounce",
   "semantic_message_debounce_seconds",
@@ -2024,13 +2026,14 @@ async function hydrateDailyOutfitLogo() {
 }
 
 async function fetchJson(path, options = {}) {
-  const bridge = await waitForBridge();
+  const debugHttp = new URLSearchParams(window.location.search).get("debug_http") === "1";
+  const bridge = debugHttp ? getBridge() : await waitForBridge();
   const method = (options.method || "GET").toUpperCase();
   let payload;
 
   if (bridge && typeof bridge.apiGet === "function" && typeof bridge.apiPost === "function") {
     payload = await bridgeRequest(bridge, path, method, options.body);
-  } else if (new URLSearchParams(window.location.search).get("debug_http") === "1") {
+  } else if (debugHttp) {
     const response = await fetch(`${HTTP_API}${path}`, {
       cache: "no-store",
       headers: options.body ? { "Content-Type": "application/json" } : undefined,
@@ -2064,14 +2067,29 @@ function getBridge() {
   return null;
 }
 
-async function waitForBridge(timeoutMs = 2500) {
+function isReadyBridge(bridge) {
+  return Boolean(bridge && typeof bridge.apiGet === "function" && typeof bridge.apiPost === "function");
+}
+
+async function waitForBridge(timeoutMs = 1200) {
+  const bridge = getBridge();
+  if (isReadyBridge(bridge)) return bridge;
+  if (!bridgeReadyPromise) {
+    bridgeReadyPromise = waitForBridgeReady(timeoutMs).finally(() => {
+      if (!isReadyBridge(getBridge())) bridgeReadyPromise = null;
+    });
+  }
+  return bridgeReadyPromise;
+}
+
+async function waitForBridgeReady(timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const bridge = getBridge();
-    if (bridge && typeof bridge.apiGet === "function" && typeof bridge.apiPost === "function") {
+    if (isReadyBridge(bridge)) {
       return bridge;
     }
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return getBridge();
 }
@@ -2398,23 +2416,32 @@ async function loadTroubleshooting() {
   return data;
 }
 
+async function loadUserGroupSummaries() {
+  const [users, groups] = await Promise.all([
+    fetchJson("/users?limit=300"),
+    fetchJson("/groups?limit=300"),
+  ]);
+  state.users = users.items || [];
+  state.groups = groups.items || [];
+  if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
+  if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
+  renderDashboard();
+  renderActiveTab(state.activeTab);
+  return { users, groups };
+}
+
 async function loadAll() {
   $("#subtitle").textContent = "读取运行态中...";
   try {
-    const [overview, users, groups] = await Promise.all([
-      fetchJson("/overview"),
-      fetchJson("/users?limit=300"),
-      fetchJson("/groups?limit=300"),
-    ]);
+    const overview = await fetchJson("/overview");
     state.overview = overview;
     hydrateTokenStatsFromOverview(overview);
-    state.users = users.items || [];
-    state.groups = groups.items || [];
     state.featureDraft = featureDraftFromOverview(overview);
-    if (!state.selectedUserId && state.users[0]) state.selectedUserId = state.users[0].user_id;
-    if (!state.selectedGroupId && state.groups[0]) state.selectedGroupId = state.groups[0].group_id;
     renderAll();
     void ensureTabData(state.activeTab, true);
+    loadUserGroupSummaries().catch((error) => {
+      showToast(`列表加载失败：${error.message}`, "error");
+    });
     $("#subtitle").textContent = `${overview.plugin.bot_name || "Private Companion"} · ${new Date().toLocaleString()}`;
   } catch (error) {
     $("#subtitle").textContent = `加载失败：${error.message}`;
@@ -8284,19 +8311,9 @@ function renderModuleSettings() {
   if (newsRaw) newsRaw.value = displaySettingValue("news_sources", settings.news_sources);
   fillForm("#roleplayProfileForm", formValues);
   fillForm("#privateAliasForm", formValues);
-  fillForm("#quickModuleForm", formValues);
-  fillForm("#environmentModuleForm", formValues);
-  fillForm("#privateModuleForm", formValues);
-  fillForm("#groupModuleForm", formValues);
-  fillForm("#worldbookModuleForm", formValues);
-  fillForm("#memoryModuleForm", formValues);
-  fillForm("#longTermModuleForm", formValues);
   setPrivateReadingConfigVisible(isPrivateReadingAvailable());
-  const targetBox = document.querySelector('#quickModuleForm [name="target_user_ids"]');
-  if (targetBox) targetBox.value = Array.isArray(settings.target_user_ids) ? settings.target_user_ids.join("\n") : "";
   document.querySelectorAll(".module-form").forEach((form) => markModuleFormClean(form));
   updateMessageDebounceConfigVisibility();
-  updateSegmentedConfigVisibility($("#privateModuleForm"));
   renderSegmentedPreview();
   renderNewsSourceManager();
   renderExternalAbilities();
@@ -8647,7 +8664,6 @@ function fillForm(selector, values) {
       input.value = displaySettingValue(input.name, value);
     }
   });
-  if (selector === "#longTermModuleForm") renderNewsSourceManager();
   if (selector === "#roleplayProfileForm") {
     hydrateRoleplayStandardFields();
     renderRoleplayKnowledgeSources();
@@ -9767,7 +9783,7 @@ function renderSegmentedPreview(panel = null) {
     const input = previewPanel.querySelector("[data-segmented-preview-input], #segmentedPreviewInput");
     const output = previewPanel.querySelector("[data-segmented-preview-output], #segmentedPreviewOutput");
     if (!input || !output) return;
-    const root = previewPanel.closest("[data-feature-param-form], #privateModuleForm") || document;
+    const root = previewPanel.closest("[data-feature-param-form]") || document;
     if (!input.value) input.value = segmentedPreviewExamples.simple;
     let result;
     try {
@@ -9849,14 +9865,14 @@ function bindSegmentedPreview(root = document) {
     if (control.dataset.segmentedConfigBound) return;
     control.dataset.segmentedConfigBound = "1";
     const handler = () => {
-      const owner = control.closest("[data-feature-param-form], #privateModuleForm") || scope;
+      const owner = control.closest("[data-feature-param-form]") || scope;
       updateSegmentedConfigVisibility(owner);
       renderSegmentedPreview();
     };
     control.addEventListener("input", handler);
     control.addEventListener("change", handler);
   });
-  scope.querySelectorAll("[data-feature-param-form], #privateModuleForm").forEach((form) => updateSegmentedConfigVisibility(form));
+  scope.querySelectorAll("[data-feature-param-form]").forEach((form) => updateSegmentedConfigVisibility(form));
   renderSegmentedPreview();
 }
 
@@ -12510,7 +12526,7 @@ document.addEventListener("change", (event) => {
 
 bindRoleplayModeSwitch();
 
-["roleplayProfileForm", "privateAliasForm", "quickModuleForm", "environmentModuleForm", "privateModuleForm", "groupModuleForm", "worldbookModuleForm", "memoryModuleForm", "longTermModuleForm"].forEach((formId) => {
+["roleplayProfileForm", "privateAliasForm"].forEach((formId) => {
   const form = document.getElementById(formId);
   if (!form) return;
   form.addEventListener("input", () => markModuleFormDirty(form));

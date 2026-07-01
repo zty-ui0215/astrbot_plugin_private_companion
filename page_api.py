@@ -21,9 +21,15 @@ from astrbot.api import logger
 from quart import request, send_file
 
 from .constants import _REASON_TEXT
-from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _today_key
-from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _today_key
-from .helpers import _flat_get, _safe_int, _set_into_config, _strip_internal_message_blocks, _text_looks_garbled, _text_similarity, _today_key
+from .helpers import (
+    _flat_get,
+    _safe_int,
+    _set_into_config,
+    _strip_internal_message_blocks,
+    _text_looks_garbled,
+    _text_similarity,
+    _today_key,
+)
 from .page_api_users_groups import PrivateCompanionPageApiUsersGroupsMixin
 
 PLUGIN_NAME = "astrbot_plugin_private_companion"

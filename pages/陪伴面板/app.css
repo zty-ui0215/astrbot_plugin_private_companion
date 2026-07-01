@@ -3250,10 +3250,6 @@ input[type="search"] {
   margin-bottom: 4px;
 }
 
-.legacy-module-config-grid[hidden] {
-  display: none !important;
-}
-
 .module-tool-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
