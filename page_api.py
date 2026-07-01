@@ -7251,9 +7251,8 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
         keys.update(self._schema_provider_keys(public_only=True))
         return keys
 
-    @staticmethod
-    def _allowed_setting_keys() -> set[str]:
-        return {
+    def _allowed_setting_keys(self) -> set[str]:
+        keys = {
             "bot_name",
             "enable_proactive_only_mode",
             "plugin_specific_persona_id",
@@ -7472,8 +7471,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "emotional_gate_refuse_threshold",
             "emotional_gate_recovery_per_hour",
             "emotional_gate_max_hurt_minutes",
-            "enable_llm_emotion_judgement",
-            "emotion_judgement_mode",
             "enable_skill_growth_simulation",
             "skill_growth_rate",
             "enable_skill_growth_passive_injection",
@@ -7498,8 +7495,6 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             "enable_web_exploration_boredom_search",
             "web_exploration_min_interval_hours",
             "web_exploration_share_probability",
-            "external_event_self_link_probability",
-            "external_event_self_link_cooldown_hours",
             "web_exploration_max_results",
             "web_exploration_interests",
             "enable_qzone_integration",

@@ -874,10 +874,10 @@ class ProactiveMessageMixin:
         return _single_line(text, 120) if text else cleaned_context
 
     def _sanitize_action_context_text(self, action: str, action_context: str) -> str:
-        text = str(action_context or "").strip()
-        return text
+        lines = [line.strip() for line in str(action_context or "").splitlines() if line.strip()]
+        collapsed = " ".join(lines) if lines else str(action_context or "").strip()
         collapsed = re.sub(r"\s+", " ", collapsed).strip(",。！？ ")
-        if not collapsed:
+        if not collapsed and lines:
             collapsed = lines[0]
         return _single_line(collapsed, 140)
 
