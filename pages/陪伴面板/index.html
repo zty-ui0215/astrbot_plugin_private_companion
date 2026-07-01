@@ -951,9 +951,6 @@ QQ空间 = 公开札记
               <label data-fixed-text-debounce-field>文本补话等待秒数 <input name="text_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
               <label>图片补话等待秒数 <input name="image_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
               <label>转发补话等待秒数 <input name="forward_message_debounce_seconds" type="number" min="0" max="15" step="0.1" /></label>
-              <label class="toggle-row"><input name="enable_unanswered_screen_peek_followup" type="checkbox" /> <span>主动后沉默时可窥屏</span></label>
-              <label>沉默多久后窥屏 <input name="unanswered_screen_peek_after_minutes" type="number" min="10" max="240" /></label>
-              <label>沉默窥屏冷却分钟 <input name="unanswered_screen_peek_cooldown_minutes" type="number" min="30" max="1440" /></label>
               <div class="module-subgroup wide-field image-cache-entry">
                 <h3>图片/表情包缓存</h3>
                 <p class="section-desc">管理已缓存的图片视觉摘要，修正误识别表情包或删除旧缓存后可让下次重新识图。</p>
@@ -1112,14 +1109,6 @@ QQ空间 = 公开札记
               <span class="module-badge">高级</span>
             </div>
             <form id="longTermModuleForm" class="module-form">
-              <div class="module-subgroup">
-                <h3>B 站 Bot 联动</h3>
-                <label class="toggle-row"><input name="enable_bilibili_integration" type="checkbox" /> <span>启用 B 站 Bot 协同</span></label>
-                <label class="toggle-row"><input name="enable_bilibili_boredom_watch" type="checkbox" /> <span>无聊时触发刷 B 站</span></label>
-                <label>B 站触发最小间隔小时 <input name="bilibili_boredom_min_interval_hours" type="number" min="2" max="72" /></label>
-                <label>视频分享概率（%） <input name="bilibili_share_probability" type="number" min="0" max="100" step="1" /></label>
-                <label>视频分享最低评分 <input name="bilibili_share_min_score" type="number" min="0" max="10" /></label>
-              </div>
               <div class="module-subgroup">
                 <h3>QQ 空间动态</h3>
                 <label class="toggle-row"><input name="enable_qzone_integration" type="checkbox" /> <span>启用 QQ 空间动态层</span></label>
