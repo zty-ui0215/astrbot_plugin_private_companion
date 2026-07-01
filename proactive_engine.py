@@ -2049,6 +2049,17 @@ class ProactiveEngineMixin:
             self._promote_due_llm_timer_plan(user, now=now)
             planned_reason = self._normalize_legacy_proactive_text(user.get("planned_proactive_reason"), limit=40)
             planned_source = self._normalize_legacy_proactive_text(user.get("planned_proactive_source"), limit=40) or planned_source
+        if (
+            not is_troubleshooting
+            and not self.enable_daily_greetings
+            and self._is_greeting_reason(planned_reason)
+            and planned_source != "timer"
+            and not due_timer_active
+        ):
+            self._mark_planned_candidate_status(user, "blocked", "早中晚锚点问候已关闭")
+            self._clear_pending_proactive_plan(user)
+            self._schedule_next_proactive(user, now=now, delay_hours=(1.0, 3.0))
+            return False, "早中晚锚点问候已关闭"
         next_at = _safe_float(user.get("next_proactive_at"), 0)
         planned_impulse_id = _single_line(user.get("planned_proactive_impulse_id"), 20)
         planned_expire_at = _safe_float(user.get("planned_proactive_expire_at"), 0)
@@ -3119,6 +3130,13 @@ class ProactiveEngineMixin:
             return
         now = now or _now_ts()
         remaining = [event for event in events if isinstance(event, dict)]
+        if not self.enable_daily_greetings:
+            remaining = [
+                event
+                for event in remaining
+                if not self._is_greeting_reason(str(event.get("reason") or ""))
+            ]
+            sim["events"] = remaining
         if not remaining:
             self._finish_simulation_mode(user)
             return
@@ -3888,6 +3906,8 @@ class ProactiveEngineMixin:
         }
 
     def _build_simulation_greeting_events(self) -> list[dict[str, Any]]:
+        if not self.enable_daily_greetings:
+            return []
         return [
             {
                 "window": "08:15-10:10",
@@ -3928,6 +3948,12 @@ class ProactiveEngineMixin:
         if isinstance(story_events, list):
             candidates.extend(event for event in story_events if isinstance(event, dict))
         candidates.extend(self._build_simulation_greeting_events())
+        if not self.enable_daily_greetings:
+            candidates = [
+                event
+                for event in candidates
+                if not self._is_greeting_reason(str(event.get("reason") or ""))
+            ]
         deduped = self._dedupe_proactive_events(candidates)
         ranked = sorted(
             deduped,
@@ -3945,7 +3971,11 @@ class ProactiveEngineMixin:
             if len(selected) >= base_target:
                 break
         if not selected:
-            selected = [dict(item) for item in _SIMULATION_FALLBACK_EVENTS]
+            selected = [
+                dict(item)
+                for item in _SIMULATION_FALLBACK_EVENTS
+                if self.enable_daily_greetings or not self._is_greeting_reason(str(item.get("reason") or ""))
+            ]
         selected = [dict(item) for item in selected]
         for item in selected:
             item["motive"] = self._normalize_event_motive(item)

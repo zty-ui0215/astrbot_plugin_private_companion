@@ -97,6 +97,7 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             ("/proactive_only/unlock", self.update_proactive_only_unlock, ["POST"], "Private Companion Page proactive-only temporary unlock"),
             ("/diagnostics", self.get_diagnostics, ["GET"], "Private Companion Page diagnostics"),
             ("/troubleshooting", self.get_troubleshooting, ["GET"], "Private Companion Page troubleshooting"),
+            ("/troubleshooting/clear", self.clear_troubleshooting_records, ["POST"], "Private Companion Page clear troubleshooting warning records"),
             ("/troubleshooting/test", self.run_troubleshooting_test, ["POST"], "Private Companion Page troubleshooting test"),
             ("/token/stats", self.get_token_stats, ["GET"], "Private Companion Page token stats"),
             ("/token/reset", self.reset_token_stats, ["POST"], "Private Companion Page reset token stats"),
@@ -909,6 +910,60 @@ class PrivateCompanionPageApi(PrivateCompanionPageApiUsersGroupsMixin):
             )
         except Exception as exc:
             logger.error(f"[PrivateCompanionPage] 获取排障信息失败: {exc}", exc_info=True)
+            return self._error(str(exc))
+
+    async def clear_troubleshooting_records(self) -> dict[str, Any]:
+        try:
+            cleared: dict[str, int] = {}
+            async with self.plugin._data_lock:
+                data = self.plugin.data if isinstance(self.plugin.data, dict) else {}
+
+                for key in ("troubleshooting_records", "troubleshooting_test_results"):
+                    value = data.get(key)
+                    if isinstance(value, dict):
+                        cleared[key] = len(value)
+                    elif isinstance(value, list):
+                        cleared[key] = len(value)
+                    elif value:
+                        cleared[key] = 1
+                    data.pop(key, None)
+
+                audit_log = data.get("proactive_audit_log")
+                if isinstance(audit_log, list):
+                    cleared["proactive_audit_log"] = len(audit_log)
+                    data["proactive_audit_log"] = []
+
+                candidates = data.get("proactive_candidate_pool")
+                if isinstance(candidates, list):
+                    kept_candidates = [
+                        item
+                        for item in candidates
+                        if not (
+                            isinstance(item, dict)
+                            and self._single_line(item.get("status"), 24) in {"blocked", "failed", "dropped", "deferred"}
+                        )
+                    ]
+                    cleared["proactive_candidate_pool"] = len(candidates) - len(kept_candidates)
+                    data["proactive_candidate_pool"] = kept_candidates
+
+                token_usage = data.get("token_usage")
+                if isinstance(token_usage, dict):
+                    recent = token_usage.get("recent")
+                    if isinstance(recent, list):
+                        kept_recent = [
+                            item
+                            for item in recent
+                            if not (isinstance(item, dict) and item.get("success") is False)
+                        ]
+                        cleared["token_usage_recent_failures"] = len(recent) - len(kept_recent)
+                        token_usage["recent"] = kept_recent
+
+                self.plugin._save_data_sync()
+
+            total = sum(max(0, self._int(value)) for value in cleared.values())
+            return self._ok({"cleared": cleared, "total": total})
+        except Exception as exc:
+            logger.error(f"[PrivateCompanionPage] 清除排障警告记录失败: {exc}", exc_info=True)
             return self._error(str(exc))
 
     async def run_troubleshooting_test(self) -> dict[str, Any]:

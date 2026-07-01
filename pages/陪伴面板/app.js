@@ -8301,6 +8301,52 @@ function statusText(value) {
   return toBool(value) ? "开启" : "关闭";
 }
 
+function confirmDangerAction({ title, message, confirmText = "确认", cancelText = "取消" } = {}) {
+  return new Promise((resolve) => {
+    const existing = document.querySelector(".confirm-dialog-overlay");
+    if (existing) existing.remove();
+
+    const overlay = document.createElement("div");
+    overlay.className = "confirm-dialog-overlay";
+    overlay.setAttribute("role", "presentation");
+    overlay.innerHTML = `
+      <section class="confirm-dialog danger" role="dialog" aria-modal="true" aria-labelledby="confirmDialogTitle">
+        <header>
+          <span>Warning</span>
+          <h2 id="confirmDialogTitle">${escapeHtml(title || "确认操作")}</h2>
+        </header>
+        <p>${escapeHtml(message || "确认继续执行该操作吗？")}</p>
+        <footer>
+          <button type="button" data-confirm-cancel>${escapeHtml(cancelText)}</button>
+          <button type="button" class="danger" data-confirm-ok>${escapeHtml(confirmText)}</button>
+        </footer>
+      </section>
+    `;
+    document.body.appendChild(overlay);
+
+    const dialog = overlay.querySelector(".confirm-dialog");
+    const okButton = overlay.querySelector("[data-confirm-ok]");
+    const cancelButton = overlay.querySelector("[data-confirm-cancel]");
+
+    const close = (value) => {
+      document.removeEventListener("keydown", onKeyDown);
+      overlay.remove();
+      resolve(value);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") close(false);
+    };
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) close(false);
+    });
+    okButton?.addEventListener("click", () => close(true));
+    cancelButton?.addEventListener("click", () => close(false));
+    document.addEventListener("keydown", onKeyDown);
+    window.setTimeout(() => (okButton || cancelButton || dialog)?.focus?.(), 0);
+  });
+}
+
 function renderModuleSettings() {
   const settings = state.overview?.settings || {};
   const formValues = { ...settings, ...(state.featureDraft || {}) };
@@ -11978,6 +12024,27 @@ document.addEventListener("click", async (event) => {
       showToast(`刷新失败：${error.message}`, "error");
     } finally {
       setActionBusy(troubleshootingRefresh, false);
+    }
+    return;
+  }
+  const troubleshootingClear = element?.closest("[data-troubleshooting-clear]");
+  if (troubleshootingClear) {
+    const confirmed = await confirmDangerAction({
+      title: "消除警告记录",
+      message: "将清除排障页里已经记录的警告、错误和链路测试结果。实时配置问题如果仍然存在，重新检查后还会再次出现。",
+      confirmText: "确认清除",
+      cancelText: "取消",
+    });
+    if (!confirmed) return;
+    setActionBusy(troubleshootingClear, true);
+    try {
+      const result = await postJson("/troubleshooting/clear", {});
+      await loadTroubleshooting();
+      showToast(`已清除 ${Number(result?.total || 0)} 条排障记录`);
+    } catch (error) {
+      showToast(`清除失败：${error.message}`, "error");
+    } finally {
+      setActionBusy(troubleshootingClear, false);
     }
     return;
   }
